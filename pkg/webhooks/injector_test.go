@@ -1,7 +1,6 @@
 package webhooks
 
 import (
-	"encoding/base64"
 	"testing"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
@@ -10,7 +9,6 @@ import (
 
 func TestInjectCABundle(t *testing.T) {
 	caCert := []byte("test-ca-certificate")
-	caBundle := base64.StdEncoding.EncodeToString(caCert)
 
 	mutating := &admissionv1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-mutating"},
@@ -49,17 +47,17 @@ func TestInjectCABundle(t *testing.T) {
 
 	InjectCABundle(configs, caCert)
 
-	// Check mutating webhooks
+	// Check mutating webhooks - verify raw PEM bytes are stored
 	for i, webhook := range configs.Mutating[0].Webhooks {
-		if string(webhook.ClientConfig.CABundle) != caBundle {
-			t.Errorf("Mutating webhook %d: expected CA bundle '%s', got '%s'", i, caBundle, string(webhook.ClientConfig.CABundle))
+		if string(webhook.ClientConfig.CABundle) != string(caCert) {
+			t.Errorf("Mutating webhook %d: expected CA bundle '%s', got '%s'", i, string(caCert), string(webhook.ClientConfig.CABundle))
 		}
 	}
 
-	// Check validating webhooks
+	// Check validating webhooks - verify raw PEM bytes are stored
 	for i, webhook := range configs.Validating[0].Webhooks {
-		if string(webhook.ClientConfig.CABundle) != caBundle {
-			t.Errorf("Validating webhook %d: expected CA bundle '%s', got '%s'", i, caBundle, string(webhook.ClientConfig.CABundle))
+		if string(webhook.ClientConfig.CABundle) != string(caCert) {
+			t.Errorf("Validating webhook %d: expected CA bundle '%s', got '%s'", i, string(caCert), string(webhook.ClientConfig.CABundle))
 		}
 	}
 }
