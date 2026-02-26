@@ -181,43 +181,21 @@ Files written to `CERT_DIR`:
 
 ## Webhook Server Certificate Reloading
 
-For controller-runtime based webhook servers, use `certwatcher` to automatically reload certificates when files change:
+For controller-runtime based webhook servers (v0.17+), certificate reloading is **automatic**. Simply configure the webhook server with the certificate directory:
 
 ```go
 import (
-    "sigs.k8s.io/controller-runtime/pkg/certwatcher"
+    ctrl "sigs.k8s.io/controller-runtime"
     "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
 func main() {
-    // Create certificate watcher
-    certWatcher, err := certwatcher.New(
-        "/tmp/webhook-certs/tls.crt",
-        "/tmp/webhook-certs/tls.key",
-    )
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Start watcher in background
-    go func() {
-        if err := certWatcher.Start(ctx); err != nil {
-            log.Fatal(err)
-        }
-    }()
-
-    // Configure webhook server to use watcher
     mgr, _ := ctrl.NewManager(cfg, ctrl.Options{
         WebhookServer: webhook.NewServer(webhook.Options{
-            Port:         9443,
-            CertDir:      "/tmp/webhook-certs",
-            CertName:     "tls.crt",
-            KeyName:      "tls.key",
-            TLSOpts: []func(*tls.Config){
-                func(c *tls.Config) {
-                    c.GetCertificate = certWatcher.GetCertificate
-                },
-            },
+            Port:     9443,
+            CertDir:  "/tmp/webhook-certs",
+            CertName: "tls.crt",
+            KeyName:  "tls.key",
         }),
     })
 
@@ -228,11 +206,11 @@ func main() {
 }
 ```
 
-**Key points:**
-- `certwatcher` monitors certificate files using fsnotify
-- Hot-reloads certificates without restarting the server
-- No webhook downtime during certificate rotation
-- Works with any controller-runtime webhook server
+**That's it!** The webhook server automatically:
+- Creates an internal `certwatcher` to monitor certificate files using fsnotify
+- Hot-reloads certificates when `tls.crt` or `tls.key` change
+- Provides zero-downtime certificate rotation
+- No manual setup or code required
 
 ## Development
 
