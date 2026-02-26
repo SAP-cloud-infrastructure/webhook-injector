@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -65,8 +66,22 @@ func (r *CertificateReloader) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 // writeCertFile writes certificate data to disk atomically (temp file + rename)
+// Optimization: Only writes if content has changed to avoid unnecessary webhook server reloads
 func (r *CertificateReloader) writeCertFile(fileName string, data []byte) error {
 	targetPath := filepath.Join(r.Config.CertDir, fileName)
+
+	// Check if file exists and compare content
+	existingData, err := os.ReadFile(targetPath)
+	if err == nil {
+		// File exists, compare content
+		if bytes.Equal(existingData, data) {
+			// Content unchanged, skip write to avoid unnecessary file modification
+			// This prevents triggering webhook server reloads when certs haven't changed
+			return nil
+		}
+	}
+	// If file doesn't exist (err != nil) or content differs, proceed with write
+
 	tempPath := targetPath + ".tmp"
 
 	// Write to temp file
