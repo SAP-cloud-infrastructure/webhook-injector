@@ -95,15 +95,15 @@ func main() {
 	//   → Each replica syncs certificates to its own filesystem
 	//   → Enables webhook servers on all replicas to reload certificates
 	//
-	// - LeaderReconciler: does NOT implement NeedLeaderElection (defaults to true)
+	// - WebhookReconciler: does NOT implement NeedLeaderElection (defaults to true)
 	//   → Runs ONLY on the leader replica
 	//   → Prevents multiple replicas from generating different certificates
 	//   → Prevents race conditions when applying webhooks to target cluster
 	//
 	// Example with 3 replicas:
-	//   Replica 1 (Leader):    CertificateReloader ✓  LeaderReconciler ✓
-	//   Replica 2 (Follower):  CertificateReloader ✓  LeaderReconciler ✗
-	//   Replica 3 (Follower):  CertificateReloader ✓  LeaderReconciler ✗
+	//   Replica 1 (Leader):    CertificateReloader ✓  WebhookReconciler ✓
+	//   Replica 2 (Follower):  CertificateReloader ✓  WebhookReconciler ✗
+	//   Replica 3 (Follower):  CertificateReloader ✓  WebhookReconciler ✗
 
 	// Set up certificate reloader (runs on ALL replicas via NeedLeaderElection() = false)
 	certReloader := &controllers.CertificateReloader{
@@ -116,18 +116,19 @@ func main() {
 	}
 	setupLog.Info("CertificateReloader controller registered (runs on all replicas)")
 
-	// Set up leader reconciler (runs on leader ONLY via default leader election behavior)
-	leaderReconciler := &controllers.LeaderReconciler{
+	// Set up webhook reconciler (generates certificates and applies webhooks)
+	// Runs on leader ONLY via default leader election behavior to prevent conflicts
+	webhookReconciler := &controllers.WebhookReconciler{
 		Client:       mgr.GetClient(),
 		TargetClient: targetClient,
 		Config:       cfg,
 		Scheme:       mgr.GetScheme(),
 	}
-	if err := leaderReconciler.SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Unable to create LeaderReconciler controller")
+	if err := webhookReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Unable to create WebhookReconciler controller")
 		os.Exit(1)
 	}
-	setupLog.Info("LeaderReconciler controller registered (runs on leader only)")
+	setupLog.Info("WebhookReconciler controller registered (runs on leader only)")
 
 	// Add health checks
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

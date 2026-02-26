@@ -20,12 +20,12 @@ func TestCertificateReloaderDoesNotNeedLeaderElection(t *testing.T) {
 	t.Error("CertificateReloader.NeedLeaderElection() should return false (should run on all replicas)")
 }
 
-// TestLeaderReconcilerNeedsLeaderElection verifies that LeaderReconciler
+// TestWebhookReconcilerNeedsLeaderElection verifies that WebhookReconciler
 // either doesn't implement LeaderElectionRunnable (defaults to true) or returns true
-func TestLeaderReconcilerNeedsLeaderElection(t *testing.T) {
-	reconciler := &controllers.LeaderReconciler{}
+func TestWebhookReconcilerNeedsLeaderElection(t *testing.T) {
+	reconciler := &controllers.WebhookReconciler{}
 
-	// LeaderReconciler should either not implement the interface (defaults to needing LE)
+	// WebhookReconciler should either not implement the interface (defaults to needing LE)
 	// or implement it and return true
 
 	// Try to call NeedLeaderElection - if it exists and returns false, that's wrong
@@ -35,7 +35,7 @@ func TestLeaderReconcilerNeedsLeaderElection(t *testing.T) {
 
 	if ler, ok := interface{}(reconciler).(leaderElectionRunnable); ok {
 		if !ler.NeedLeaderElection() {
-			t.Error("LeaderReconciler.NeedLeaderElection() should return true (should run only on leader)")
+			t.Error("WebhookReconciler.NeedLeaderElection() should return true (should run only on leader)")
 		}
 	}
 	// If interface not implemented, that's fine - defaults to needing leader election

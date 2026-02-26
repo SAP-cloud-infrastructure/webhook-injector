@@ -100,8 +100,8 @@ func TestIntegration_EndToEnd(t *testing.T) {
 		SyncPeriod:             1 * time.Minute,
 	}
 
-	// Run leader reconciler once
-	reconciler := &controllers.LeaderReconciler{
+	// Run webhook reconciler once
+	reconciler := &controllers.WebhookReconciler{
 		Client:       k8sClient,
 		TargetClient: k8sClient,
 		Config:       appCfg,
@@ -253,7 +253,7 @@ webhooks:
 		SyncPeriod:             1 * time.Minute,
 	}
 
-	reconciler := &controllers.LeaderReconciler{
+	reconciler := &controllers.WebhookReconciler{
 		Client:       k8sClient,
 		TargetClient: k8sClient,
 		Config:       appCfg,
@@ -486,7 +486,7 @@ func TestIntegration_ErrorHandling(t *testing.T) {
 		SyncPeriod:             1 * time.Minute,
 	}
 
-	reconciler := &controllers.LeaderReconciler{
+	reconciler := &controllers.WebhookReconciler{
 		Client:       k8sClient,
 		TargetClient: k8sClient,
 		Config:       appCfg,
@@ -625,7 +625,7 @@ func TestIntegration_MultiReplicaBehavior(t *testing.T) {
 		SyncPeriod:             1 * time.Minute,
 	}
 
-	leaderReconciler := &controllers.LeaderReconciler{
+	webhookReconciler := &controllers.WebhookReconciler{
 		Client:       k8sClient,
 		TargetClient: k8sClient,
 		Config:       leaderCfg,
@@ -633,7 +633,7 @@ func TestIntegration_MultiReplicaBehavior(t *testing.T) {
 	}
 
 	// Leader generates certificates
-	_, err = leaderReconciler.Reconcile(ctx, ctrl.Request{
+	_, err = webhookReconciler.Reconcile(ctx, ctrl.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      "webhook-config-replicas",
 			Namespace: "test-replicas",

@@ -24,8 +24,8 @@ import (
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/webhooks"
 )
 
-// LeaderReconciler reconciles webhook ConfigMap and manages certificates
-type LeaderReconciler struct {
+// WebhookReconciler reconciles webhook ConfigMap and manages certificates
+type WebhookReconciler struct {
 	Client       client.Client // Hosting cluster client
 	TargetClient client.Client // Target cluster client
 	Config       *config.Config
@@ -33,7 +33,7 @@ type LeaderReconciler struct {
 }
 
 // Reconcile handles ConfigMap changes and certificate rotation
-func (r *LeaderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
 	// Fetch the ConfigMap
@@ -102,7 +102,7 @@ func (r *LeaderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 }
 
 // checkCertificates checks if certificates exist and are valid
-func (r *LeaderReconciler) checkCertificates(ctx context.Context, services []certificates.ServiceReference) (*corev1.Secret, bool, error) {
+func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []certificates.ServiceReference) (*corev1.Secret, bool, error) {
 	secretKey := types.NamespacedName{
 		Name:      r.Config.CertSecretName,
 		Namespace: r.getNamespace(r.Config.CertSecretNamespace),
@@ -127,7 +127,7 @@ func (r *LeaderReconciler) checkCertificates(ctx context.Context, services []cer
 }
 
 // needsCertificateRotation checks if certificate needs rotation based on expiry and SANs
-func (r *LeaderReconciler) needsCertificateRotation(secret *corev1.Secret, services []certificates.ServiceReference) (bool, error) {
+func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, services []certificates.ServiceReference) (bool, error) {
 	// Get server certificate from secret
 	certPEM, ok := secret.Data["tls.crt"]
 	if !ok {
@@ -207,7 +207,7 @@ func buildExpectedSANs(services []certificates.ServiceReference) map[string]bool
 }
 
 // generateAndStoreCertificates generates certificates and stores them in a Secret
-func (r *LeaderReconciler) generateAndStoreCertificates(ctx context.Context, services []certificates.ServiceReference) error {
+func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, services []certificates.ServiceReference) error {
 	validity := time.Duration(r.Config.CertValidityDays) * 24 * time.Hour
 
 	// Generate CA
@@ -250,7 +250,7 @@ func (r *LeaderReconciler) generateAndStoreCertificates(ctx context.Context, ser
 }
 
 // applyWebhookConfigurations applies webhook configs to target cluster
-func (r *LeaderReconciler) applyWebhookConfigurations(ctx context.Context, configs *webhooks.WebhookConfigurations) error {
+func (r *WebhookReconciler) applyWebhookConfigurations(ctx context.Context, configs *webhooks.WebhookConfigurations) error {
 	log := log.FromContext(ctx)
 
 	// Apply mutating webhook configurations
@@ -311,7 +311,7 @@ func (r *LeaderReconciler) applyWebhookConfigurations(ctx context.Context, confi
 }
 
 // getNamespace returns the namespace, using pod namespace as fallback
-func (r *LeaderReconciler) getNamespace(namespace string) string {
+func (r *WebhookReconciler) getNamespace(namespace string) string {
 	if namespace != "" {
 		return namespace
 	}
@@ -323,7 +323,7 @@ func (r *LeaderReconciler) getNamespace(namespace string) string {
 }
 
 // SetupWithManager sets up the controller with the Manager
-func (r *LeaderReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Only watch the specific webhook ConfigMap
 	configMapPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
 		return object.GetName() == r.Config.WebhookConfigName &&

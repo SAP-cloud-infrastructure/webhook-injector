@@ -19,7 +19,7 @@ import (
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/config"
 )
 
-func TestLeaderReconciler_ReconcileConfigMap(t *testing.T) {
+func TestWebhookReconciler_ReconcileConfigMap(t *testing.T) {
 	s := runtime.NewScheme()
 	_ = corev1.AddToScheme(s)
 	_ = admissionv1.AddToScheme(s)
@@ -63,7 +63,7 @@ webhooks:
 		CertDir:                t.TempDir(),
 	}
 
-	reconciler := &LeaderReconciler{
+	reconciler := &WebhookReconciler{
 		Client:       fakeClient,
 		TargetClient: fakeClient, // Same for test
 		Config:       cfg,
@@ -128,7 +128,7 @@ webhooks:
 	}
 }
 
-func TestLeaderReconciler_ApplyWebhooks(t *testing.T) {
+func TestWebhookReconciler_ApplyWebhooks(t *testing.T) {
 	s := runtime.NewScheme()
 	_ = corev1.AddToScheme(s)
 	_ = admissionv1.AddToScheme(s)
@@ -176,7 +176,7 @@ webhooks:
 		CertDir:                t.TempDir(),
 	}
 
-	reconciler := &LeaderReconciler{
+	reconciler := &WebhookReconciler{
 		Client:       hostingClient,
 		TargetClient: targetClient,
 		Config:       cfg,
@@ -213,7 +213,7 @@ webhooks:
 	}
 }
 
-func TestLeaderReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) {
+func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) {
 	s := runtime.NewScheme()
 	_ = corev1.AddToScheme(s)
 
@@ -262,7 +262,7 @@ func TestLeaderReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) {
 		WithObjects(secret).
 		Build()
 
-	reconciler := &LeaderReconciler{
+	reconciler := &WebhookReconciler{
 		Client: fakeClient,
 		Config: cfg,
 		Scheme: s,
@@ -322,7 +322,7 @@ func TestLeaderReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) {
 	}
 }
 
-func TestLeaderReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) {
+func TestWebhookReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) {
 	s := runtime.NewScheme()
 	_ = corev1.AddToScheme(s)
 
@@ -366,7 +366,7 @@ func TestLeaderReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) {
 		WithObjects(secret).
 		Build()
 
-	reconciler := &LeaderReconciler{
+	reconciler := &WebhookReconciler{
 		Client: fakeClient,
 		Config: cfg,
 		Scheme: s,
@@ -383,7 +383,7 @@ func TestLeaderReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) {
 	}
 }
 
-func TestLeaderReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testing.T) {
+func TestWebhookReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testing.T) {
 	s := runtime.NewScheme()
 	_ = corev1.AddToScheme(s)
 
@@ -427,7 +427,7 @@ func TestLeaderReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testing
 		WithObjects(secret).
 		Build()
 
-	reconciler := &LeaderReconciler{
+	reconciler := &WebhookReconciler{
 		Client: fakeClient,
 		Config: cfg,
 		Scheme: s,
