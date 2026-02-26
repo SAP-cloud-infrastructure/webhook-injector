@@ -1,0 +1,22 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-service
+        namespace: test-integration
+        path: /mutate
+        port: 9443
+      caBundle: ""
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        resources: ["deployments"]
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail

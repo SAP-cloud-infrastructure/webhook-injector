@@ -18,6 +18,10 @@ fmt:
 vet:
 	go vet ./...
 
+.PHONY: test-integration
+test-integration:
+	KUBEBUILDER_ASSETS="$(shell setup-envtest use -p path 1.29.x)" go test -v -tags=integration ./test/integration/...
+
 .PHONY: docker-build
 docker-build:
 	docker build -t webhook-injector:latest .
