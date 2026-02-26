@@ -10,6 +10,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/config"
 )
@@ -77,7 +78,26 @@ func (r *CertificateReloader) writeCertFile(fileName string, data []byte) error 
 
 // SetupWithManager sets up the controller with the Manager
 func (r *CertificateReloader) SetupWithManager(mgr ctrl.Manager) error {
+	// Only watch the specific certificate Secret
+	secretPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
+		return object.GetName() == r.Config.CertSecretName &&
+			object.GetNamespace() == r.getNamespace()
+	})
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Secret{}).
+		WithEventFilter(secretPredicate).
 		Complete(r)
+}
+
+// getNamespace returns the configured namespace or pod namespace
+func (r *CertificateReloader) getNamespace() string {
+	if r.Config.CertSecretNamespace != "" {
+		return r.Config.CertSecretNamespace
+	}
+	// Try to read from pod
+	if ns, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		return string(ns)
+	}
+	return "default"
 }
