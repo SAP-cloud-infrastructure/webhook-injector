@@ -5,27 +5,49 @@ A Kubernetes controller that runs as a sidecar to webhook servers, managing the 
 ## Features
 
 - **Automatic Certificate Management**: Generates and rotates CA and server certificates
+- **Smart Certificate Rotation**: Time-based (80% of validity) and config-based (SAN changes)
 - **Remote Cluster Support**: Manage webhooks in clusters where the webhook server doesn't run
+- **URL and Service Support**: Webhooks can reference services (in-cluster) or URLs (remote)
 - **Generic Solution**: Works with any webhook server (any language/framework)
-- **Dynamic SANs**: Generates certificates with SANs extracted from webhook service references
+- **Dynamic SANs**: Generates certificates with SANs extracted from webhook service references or URLs
 - **Leader Election**: Supports high-availability deployments with multiple replicas
 - **Certificate Reloading**: All replicas stay synchronized with latest certificates
+- **Performance Optimized**: Skips writing certificates when content unchanged to prevent unnecessary webhook server reloads
 
 ## Architecture
 
 webhook-injector runs as a sidecar with two internal controllers:
 
-1. **Leader Reconciler** (leader-only):
-   - Watches webhook ConfigMap for changes
-   - Generates/rotates CA + server certificates with dynamic SANs
-   - Writes certificates to Secret in hosting cluster
-   - Injects CA bundle into webhook configurations
-   - Applies webhook configurations to target cluster
+### 1. WebhookReconciler (runs on leader only)
+   - **What it does**: Manages webhook lifecycle and certificate generation
+   - **Watches**: Webhook ConfigMap for changes
+   - **Generates**: CA + server certificates with dynamic SANs from service/URL references
+   - **Rotates**: Certificates when approaching expiry or when SANs change
+   - **Stores**: Certificates in Secret in hosting cluster
+   - **Injects**: CA bundle into webhook configurations
+   - **Applies**: Webhook configurations to target cluster
+   - **Why leader-only**: Prevents multiple replicas from generating conflicting certificates
 
-2. **Certificate Reloader** (all replicas):
-   - Watches certificate Secret in hosting cluster
-   - Writes certificates to shared emptyDir volume
-   - All replicas stay synchronized
+### 2. CertificateReloader (runs on all replicas)
+   - **What it does**: Syncs certificates from Secret to local filesystem
+   - **Watches**: Certificate Secret in hosting cluster
+   - **Writes**: Certificates to shared emptyDir volume (`/tmp/webhook-certs`)
+   - **Optimizes**: Skips writes if certificate content unchanged
+   - **Keeps**: All replicas synchronized with latest certificates
+   - **Why all replicas**: Each webhook server pod needs certificates on its filesystem
+
+### Leader Election Details
+
+Uses controller-runtime's `LeaderElectionRunnable` interface:
+- **WebhookReconciler**: Does NOT implement `NeedLeaderElection()` → defaults to requiring leader election
+- **CertificateReloader**: Implements `NeedLeaderElection() = false` → runs on all replicas
+
+Example with 3 replicas:
+```
+Replica 1 (Leader):    WebhookReconciler ✓  CertificateReloader ✓
+Replica 2 (Follower):  WebhookReconciler ✗  CertificateReloader ✓
+Replica 3 (Follower):  WebhookReconciler ✗  CertificateReloader ✓
+```
 
 ## Quick Start
 
@@ -62,13 +84,14 @@ data:
       name: my-webhook
     webhooks:
       - name: mutate.example.com
+        # Option 1: Service reference (in-cluster webhook)
         clientConfig:
           service:
             name: webhook-service
             namespace: default
             path: /mutate
             port: 9443
-          caBundle: ""
+          caBundle: ""  # Automatically injected
         rules:
           - operations: ["CREATE", "UPDATE"]
             apiGroups: ["apps"]
@@ -77,6 +100,24 @@ data:
         admissionReviewVersions: ["v1"]
         sideEffects: None
         failurePolicy: Fail
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingWebhookConfiguration
+    metadata:
+      name: remote-webhook
+    webhooks:
+      - name: validate.example.com
+        # Option 2: URL reference (remote cluster webhook)
+        clientConfig:
+          url: "https://webhook.remote-cluster.com:9443/validate"
+          caBundle: ""  # Automatically injected
+        rules:
+          - operations: ["CREATE"]
+            apiGroups: [""]
+            apiVersions: ["v1"]
+            resources: ["pods"]
+        admissionReviewVersions: ["v1"]
+        sideEffects: None
 EOF
 ```
 
@@ -87,6 +128,18 @@ export WEBHOOK_CONFIG_NAME=webhook-config
 export WEBHOOK_CONFIG_NAMESPACE=default
 ./bin/webhook-injector
 ```
+
+## Certificate Rotation
+
+Certificates are automatically rotated when:
+
+1. **Time-based rotation**: When remaining validity < `CERT_ROTATION_THRESHOLD` × total validity
+   - Default: Rotates at 80% of validity (24 days into a 30-day certificate)
+
+2. **Config-based rotation**: When webhook service references or URLs change
+   - Adding new webhook with different service → new SANs → rotation triggered
+   - Changing service name/namespace → SANs change → rotation triggered
+   - Changing URL hostname → SAN change → rotation triggered
 
 ## Configuration
 
@@ -114,15 +167,25 @@ All configuration via environment variables:
 
 Files written to `CERT_DIR`:
 - `ca.crt`: CA certificate (PEM)
-- `tls.crt`: Server certificate (PEM)
+- `tls.crt`: Server certificate with dynamic SANs (PEM)
 - `tls.key`: Server private key (PEM)
+
+**Certificate SANs include:**
+- For service-based webhooks: `<service>.<namespace>.svc` and `<service>.<namespace>.svc.cluster.local`
+- For URL-based webhooks: hostname extracted from URL (e.g., `webhook.example.com`)
+
+**Performance optimization:** Files are only written when content changes, preventing unnecessary webhook server reloads.
 
 ## Development
 
 ### Run Tests
 
 ```bash
+# Unit tests
 make test
+
+# Integration tests (requires envtest)
+make test-integration
 ```
 
 ### Linting
@@ -130,6 +193,25 @@ make test
 ```bash
 make fmt
 make vet
+```
+
+### Build Docker Image
+
+```bash
+make docker-build
+```
+
+## Deployment
+
+See `config/` directory for Kubernetes manifests:
+- `rbac.yaml` - ServiceAccount, Role, ClusterRole, RoleBindings
+- `deployment.yaml` - Deployment with sidecar pattern, ConfigMap example, Service
+- `pdb.yaml` - PodDisruptionBudget for HA
+- `kustomization.yaml` - Kustomize configuration
+
+Deploy with:
+```bash
+kubectl apply -k config/
 ```
 
 ## License
