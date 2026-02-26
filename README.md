@@ -49,6 +49,61 @@ Replica 2 (Follower):  WebhookReconciler ✗  CertificateReloader ✓
 Replica 3 (Follower):  WebhookReconciler ✗  CertificateReloader ✓
 ```
 
+### Remote Cluster Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Hosting Cluster (where webhook server runs)                             │
+│                                                                          │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │ Pod: webhook-server                                               │  │
+│  │                                                                    │  │
+│  │  ┌──────────────────┐      ┌───────────────────────────────────┐ │  │
+│  │  │ webhook-server   │◄─────┤ webhook-injector (sidecar)        │ │  │
+│  │  │                  │ certs│                                    │ │  │
+│  │  │ Serves webhooks  │      │ • Generates certs                 │ │  │
+│  │  │ on :9443         │      │ • Watches ConfigMap               │ │  │
+│  │  └──────────────────┘      │ • Writes to Secret                │ │  │
+│  │           ▲                 │ • Reloads certs to disk           │ │  │
+│  │           │                 └───────────────────────────────────┘ │  │
+│  │           │ /tmp/webhook-certs (emptyDir)                         │  │
+│  └───────────┼───────────────────────────────────────────────────────┘  │
+│              │                      │                                   │
+│              │                      │ watches                           │
+│              │                      ▼                                   │
+│         ┌────┴─────┐         ┌──────────┐       ┌─────────────────┐   │
+│         │ ConfigMap│         │  Secret  │       │ Lease (leader   │   │
+│         │ webhook  │         │  certs   │       │  election)      │   │
+│         │ configs  │         └──────────┘       └─────────────────┘   │
+│         └──────────┘                                                   │
+└──────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     │ applies webhook configs
+                                     │ (via kubeconfig)
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Target Cluster (remote - where webhooks are enforced)                   │
+│                                                                          │
+│  ┌──────────────────────────────┐    ┌─────────────────────────────┐   │
+│  │ MutatingWebhookConfiguration │    │ ValidatingWebhookConfig     │   │
+│  │                              │    │                             │   │
+│  │ clientConfig:                │    │ clientConfig:               │   │
+│  │   url: https://webhook...    │    │   url: https://webhook...   │   │
+│  │   caBundle: <injected>       │    │   caBundle: <injected>      │   │
+│  └──────────────────────────────┘    └─────────────────────────────┘   │
+│                                                                          │
+│  API Server calls webhook URL ───────────────────────────────────────┐  │
+│                                                                       │  │
+└───────────────────────────────────────────────────────────────────────┼──┘
+                                                                        │
+                                                       HTTPS with mTLS │
+                                         (validates against caBundle)  │
+                                                                        │
+          ┌─────────────────────────────────────────────────────────────┘
+          │
+          └──────► Webhook server in hosting cluster (:9443)
+```
+
 ## Quick Start
 
 ### Prerequisites
