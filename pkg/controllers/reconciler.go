@@ -230,7 +230,6 @@ func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, se
 		},
 		Data: map[string][]byte{
 			"ca.crt":  caCert,
-			"ca.key":  caKey,
 			"tls.crt": serverCert,
 			"tls.key": serverKey,
 		},
