@@ -76,7 +76,36 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set up certificate reloader (runs on all replicas)
+	// LEADER ELECTION ARCHITECTURE:
+	//
+	// This application uses controller-runtime's leader election mechanism to ensure
+	// only one replica performs certificate generation and webhook management, while
+	// allowing all replicas to reload certificates to their local filesystem.
+	//
+	// How it works:
+	// 1. Manager is configured with LeaderElection: true (see ctrl.Options above)
+	// 2. When multiple replicas start, they compete for a Kubernetes Lease
+	// 3. The winner becomes "leader" and runs ALL controllers
+	// 4. EXCEPT: Controllers implementing LeaderElectionRunnable.NeedLeaderElection() = false
+	//    run on ALL replicas regardless of leader election status
+	//
+	// Controller behavior:
+	// - CertificateReloader: implements NeedLeaderElection() = false
+	//   → Runs on ALL replicas (leader + followers)
+	//   → Each replica syncs certificates to its own filesystem
+	//   → Enables webhook servers on all replicas to reload certificates
+	//
+	// - LeaderReconciler: does NOT implement NeedLeaderElection (defaults to true)
+	//   → Runs ONLY on the leader replica
+	//   → Prevents multiple replicas from generating different certificates
+	//   → Prevents race conditions when applying webhooks to target cluster
+	//
+	// Example with 3 replicas:
+	//   Replica 1 (Leader):    CertificateReloader ✓  LeaderReconciler ✓
+	//   Replica 2 (Follower):  CertificateReloader ✓  LeaderReconciler ✗
+	//   Replica 3 (Follower):  CertificateReloader ✓  LeaderReconciler ✗
+
+	// Set up certificate reloader (runs on ALL replicas via NeedLeaderElection() = false)
 	certReloader := &controllers.CertificateReloader{
 		Client: mgr.GetClient(),
 		Config: cfg,
@@ -85,9 +114,9 @@ func main() {
 		setupLog.Error(err, "Unable to create CertificateReloader controller")
 		os.Exit(1)
 	}
-	setupLog.Info("CertificateReloader controller registered")
+	setupLog.Info("CertificateReloader controller registered (runs on all replicas)")
 
-	// Set up leader reconciler (runs on leader only - handled by leader election)
+	// Set up leader reconciler (runs on leader ONLY via default leader election behavior)
 	leaderReconciler := &controllers.LeaderReconciler{
 		Client:       mgr.GetClient(),
 		TargetClient: targetClient,
@@ -98,7 +127,7 @@ func main() {
 		setupLog.Error(err, "Unable to create LeaderReconciler controller")
 		os.Exit(1)
 	}
-	setupLog.Info("LeaderReconciler controller registered")
+	setupLog.Info("LeaderReconciler controller registered (runs on leader only)")
 
 	// Add health checks
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

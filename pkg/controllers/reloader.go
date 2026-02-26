@@ -21,6 +21,13 @@ type CertificateReloader struct {
 	Config *config.Config
 }
 
+// NeedLeaderElection implements manager.LeaderElectionRunnable
+// Returns false because certificate reloading should happen on ALL replicas,
+// not just the leader. Each replica needs to sync certificates to its own filesystem.
+func (r *CertificateReloader) NeedLeaderElection() bool {
+	return false
+}
+
 // Reconcile reads certificates from Secret and writes to disk
 func (r *CertificateReloader) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
