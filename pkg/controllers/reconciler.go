@@ -15,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/config"
@@ -236,7 +237,14 @@ func (r *LeaderReconciler) getNamespace(namespace string) string {
 
 // SetupWithManager sets up the controller with the Manager
 func (r *LeaderReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Only watch the specific webhook ConfigMap
+	configMapPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
+		return object.GetName() == r.Config.WebhookConfigName &&
+			object.GetNamespace() == r.getNamespace(r.Config.WebhookConfigNamespace)
+	})
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.ConfigMap{}).
+		WithEventFilter(configMapPredicate).
 		Complete(r)
 }
