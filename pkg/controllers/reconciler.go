@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -82,7 +83,14 @@ func (r *LeaderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 	}
 
-	// TODO: Inject CA bundle and apply to target cluster (Part 2)
+	// Inject CA bundle into webhook configurations
+	caCert := secret.Data["ca.crt"]
+	webhooks.InjectCABundle(configs, caCert)
+
+	// Apply webhook configurations to target cluster
+	if err := r.applyWebhookConfigurations(ctx, configs); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to apply webhook configurations: %w", err)
+	}
 
 	log.Info("Reconciliation complete")
 
@@ -151,6 +159,67 @@ func (r *LeaderReconciler) generateAndStoreCertificates(ctx context.Context, ser
 
 	existing.Data = secret.Data
 	return r.Client.Update(ctx, existing)
+}
+
+// applyWebhookConfigurations applies webhook configs to target cluster
+func (r *LeaderReconciler) applyWebhookConfigurations(ctx context.Context, configs *webhooks.WebhookConfigurations) error {
+	log := log.FromContext(ctx)
+
+	// Apply mutating webhook configurations
+	for _, mwc := range configs.Mutating {
+		log.Info("Applying MutatingWebhookConfiguration", "name", mwc.Name)
+
+		existing := &admissionv1.MutatingWebhookConfiguration{}
+		err := r.TargetClient.Get(ctx, types.NamespacedName{Name: mwc.Name}, existing)
+
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// Create new
+				if err := r.TargetClient.Create(ctx, mwc); err != nil {
+					return fmt.Errorf("failed to create MutatingWebhookConfiguration %s: %w", mwc.Name, err)
+				}
+				log.Info("Created MutatingWebhookConfiguration", "name", mwc.Name)
+			} else {
+				return fmt.Errorf("failed to get MutatingWebhookConfiguration %s: %w", mwc.Name, err)
+			}
+		} else {
+			// Update existing
+			existing.Webhooks = mwc.Webhooks
+			if err := r.TargetClient.Update(ctx, existing); err != nil {
+				return fmt.Errorf("failed to update MutatingWebhookConfiguration %s: %w", mwc.Name, err)
+			}
+			log.Info("Updated MutatingWebhookConfiguration", "name", mwc.Name)
+		}
+	}
+
+	// Apply validating webhook configurations
+	for _, vwc := range configs.Validating {
+		log.Info("Applying ValidatingWebhookConfiguration", "name", vwc.Name)
+
+		existing := &admissionv1.ValidatingWebhookConfiguration{}
+		err := r.TargetClient.Get(ctx, types.NamespacedName{Name: vwc.Name}, existing)
+
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// Create new
+				if err := r.TargetClient.Create(ctx, vwc); err != nil {
+					return fmt.Errorf("failed to create ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
+				}
+				log.Info("Created ValidatingWebhookConfiguration", "name", vwc.Name)
+			} else {
+				return fmt.Errorf("failed to get ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
+			}
+		} else {
+			// Update existing
+			existing.Webhooks = vwc.Webhooks
+			if err := r.TargetClient.Update(ctx, existing); err != nil {
+				return fmt.Errorf("failed to update ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
+			}
+			log.Info("Updated ValidatingWebhookConfiguration", "name", vwc.Name)
+		}
+	}
+
+	return nil
 }
 
 // getNamespace returns the namespace, using pod namespace as fallback

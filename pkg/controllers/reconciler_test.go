@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"testing"
 
+	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -19,6 +20,7 @@ import (
 func TestLeaderReconciler_ReconcileConfigMap(t *testing.T) {
 	s := runtime.NewScheme()
 	_ = corev1.AddToScheme(s)
+	_ = admissionv1.AddToScheme(s)
 
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -123,3 +125,89 @@ webhooks:
 		}
 	}
 }
+
+func TestLeaderReconciler_ApplyWebhooks(t *testing.T) {
+	s := runtime.NewScheme()
+	_ = corev1.AddToScheme(s)
+	_ = admissionv1.AddToScheme(s)
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "webhook-config",
+			Namespace: "default",
+		},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+      caBundle: ""
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+`,
+		},
+	}
+
+	hostingClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(configMap).
+		Build()
+
+	targetClient := fake.NewClientBuilder().
+		WithScheme(s).
+		Build()
+
+	cfg := &config.Config{
+		WebhookConfigName:      "webhook-config",
+		WebhookConfigNamespace: "default",
+		CertSecretName:         "test-certs",
+		CertSecretNamespace:    "default",
+		CertValidityDays:       30,
+		CertDir:                t.TempDir(),
+	}
+
+	reconciler := &LeaderReconciler{
+		Client:       hostingClient,
+		TargetClient: targetClient,
+		Config:       cfg,
+		Scheme:       s,
+	}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "webhook-config",
+			Namespace: "default",
+		},
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	// Verify webhook was applied to target cluster
+	mwc := &admissionv1.MutatingWebhookConfiguration{}
+	err = targetClient.Get(context.Background(), types.NamespacedName{
+		Name: "test-webhook",
+	}, mwc)
+	if err != nil {
+		t.Fatalf("Expected MutatingWebhookConfiguration to be created in target cluster: %v", err)
+	}
+
+	// Verify CA bundle was injected
+	if len(mwc.Webhooks) == 0 {
+		t.Fatal("Expected at least one webhook")
+	}
+	if len(mwc.Webhooks[0].ClientConfig.CABundle) == 0 {
+		t.Error("Expected CA bundle to be injected")
+	}
+}
+
