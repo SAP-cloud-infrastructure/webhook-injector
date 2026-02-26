@@ -4,9 +4,10 @@ kind: Kustomization
 resources:
   - rbac.yaml
   - deployment.yaml
+  - pdb.yaml
 
-namespace: default
+namespace: webhook-injector
 
 images:
   - name: webhook-injector
-    newTag: latest
+    newTag: v1.0.0

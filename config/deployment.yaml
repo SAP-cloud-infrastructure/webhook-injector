@@ -3,7 +3,6 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: webhook-config
-  namespace: default
 data:
   webhooks.yaml: |
     # Add your webhook configurations here
@@ -12,7 +11,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: webhook-service
-  namespace: default
 spec:
   selector:
     app: webhook-server
@@ -24,9 +22,13 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: webhook-server
-  namespace: default
 spec:
   replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
   selector:
     matchLabels:
       app: webhook-server
@@ -36,18 +38,66 @@ spec:
         app: webhook-server
     spec:
       serviceAccountName: webhook-injector
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: webhook-server
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: webhook-server
-          image: my-webhook-server:latest
+          image: my-webhook-server:v1.0.0
           ports:
             - containerPort: 9443
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9443
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9443
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           volumeMounts:
             - name: webhook-certs
               mountPath: /tmp/webhook-certs
               readOnly: true
 
         - name: webhook-injector
-          image: webhook-injector:latest
+          image: webhook-injector:v1.0.0
           env:
             - name: WEBHOOK_CONFIG_NAME
               value: webhook-config
@@ -68,18 +118,37 @@ spec:
               containerPort: 8080
             - name: health
               containerPort: 8081
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8081
             initialDelaySeconds: 15
             periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /readyz
               port: 8081
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           volumeMounts:
             - name: webhook-certs
               mountPath: /tmp/webhook-certs
