@@ -1,0 +1,21 @@
+# Git
+.git/
+.gitignore
+
+# Build artifacts
+bin/
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# Documentation
+docs/
+README.md
+
+# Test files
+*_test.go
+
+# CI/CD
+.github/

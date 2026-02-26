@@ -17,3 +17,12 @@ fmt:
 .PHONY: vet
 vet:
 	go vet ./...
+
+.PHONY: docker-build
+docker-build:
+	docker build -t webhook-injector:latest .
+
+.PHONY: docker-push
+docker-push: docker-build
+	docker tag webhook-injector:latest $(REGISTRY)/webhook-injector:$(VERSION)
+	docker push $(REGISTRY)/webhook-injector:$(VERSION)
