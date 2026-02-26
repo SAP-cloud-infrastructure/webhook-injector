@@ -98,3 +98,119 @@ func TestGenerateServerCert(t *testing.T) {
 		t.Fatal("Failed to decode server private key PEM")
 	}
 }
+
+func TestGenerateServerCert_WithHostnames(t *testing.T) {
+	// Generate CA
+	caCert, caKey, err := GenerateCA(30 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("Failed to generate CA: %v", err)
+	}
+
+	// Generate server cert with hostnames (URL-based webhooks)
+	services := []ServiceReference{
+		{Hostname: "webhook.example.com"},
+		{Hostname: "another-webhook.test.local"},
+	}
+
+	serverCert, _, err := GenerateServerCert(caCert, caKey, services, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Failed to generate server certificate: %v", err)
+	}
+
+	// Verify certificate
+	block, _ := pem.Decode(serverCert)
+	if block == nil {
+		t.Fatal("Failed to decode server certificate")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("Failed to parse server certificate: %v", err)
+	}
+
+	// Verify SANs contain hostnames
+	expectedSANs := []string{
+		"webhook.example.com",
+		"another-webhook.test.local",
+	}
+
+	for _, expectedSAN := range expectedSANs {
+		found := false
+		for _, dnsName := range cert.DNSNames {
+			if dnsName == expectedSAN {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected SAN '%s' not found in certificate. Found: %v", expectedSAN, cert.DNSNames)
+		}
+	}
+
+	// Verify we have exactly 2 SANs (no extra service DNS names)
+	if len(cert.DNSNames) != 2 {
+		t.Errorf("Expected 2 SANs, got %d: %v", len(cert.DNSNames), cert.DNSNames)
+	}
+}
+
+func TestGenerateServerCert_MixedServiceAndHostname(t *testing.T) {
+	// Generate CA
+	caCert, caKey, err := GenerateCA(30 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("Failed to generate CA: %v", err)
+	}
+
+	// Generate server cert with mixed service and hostname references
+	services := []ServiceReference{
+		{Name: "webhook-svc", Namespace: "default"},      // Service-based
+		{Hostname: "external-webhook.example.com"},      // URL-based
+		{Name: "another-svc", Namespace: "test-ns"},     // Service-based
+		{Hostname: "second-external.test.local"},        // URL-based
+	}
+
+	serverCert, _, err := GenerateServerCert(caCert, caKey, services, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Failed to generate server certificate: %v", err)
+	}
+
+	// Verify certificate
+	block, _ := pem.Decode(serverCert)
+	if block == nil {
+		t.Fatal("Failed to decode server certificate")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("Failed to parse server certificate: %v", err)
+	}
+
+	// Verify SANs contain both service DNS names and hostnames
+	expectedSANs := []string{
+		// Service-based SANs (2 formats each)
+		"webhook-svc.default.svc",
+		"webhook-svc.default.svc.cluster.local",
+		"another-svc.test-ns.svc",
+		"another-svc.test-ns.svc.cluster.local",
+		// URL-based SANs
+		"external-webhook.example.com",
+		"second-external.test.local",
+	}
+
+	for _, expectedSAN := range expectedSANs {
+		found := false
+		for _, dnsName := range cert.DNSNames {
+			if dnsName == expectedSAN {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected SAN '%s' not found in certificate. Found: %v", expectedSAN, cert.DNSNames)
+		}
+	}
+
+	// Verify we have exactly 6 SANs (4 service SANs + 2 hostname SANs)
+	if len(cert.DNSNames) != 6 {
+		t.Errorf("Expected 6 SANs, got %d: %v", len(cert.DNSNames), cert.DNSNames)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net/url"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -61,18 +62,28 @@ func ParseWebhookConfigurations(data []byte) (*WebhookConfigurations, error) {
 	return configs, nil
 }
 
-// ExtractServiceReferences extracts unique service references from webhook configurations
+// ExtractServiceReferences extracts unique service references and URL hostnames from webhook configurations
 func ExtractServiceReferences(configs *WebhookConfigurations) []certificates.ServiceReference {
-	serviceMap := make(map[string]certificates.ServiceReference)
+	// Use map for deduplication
+	// Key format: "service:namespace/name" or "hostname:example.com"
+	refMap := make(map[string]certificates.ServiceReference)
 
 	// Extract from mutating webhooks
 	for _, mwc := range configs.Mutating {
 		for _, webhook := range mwc.Webhooks {
 			if webhook.ClientConfig.Service != nil {
-				key := fmt.Sprintf("%s/%s", webhook.ClientConfig.Service.Namespace, webhook.ClientConfig.Service.Name)
-				serviceMap[key] = certificates.ServiceReference{
+				key := fmt.Sprintf("service:%s/%s", webhook.ClientConfig.Service.Namespace, webhook.ClientConfig.Service.Name)
+				refMap[key] = certificates.ServiceReference{
 					Name:      webhook.ClientConfig.Service.Name,
 					Namespace: webhook.ClientConfig.Service.Namespace,
+				}
+			} else if webhook.ClientConfig.URL != nil && *webhook.ClientConfig.URL != "" {
+				// Parse URL to extract hostname
+				if hostname := extractHostnameFromURL(*webhook.ClientConfig.URL); hostname != "" {
+					key := fmt.Sprintf("hostname:%s", hostname)
+					refMap[key] = certificates.ServiceReference{
+						Hostname: hostname,
+					}
 				}
 			}
 		}
@@ -82,20 +93,38 @@ func ExtractServiceReferences(configs *WebhookConfigurations) []certificates.Ser
 	for _, vwc := range configs.Validating {
 		for _, webhook := range vwc.Webhooks {
 			if webhook.ClientConfig.Service != nil {
-				key := fmt.Sprintf("%s/%s", webhook.ClientConfig.Service.Namespace, webhook.ClientConfig.Service.Name)
-				serviceMap[key] = certificates.ServiceReference{
+				key := fmt.Sprintf("service:%s/%s", webhook.ClientConfig.Service.Namespace, webhook.ClientConfig.Service.Name)
+				refMap[key] = certificates.ServiceReference{
 					Name:      webhook.ClientConfig.Service.Name,
 					Namespace: webhook.ClientConfig.Service.Namespace,
+				}
+			} else if webhook.ClientConfig.URL != nil && *webhook.ClientConfig.URL != "" {
+				// Parse URL to extract hostname
+				if hostname := extractHostnameFromURL(*webhook.ClientConfig.URL); hostname != "" {
+					key := fmt.Sprintf("hostname:%s", hostname)
+					refMap[key] = certificates.ServiceReference{
+						Hostname: hostname,
+					}
 				}
 			}
 		}
 	}
 
 	// Convert map to slice
-	services := make([]certificates.ServiceReference, 0, len(serviceMap))
-	for _, svc := range serviceMap {
-		services = append(services, svc)
+	refs := make([]certificates.ServiceReference, 0, len(refMap))
+	for _, ref := range refMap {
+		refs = append(refs, ref)
 	}
 
-	return services
+	return refs
+}
+
+// extractHostnameFromURL extracts the hostname from a webhook URL
+// Example: "https://webhook.example.com:9443/mutate" -> "webhook.example.com"
+func extractHostnameFromURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
 }

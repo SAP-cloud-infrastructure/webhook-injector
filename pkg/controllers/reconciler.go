@@ -194,9 +194,14 @@ func (r *LeaderReconciler) needsCertificateRotation(secret *corev1.Secret, servi
 func buildExpectedSANs(services []certificates.ServiceReference) map[string]bool {
 	sans := make(map[string]bool)
 	for _, svc := range services {
-		// Add both short and FQDN forms
-		sans[fmt.Sprintf("%s.%s.svc", svc.Name, svc.Namespace)] = true
-		sans[fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)] = true
+		if svc.Hostname != "" {
+			// URL-based webhook - use hostname directly
+			sans[svc.Hostname] = true
+		} else if svc.Name != "" && svc.Namespace != "" {
+			// Service-based webhook - add both short and FQDN forms
+			sans[fmt.Sprintf("%s.%s.svc", svc.Name, svc.Namespace)] = true
+			sans[fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)] = true
+		}
 	}
 	return sans
 }

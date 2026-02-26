@@ -89,10 +89,16 @@ func GenerateServerCert(caCertPEM, caKeyPEM []byte, services []ServiceReference,
 	// Build DNS SANs from service references
 	dnsNames := make([]string, 0, len(services)*2)
 	for _, svc := range services {
-		dnsNames = append(dnsNames,
-			fmt.Sprintf("%s.%s.svc", svc.Name, svc.Namespace),
-			fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace),
-		)
+		if svc.Hostname != "" {
+			// URL-based webhook - use hostname directly
+			dnsNames = append(dnsNames, svc.Hostname)
+		} else if svc.Name != "" && svc.Namespace != "" {
+			// Service-based webhook - generate Kubernetes service DNS names
+			dnsNames = append(dnsNames,
+				fmt.Sprintf("%s.%s.svc", svc.Name, svc.Namespace),
+				fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace),
+			)
+		}
 	}
 
 	// Create server certificate template
