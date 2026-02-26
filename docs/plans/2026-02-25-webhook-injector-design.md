@@ -318,6 +318,25 @@ Following Gardener's two-component pattern for managing certificates across repl
 - All replicas reload certificates (each pod's webhook server needs certs on its local filesystem)
 - Leader election lease name: `webhook-injector-leader` (configurable via `LEADER_ELECTION_ID`)
 
+**Why not mount Secret directly instead of using CertificateReloader?**
+
+The CertificateReloader exists to avoid a critical timing issue during certificate rotation:
+
+1. Leader updates Secret with new certificates
+2. Leader updates webhook configurations in target cluster with new CA bundle
+3. **Problem**: Kubernetes Secret volume mounts have ~60 second propagation delay (kubelet sync period)
+4. **Result**: Webhook calls fail for up to 60 seconds because:
+   - Target cluster has new CA bundle in webhook config
+   - Webhook server still has old certificates (not yet updated by kubelet)
+   - TLS verification fails (CA bundle doesn't match server cert)
+
+The CertificateReloader solves this by:
+- Using watch-based propagation (<1 second instead of ~60 seconds)
+- Ensuring webhook servers have new certificates BEFORE target cluster sees new CA bundle
+- Providing observability (logs show when each replica reloaded certs)
+
+This is essential for zero-downtime certificate rotation in production environments.
+
 ### WebhookReconciler (leader-only)
 
 **Responsibilities:**
@@ -886,3 +905,4 @@ This design is informed by:
 |------|---------|---------|
 | 2026-02-25 | 1.0 | Initial design |
 | 2026-02-26 | 1.1 | Updated to reflect current implementation: renamed Leader Reconciler to WebhookReconciler, added URL support for webhooks, documented leader election implementation with NeedLeaderElection interface, added certificate rotation logic details, added performance optimization for unchanged certificates |
+| 2026-02-26 | 1.2 | Added rationale for CertificateReloader vs direct Secret mount (timing issue during rotation: ~60s kubelet sync delay causes webhook failures when target cluster has new CA but webhook server has old certs) |
