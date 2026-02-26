@@ -64,17 +64,53 @@ Replica 3 (Follower):  WebhookReconciler ✗  CertificateReloader ✓
 make build
 ```
 
-### Run Locally
+### Sidecar Deployment
 
-1. Create webhook ConfigMap:
+Add webhook-injector as a sidecar to your webhook server deployment:
 
-```bash
-kubectl apply -f - <<EOF
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-server
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        # Your webhook server
+        - name: webhook-server
+          image: my-webhook:latest
+          ports:
+            - containerPort: 9443
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/webhook-certs
+              readOnly: true
+
+        # webhook-injector sidecar
+        - name: webhook-injector
+          image: webhook-injector:latest
+          env:
+            - name: WEBHOOK_CONFIG_NAME
+              value: webhook-config
+            - name: CERT_DIR
+              value: /tmp/webhook-certs
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/webhook-certs
+
+      volumes:
+        - name: webhook-certs
+          emptyDir: {}
+```
+
+**Webhook ConfigMap format:**
+```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: webhook-config
-  namespace: default
 data:
   webhooks.yaml: |
     ---
@@ -84,49 +120,16 @@ data:
       name: my-webhook
     webhooks:
       - name: mutate.example.com
-        # Option 1: Service reference (in-cluster webhook)
         clientConfig:
-          service:
+          service:  # or url: "https://..." for remote clusters
             name: webhook-service
             namespace: default
             path: /mutate
             port: 9443
-          caBundle: ""  # Automatically injected
-        rules:
-          - operations: ["CREATE", "UPDATE"]
-            apiGroups: ["apps"]
-            apiVersions: ["v1"]
-            resources: ["deployments"]
+          caBundle: ""  # Injected automatically
+        rules: [...]
         admissionReviewVersions: ["v1"]
         sideEffects: None
-        failurePolicy: Fail
-    ---
-    apiVersion: admissionregistration.k8s.io/v1
-    kind: ValidatingWebhookConfiguration
-    metadata:
-      name: remote-webhook
-    webhooks:
-      - name: validate.example.com
-        # Option 2: URL reference (remote cluster webhook)
-        clientConfig:
-          url: "https://webhook.remote-cluster.com:9443/validate"
-          caBundle: ""  # Automatically injected
-        rules:
-          - operations: ["CREATE"]
-            apiGroups: [""]
-            apiVersions: ["v1"]
-            resources: ["pods"]
-        admissionReviewVersions: ["v1"]
-        sideEffects: None
-EOF
-```
-
-2. Run webhook-injector:
-
-```bash
-export WEBHOOK_CONFIG_NAME=webhook-config
-export WEBHOOK_CONFIG_NAMESPACE=default
-./bin/webhook-injector
 ```
 
 ## Certificate Rotation
@@ -175,6 +178,61 @@ Files written to `CERT_DIR`:
 - For URL-based webhooks: hostname extracted from URL (e.g., `webhook.example.com`)
 
 **Performance optimization:** Files are only written when content changes, preventing unnecessary webhook server reloads.
+
+## Webhook Server Certificate Reloading
+
+For controller-runtime based webhook servers, use `certwatcher` to automatically reload certificates when files change:
+
+```go
+import (
+    "sigs.k8s.io/controller-runtime/pkg/certwatcher"
+    "sigs.k8s.io/controller-runtime/pkg/webhook"
+)
+
+func main() {
+    // Create certificate watcher
+    certWatcher, err := certwatcher.New(
+        "/tmp/webhook-certs/tls.crt",
+        "/tmp/webhook-certs/tls.key",
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Start watcher in background
+    go func() {
+        if err := certWatcher.Start(ctx); err != nil {
+            log.Fatal(err)
+        }
+    }()
+
+    // Configure webhook server to use watcher
+    mgr, _ := ctrl.NewManager(cfg, ctrl.Options{
+        WebhookServer: webhook.NewServer(webhook.Options{
+            Port:         9443,
+            CertDir:      "/tmp/webhook-certs",
+            CertName:     "tls.crt",
+            KeyName:      "tls.key",
+            TLSOpts: []func(*tls.Config){
+                func(c *tls.Config) {
+                    c.GetCertificate = certWatcher.GetCertificate
+                },
+            },
+        }),
+    })
+
+    // Register webhooks...
+    mgr.GetWebhookServer().Register("/mutate", &webhook.Admission{...})
+
+    mgr.Start(ctx)
+}
+```
+
+**Key points:**
+- `certwatcher` monitors certificate files using fsnotify
+- Hot-reloads certificates without restarting the server
+- No webhook downtime during certificate rotation
+- Works with any controller-runtime webhook server
 
 ## Development
 
