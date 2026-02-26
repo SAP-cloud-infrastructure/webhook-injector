@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"testing"
+	"time"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -14,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/config"
 )
 
@@ -208,6 +210,243 @@ webhooks:
 	}
 	if len(mwc.Webhooks[0].ClientConfig.CABundle) == 0 {
 		t.Error("Expected CA bundle to be injected")
+	}
+}
+
+func TestLeaderReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) {
+	s := runtime.NewScheme()
+	_ = corev1.AddToScheme(s)
+
+	// Create a certificate that will expire soon relative to total validity
+	// For 80% threshold on 30 day validity: rotate when < 24 days remain
+	// Generate cert with 25 days validity, then simulate it was created 20 days ago
+	// So remaining = 5 days out of 25 day total = 20% remaining < 80% threshold
+	cfg := &config.Config{
+		CertSecretName:         "test-certs",
+		CertSecretNamespace:    "default",
+		CertValidityDays:       30,
+		CertRotationThreshold:  0.8, // Rotate at 80% of validity
+	}
+
+	// Generate a certificate with short validity (6 hours)
+	// This simulates an old certificate that's about to expire
+	validity := 6 * time.Hour
+	caCert, caKey, err := certificates.GenerateCA(validity)
+	if err != nil {
+		t.Fatalf("Failed to generate CA: %v", err)
+	}
+
+	services := []certificates.ServiceReference{
+		{Name: "webhook-svc", Namespace: "default"},
+	}
+	serverCert, serverKey, err := certificates.GenerateServerCert(caCert, caKey, services, validity)
+	if err != nil {
+		t.Fatalf("Failed to generate server cert: %v", err)
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"ca.crt":  caCert,
+			"ca.key":  caKey,
+			"tls.crt": serverCert,
+			"tls.key": serverKey,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(secret).
+		Build()
+
+	reconciler := &LeaderReconciler{
+		Client: fakeClient,
+		Config: cfg,
+		Scheme: s,
+	}
+
+	// Sleep briefly to let some time pass, reducing remaining validity below threshold
+	time.Sleep(2 * time.Second)
+
+	// Check certificates - should need rotation due to expiry
+	// With 6h validity and 80% threshold, needs rotation when < 4.8h remain
+	// After 2 seconds, ~5.99h remain out of 6h = 99.9% > 80%, so still valid
+	// But the point is to test the logic works
+	_, needsRotation, err := reconciler.checkCertificates(context.Background(), services)
+	if err != nil {
+		t.Fatalf("checkCertificates failed: %v", err)
+	}
+
+	// With such short validity (6h) and 80% threshold, it should need rotation
+	// Actually, let's use even shorter: 1 second validity
+	// Then after sleep, it's near expiry
+
+	// Better approach: Generate with 1 second validity, sleep 0.9s, check
+	// Remaining = 0.1s out of 1s = 10% < 80%
+
+	// Regenerate with 1 second validity
+	validity2 := 1 * time.Second
+	caCert2, caKey2, err := certificates.GenerateCA(validity2)
+	if err != nil {
+		t.Fatalf("Failed to generate CA: %v", err)
+	}
+	serverCert2, serverKey2, err := certificates.GenerateServerCert(caCert2, caKey2, services, validity2)
+	if err != nil {
+		t.Fatalf("Failed to generate server cert: %v", err)
+	}
+
+	secret.Data["ca.crt"] = caCert2
+	secret.Data["ca.key"] = caKey2
+	secret.Data["tls.crt"] = serverCert2
+	secret.Data["tls.key"] = serverKey2
+
+	err = fakeClient.Update(context.Background(), secret)
+	if err != nil {
+		t.Fatalf("Failed to update secret: %v", err)
+	}
+
+	// Sleep to consume most of validity
+	time.Sleep(900 * time.Millisecond)
+
+	// Now check - should need rotation (10% remaining < 80% threshold)
+	_, needsRotation, err = reconciler.checkCertificates(context.Background(), services)
+	if err != nil {
+		t.Fatalf("checkCertificates failed: %v", err)
+	}
+
+	if !needsRotation {
+		t.Error("Expected needsRotation=true for certificate with <20% validity remaining")
+	}
+}
+
+func TestLeaderReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) {
+	s := runtime.NewScheme()
+	_ = corev1.AddToScheme(s)
+
+	cfg := &config.Config{
+		CertSecretName:         "test-certs",
+		CertSecretNamespace:    "default",
+		CertValidityDays:       30,
+		CertRotationThreshold:  0.8,
+	}
+
+	// Generate a fresh certificate (30 days validity, well above 80% threshold)
+	validity := 30 * 24 * time.Hour
+	caCert, caKey, err := certificates.GenerateCA(validity)
+	if err != nil {
+		t.Fatalf("Failed to generate CA: %v", err)
+	}
+
+	services := []certificates.ServiceReference{
+		{Name: "webhook-svc", Namespace: "default"},
+	}
+	serverCert, serverKey, err := certificates.GenerateServerCert(caCert, caKey, services, validity)
+	if err != nil {
+		t.Fatalf("Failed to generate server cert: %v", err)
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"ca.crt":  caCert,
+			"ca.key":  caKey,
+			"tls.crt": serverCert,
+			"tls.key": serverKey,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(secret).
+		Build()
+
+	reconciler := &LeaderReconciler{
+		Client: fakeClient,
+		Config: cfg,
+		Scheme: s,
+	}
+
+	// Check certificates - should NOT need rotation
+	_, needsRotation, err := reconciler.checkCertificates(context.Background(), services)
+	if err != nil {
+		t.Fatalf("checkCertificates failed: %v", err)
+	}
+
+	if needsRotation {
+		t.Error("Expected needsRotation=false for fresh certificate")
+	}
+}
+
+func TestLeaderReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testing.T) {
+	s := runtime.NewScheme()
+	_ = corev1.AddToScheme(s)
+
+	cfg := &config.Config{
+		CertSecretName:         "test-certs",
+		CertSecretNamespace:    "default",
+		CertValidityDays:       30,
+		CertRotationThreshold:  0.8,
+	}
+
+	// Generate certificate with one service
+	validity := 30 * 24 * time.Hour
+	caCert, caKey, err := certificates.GenerateCA(validity)
+	if err != nil {
+		t.Fatalf("Failed to generate CA: %v", err)
+	}
+
+	oldServices := []certificates.ServiceReference{
+		{Name: "webhook-svc", Namespace: "default"},
+	}
+	serverCert, serverKey, err := certificates.GenerateServerCert(caCert, caKey, oldServices, validity)
+	if err != nil {
+		t.Fatalf("Failed to generate server cert: %v", err)
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"ca.crt":  caCert,
+			"ca.key":  caKey,
+			"tls.crt": serverCert,
+			"tls.key": serverKey,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(secret).
+		Build()
+
+	reconciler := &LeaderReconciler{
+		Client: fakeClient,
+		Config: cfg,
+		Scheme: s,
+	}
+
+	// Check with NEW services (different from what's in cert)
+	newServices := []certificates.ServiceReference{
+		{Name: "webhook-svc", Namespace: "default"},
+		{Name: "new-webhook-svc", Namespace: "default"}, // Added service
+	}
+
+	// Should need rotation due to SAN mismatch
+	_, needsRotation, err := reconciler.checkCertificates(context.Background(), newServices)
+	if err != nil {
+		t.Fatalf("checkCertificates failed: %v", err)
+	}
+
+	if !needsRotation {
+		t.Error("Expected needsRotation=true when service references change")
 	}
 }
 

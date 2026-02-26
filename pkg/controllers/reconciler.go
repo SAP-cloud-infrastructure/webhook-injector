@@ -2,6 +2,8 @@ package controllers
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"time"
@@ -115,8 +117,88 @@ func (r *LeaderReconciler) checkCertificates(ctx context.Context, services []cer
 		return nil, false, err
 	}
 
-	// TODO: Check expiry and SANs - for now just return false if secret exists
-	return secret, false, nil
+	// Check if certificate needs rotation
+	needsRotation, err := r.needsCertificateRotation(secret, services)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to check certificate rotation: %w", err)
+	}
+
+	return secret, needsRotation, nil
+}
+
+// needsCertificateRotation checks if certificate needs rotation based on expiry and SANs
+func (r *LeaderReconciler) needsCertificateRotation(secret *corev1.Secret, services []certificates.ServiceReference) (bool, error) {
+	// Get server certificate from secret
+	certPEM, ok := secret.Data["tls.crt"]
+	if !ok {
+		return true, fmt.Errorf("tls.crt not found in secret")
+	}
+
+	// Parse PEM block
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return true, fmt.Errorf("failed to decode certificate PEM")
+	}
+
+	// Parse certificate
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return true, fmt.Errorf("failed to parse certificate: %w", err)
+	}
+
+	// Check expiry - rotate if past threshold
+	now := time.Now()
+	totalValidity := cert.NotAfter.Sub(cert.NotBefore)
+	remainingValidity := cert.NotAfter.Sub(now)
+
+	if remainingValidity <= 0 {
+		// Certificate expired
+		return true, nil
+	}
+
+	// Calculate remaining percentage
+	remainingPercent := float64(remainingValidity) / float64(totalValidity)
+
+	// Rotate if below threshold
+	if remainingPercent < r.Config.CertRotationThreshold {
+		return true, nil
+	}
+
+	// Check if SANs match current service references
+	expectedSANs := buildExpectedSANs(services)
+	currentSANs := make(map[string]bool)
+	for _, dnsName := range cert.DNSNames {
+		currentSANs[dnsName] = true
+	}
+
+	// Check if all expected SANs are present
+	for san := range expectedSANs {
+		if !currentSANs[san] {
+			// Missing expected SAN, needs rotation
+			return true, nil
+		}
+	}
+
+	// Check if there are extra SANs (not strictly necessary, but good for cleanup)
+	for san := range currentSANs {
+		if !expectedSANs[san] {
+			// Extra SAN present, needs rotation
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// buildExpectedSANs builds the expected set of SANs from service references
+func buildExpectedSANs(services []certificates.ServiceReference) map[string]bool {
+	sans := make(map[string]bool)
+	for _, svc := range services {
+		// Add both short and FQDN forms
+		sans[fmt.Sprintf("%s.%s.svc", svc.Name, svc.Namespace)] = true
+		sans[fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)] = true
+	}
+	return sans
 }
 
 // generateAndStoreCertificates generates certificates and stores them in a Secret
