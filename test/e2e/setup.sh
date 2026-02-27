@@ -62,6 +62,7 @@ kubectl --kubeconfig="$TARGET_KUBECONFIG" config set-cluster kind-target \
 
 # Create Secret in hosting cluster with target kubeconfig
 kubectl --context kind-hosting create secret generic target-kubeconfig \
+    --namespace=default \
     --from-file=kubeconfig="$TARGET_KUBECONFIG" \
     --dry-run=client -o yaml | \
     kubectl --context kind-hosting apply -f -
