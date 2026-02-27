@@ -39,6 +39,7 @@ build:
 
 deploy:
   kubectl:
+    defaultNamespace: default
     manifests:
       - manifests/rbac.yaml
       - manifests/service.yaml
