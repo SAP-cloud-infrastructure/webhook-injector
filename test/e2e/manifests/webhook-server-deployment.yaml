@@ -48,15 +48,17 @@ spec:
               path: /healthz
               port: 9443
               scheme: HTTPS
-            initialDelaySeconds: 10
+            initialDelaySeconds: 60
             periodSeconds: 10
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /readyz
               port: 9443
               scheme: HTTPS
-            initialDelaySeconds: 5
+            initialDelaySeconds: 30
             periodSeconds: 5
+            failureThreshold: 6
           volumeMounts:
             - name: webhook-certs
               mountPath: /tmp/webhook-certs
