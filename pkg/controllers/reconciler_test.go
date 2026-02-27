@@ -459,3 +459,167 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testin
 		t.Error("Expected needsRotation=true when service references change")
 	}
 }
+
+func TestWebhookReconciler_CheckCertificates_ForceRotation_Annotation(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
+
+	cfg := &config.Config{
+		CertSecretName:        "test-certs",
+		CertSecretNamespace:   "default",
+		CertValidity:          720 * time.Hour,
+		CertRotationThreshold: 0.8,
+	}
+
+	// Generate a fresh certificate (should not need rotation based on time)
+	validity := 720 * time.Hour
+	caCert, caKey, err := certificates.GenerateCA(validity)
+	if err != nil {
+		t.Fatalf("Failed to generate CA: %v", err)
+	}
+
+	services := []certificates.ServiceReference{
+		{Name: "webhook-svc", Namespace: "default"},
+	}
+	serverCert, serverKey, err := certificates.GenerateServerCert(caCert, caKey, services, validity)
+	if err != nil {
+		t.Fatalf("Failed to generate server cert: %v", err)
+	}
+
+	// Create secret WITH force-rotation annotation
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"webhook-injector.sap.com/force-rotation": "true",
+			},
+		},
+		Data: map[string][]byte{
+			"ca.crt":  caCert,
+			"ca.key":  caKey,
+			"tls.crt": serverCert,
+			"tls.key": serverKey,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(secret).
+		Build()
+
+	reconciler := &WebhookReconciler{
+		Client: fakeClient,
+		Config: cfg,
+		Scheme: s,
+	}
+
+	// Check certificates - should need rotation due to annotation
+	_, needsRotation, err := reconciler.checkCertificates(context.Background(), services)
+	if err != nil {
+		t.Fatalf("checkCertificates failed: %v", err)
+	}
+
+	if !needsRotation {
+		t.Error("Expected needsRotation=true when force-rotation annotation is present")
+	}
+}
+
+func TestWebhookReconciler_RemovesAnnotationAfterRotation(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
+	if err := admissionv1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
+
+	// Create secret with annotation
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"webhook-injector.sap.com/force-rotation": "true",
+			},
+		},
+		Data: map[string][]byte{
+			"ca.crt":  []byte("old-ca"),
+			"tls.crt": []byte("old-cert"),
+			"tls.key": []byte("old-key"),
+		},
+	}
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "webhook-config",
+			Namespace: "default",
+		},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+    admissionReviewVersions: ["v1"]
+    sideEffects: None`,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(secret, configMap).
+		Build()
+
+	cfg := &config.Config{
+		WebhookConfigName:      "webhook-config",
+		WebhookConfigNamespace: "default",
+		CertSecretName:         "test-certs",
+		CertSecretNamespace:    "default",
+		CertValidity:           720 * time.Hour,
+		CertDir:                t.TempDir(),
+	}
+
+	reconciler := &WebhookReconciler{
+		Client:       fakeClient,
+		TargetClient: fakeClient,
+		Config:       cfg,
+		Scheme:       s,
+	}
+
+	// Reconcile - should trigger rotation due to annotation
+	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "webhook-config",
+			Namespace: "default",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	// Verify annotation was removed
+	updatedSecret := &corev1.Secret{}
+	err = fakeClient.Get(context.Background(), types.NamespacedName{
+		Name:      "test-certs",
+		Namespace: "default",
+	}, updatedSecret)
+	if err != nil {
+		t.Fatalf("Failed to get updated secret: %v", err)
+	}
+
+	if updatedSecret.Annotations != nil {
+		if _, exists := updatedSecret.Annotations["webhook-injector.sap.com/force-rotation"]; exists {
+			t.Error("Expected force-rotation annotation to be removed after rotation")
+		}
+	}
+}

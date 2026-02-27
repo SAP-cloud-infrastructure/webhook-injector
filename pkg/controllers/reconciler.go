@@ -132,7 +132,14 @@ func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []ce
 		return nil, false, err
 	}
 
-	// Check if certificate needs rotation
+	// Check for force-rotation annotation
+	if secret.Annotations != nil {
+		if forceRotation, exists := secret.Annotations["webhook-injector.sap.com/force-rotation"]; exists && forceRotation == "true" {
+			return secret, true, nil // Force rotation
+		}
+	}
+
+	// Check if certificate needs rotation based on time/SANs
 	needsRotation, err := r.needsCertificateRotation(secret, services)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to check certificate rotation: %w", err)
@@ -242,6 +249,8 @@ func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, se
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      r.Config.CertSecretName,
 			Namespace: r.getNamespace(r.Config.CertSecretNamespace),
+			// Remove force-rotation annotation if present
+			Annotations: map[string]string{},
 		},
 		Data: map[string][]byte{
 			"ca.crt":  caCert,
@@ -260,6 +269,7 @@ func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, se
 	}
 
 	existing.Data = secret.Data
+	existing.Annotations = secret.Annotations
 	return r.Client.Update(ctx, existing)
 }
 
