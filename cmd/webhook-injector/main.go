@@ -73,8 +73,8 @@ func main() {
 	}
 
 	setupLog.Info("Starting webhook-injector",
-		"config-name", cfg.WebhookConfigName,
-		"cert-secret", cfg.CertSecretName,
+		"config-name", cfg.WebhookConfigNamespace+"/"+cfg.WebhookConfigName,
+		"cert-secret", cfg.CertSecretNamespace+"/"+cfg.CertSecretName,
 		"leader-election", cfg.EnableLeaderElection,
 	)
 

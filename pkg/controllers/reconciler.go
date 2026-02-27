@@ -353,8 +353,9 @@ func (r *WebhookReconciler) getNamespace(namespace string) string {
 func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Only watch the specific webhook ConfigMap
 	configMapPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
-		return object.GetName() == r.Config.WebhookConfigName &&
-			object.GetNamespace() == r.getNamespace(r.Config.WebhookConfigNamespace)
+		return true
+		//return object.GetName() == r.Config.WebhookConfigName &&
+		//	object.GetNamespace() == r.getNamespace(r.Config.WebhookConfigNamespace)
 	})
 
 	return ctrl.NewControllerManagedBy(mgr).

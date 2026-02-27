@@ -215,7 +215,7 @@ All configuration via environment variables:
 | `CERT_DIR` | Directory to write certificates | `/tmp/webhook-certs` | No |
 | `CERT_VALIDITY_DAYS` | Certificate validity period in days | `30` | No |
 | `CERT_ROTATION_THRESHOLD` | Rotation threshold as decimal (0-1) | `0.8` | No |
-| `KUBECONFIG` | Path to target cluster kubeconfig | In-cluster config | No |
+| `TARGET_KUBECONFIG` | Path to target cluster kubeconfig | In-cluster config | No |
 | `ENABLE_LEADER_ELECTION` | Enable leader election | `true` | No |
 | `LEADER_ELECTION_ID` | Leader election lease name | `webhook-injector-leader` | No |
 | `LEADER_ELECTION_NAMESPACE` | Leader election lease namespace | Pod namespace | No |

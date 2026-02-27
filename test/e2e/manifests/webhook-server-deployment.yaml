@@ -77,7 +77,7 @@ spec:
               value: "60s"  # Short validity for testing
             - name: CERT_ROTATION_THRESHOLD
               value: "0.5"
-            - name: KUBECONFIG
+            - name: TARGET_KUBECONFIG
               value: /etc/target-kubeconfig/kubeconfig
             - name: ENABLE_LEADER_ELECTION
               value: "true"

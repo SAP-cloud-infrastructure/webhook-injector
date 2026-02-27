@@ -75,7 +75,7 @@ func LoadFromEnv() (*Config, error) {
 		CertDir:                 getEnv("CERT_DIR", "/tmp/webhook-certs"),
 		CertValidity:            validity,
 		CertRotationThreshold:   getEnvFloat("CERT_ROTATION_THRESHOLD", 0.8),
-		Kubeconfig:              getEnv("KUBECONFIG", ""),
+		Kubeconfig:              getEnv("TARGET_KUBECONFIG", ""),
 		EnableLeaderElection:    getEnvBool("ENABLE_LEADER_ELECTION", true),
 		LeaderElectionID:        getEnv("LEADER_ELECTION_ID", "webhook-injector-leader"),
 		LeaderElectionNamespace: getEnv("LEADER_ELECTION_NAMESPACE", ""),

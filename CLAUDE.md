@@ -175,14 +175,14 @@ All configuration via environment variables (no flags). See `pkg/config/config.g
 - `CERT_DIR` - Where to write certificate files
 - `CERT_VALIDITY` - Certificate lifetime as duration (e.g., "720h", "30d", "1y")
 - `CERT_ROTATION_THRESHOLD` - When to rotate (0-1)
-- `KUBECONFIG` - Path to target cluster kubeconfig (optional, defaults to in-cluster)
+- `TARGET_KUBECONFIG` - Path to target cluster kubeconfig (optional, defaults to in-cluster)
 - `ENABLE_LEADER_ELECTION` - Enable HA with multiple replicas
 - `SYNC_PERIOD` - Reconciliation interval
 
 ## Remote Cluster Support
 
 The target cluster client is created in `main.go`:
-- If `KUBECONFIG` env var set: Use explicit kubeconfig file
+- If `TARGET_KUBECONFIG` env var set: Use explicit kubeconfig file
 - Otherwise: Use in-cluster config (hosting cluster = target cluster)
 
-This enables the webhook server to run in one cluster while serving webhooks for a different cluster.
+**Important**: Use `TARGET_KUBECONFIG` not `KUBECONFIG` to avoid interfering with the manager's hosting cluster connection (which uses standard client-go config loading that checks KUBECONFIG).
