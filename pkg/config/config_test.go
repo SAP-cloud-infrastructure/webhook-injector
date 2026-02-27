@@ -120,3 +120,69 @@ func TestLoadFromEnv_CertValidity_Duration(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  *Config
+		wantErr bool
+	}{
+		{
+			name: "valid config",
+			config: &Config{
+				WebhookConfigName: "test-config",
+				CertValidity:      720 * time.Hour,
+			},
+			wantErr: false,
+		},
+		{
+			name: "missing webhook config name",
+			config: &Config{
+				WebhookConfigName: "",
+				CertValidity:      720 * time.Hour,
+			},
+			wantErr: true,
+		},
+		{
+			name: "zero certificate validity",
+			config: &Config{
+				WebhookConfigName: "test-config",
+				CertValidity:      0,
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative certificate validity",
+			config: &Config{
+				WebhookConfigName: "test-config",
+				CertValidity:      -1 * time.Hour,
+			},
+			wantErr: true,
+		},
+		{
+			name: "certificate validity below minimum",
+			config: &Config{
+				WebhookConfigName: "test-config",
+				CertValidity:      30 * time.Second,
+			},
+			wantErr: true,
+		},
+		{
+			name: "certificate validity at minimum boundary",
+			config: &Config{
+				WebhookConfigName: "test-config",
+				CertValidity:      1 * time.Minute,
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

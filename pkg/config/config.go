@@ -88,6 +88,12 @@ func (c *Config) Validate() error {
 	if c.WebhookConfigName == "" {
 		return ErrMissingWebhookConfigName
 	}
+	if c.CertValidity <= 0 {
+		return fmt.Errorf("CERT_VALIDITY must be positive, got %v", c.CertValidity)
+	}
+	if c.CertValidity < time.Minute {
+		return fmt.Errorf("CERT_VALIDITY too short: %v (minimum 1m)", c.CertValidity)
+	}
 	return nil
 }
 

@@ -109,7 +109,7 @@ func TestIntegration_EndToEnd(t *testing.T) {
 		CertSecretName:         "test-certs",
 		CertSecretNamespace:    "test-integration",
 		CertDir:                tmpDir,
-		CertValidityDays:       30,
+		CertValidity:           30 * 24 * time.Hour,
 		CertRotationThreshold:  0.8,
 		SyncPeriod:             1 * time.Minute,
 	}
@@ -262,7 +262,7 @@ webhooks:
 		CertSecretName:         "test-certs-sans",
 		CertSecretNamespace:    "test-sans",
 		CertDir:                tmpDir,
-		CertValidityDays:       30,
+		CertValidity:           30 * 24 * time.Hour,
 		CertRotationThreshold:  0.8,
 		SyncPeriod:             1 * time.Minute,
 	}
@@ -495,7 +495,7 @@ func TestIntegration_ErrorHandling(t *testing.T) {
 		CertSecretName:         "test-certs-err",
 		CertSecretNamespace:    "test-errors",
 		CertDir:                tmpDir,
-		CertValidityDays:       30,
+		CertValidity:           30 * 24 * time.Hour,
 		CertRotationThreshold:  0.8,
 		SyncPeriod:             1 * time.Minute,
 	}
@@ -634,7 +634,7 @@ func TestIntegration_MultiReplicaBehavior(t *testing.T) {
 		CertSecretName:         "test-certs-replicas",
 		CertSecretNamespace:    "test-replicas",
 		CertDir:                leaderTmpDir,
-		CertValidityDays:       30,
+		CertValidity:           30 * 24 * time.Hour,
 		CertRotationThreshold:  0.8,
 		SyncPeriod:             1 * time.Minute,
 	}
