@@ -23,6 +23,30 @@ path = [
   "go.sum",
   "Makefile.maker.yaml",
   "vendor/modules.txt",
+  "test/e2e/go.mod",
+  "test/e2e/go.sum",
+]
+SPDX-FileCopyrightText = "SAP SE or an SAP affiliate company"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = [
+  "CLAUDE.md",
+  "README.md",
+  "test/e2e/README.md",
+  "test/e2e/.gitignore",
+  "config/deployment.yaml",
+  "config/kustomization.yaml",
+  "config/pdb.yaml",
+  "config/rbac.yaml",
+  "docs/plans/*.md",
+  "test/e2e/kind-hosting.yaml",
+  "test/e2e/kind-target.yaml",
+  "test/e2e/manifests/*.yaml",
+  "test/e2e/testdata/*.yaml",
+  "test/e2e/setup.sh",
+  "test/e2e/teardown.sh",
+  "test/e2e/skaffold.yaml",
 ]
 SPDX-FileCopyrightText = "SAP SE or an SAP affiliate company"
 SPDX-License-Identifier = "Apache-2.0"
