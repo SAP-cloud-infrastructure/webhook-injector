@@ -1,0 +1,96 @@
+# Copyright 2026 SAP SE or an SAP affiliate company
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-server
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: webhook-server
+  template:
+    metadata:
+      labels:
+        app: webhook-server
+    spec:
+      serviceAccountName: webhook-injector
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: webhook-server
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: webhook-server
+          image: test-webhook-server  # Replaced by ko
+          ports:
+            - containerPort: 9443
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9443
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/webhook-certs
+              readOnly: true
+
+        - name: webhook-injector
+          image: webhook-injector  # Replaced by ko
+          env:
+            - name: WEBHOOK_CONFIG_NAME
+              value: webhook-config
+            - name: WEBHOOK_CONFIG_NAMESPACE
+              value: default
+            - name: CERT_SECRET_NAMESPACE
+              value: default
+            - name: CERT_VALIDITY
+              value: "60s"  # Short validity for testing
+            - name: CERT_ROTATION_THRESHOLD
+              value: "0.5"
+            - name: KUBECONFIG
+              value: /etc/target-kubeconfig/kubeconfig
+            - name: ENABLE_LEADER_ELECTION
+              value: "true"
+            - name: LEADER_ELECTION_NAMESPACE
+              value: default
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/webhook-certs
+            - name: target-kubeconfig
+              mountPath: /etc/target-kubeconfig
+              readOnly: true
+
+      volumes:
+        - name: webhook-certs
+          emptyDir: {}
+        - name: target-kubeconfig
+          secret:
+            secretName: target-kubeconfig
