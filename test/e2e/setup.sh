@@ -65,7 +65,7 @@ kubectl --context kind-hosting create secret generic target-kubeconfig \
     --namespace=default \
     --from-file=kubeconfig="$TARGET_KUBECONFIG" \
     --dry-run=client -o yaml | \
-    kubectl --context kind-hosting apply -f -
+    kubectl --context kind-hosting apply --namespace=default -f -
 
 rm "$TARGET_KUBECONFIG"
 
