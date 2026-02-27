@@ -1,0 +1,5 @@
+# Ignore kind cluster kubeconfig files
+*.kubeconfig
+
+# Ignore test artifacts
+*.log
