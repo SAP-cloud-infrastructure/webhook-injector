@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -88,6 +89,11 @@ func main() {
 		LeaderElection:          cfg.EnableLeaderElection,
 		LeaderElectionID:        cfg.LeaderElectionID,
 		LeaderElectionNamespace: cfg.LeaderElectionNamespace,
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{
+				getPodNamespace(cfg): {},
+			},
+		},
 	})
 	if err != nil {
 		setupLog.Error(err, "Unable to create manager")
@@ -199,4 +205,22 @@ func getTargetClient(cfg *config.Config) (client.Client, error) {
 	}
 
 	return targetClient, nil
+}
+
+// getPodNamespace returns the namespace the pod is running in
+func getPodNamespace(cfg *config.Config) string {
+	// Try config namespaces first
+	if cfg.WebhookConfigNamespace != "" {
+		return cfg.WebhookConfigNamespace
+	}
+	if cfg.CertSecretNamespace != "" {
+		return cfg.CertSecretNamespace
+	}
+
+	// Try to read from pod
+	if ns, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		return string(ns)
+	}
+
+	return "default"
 }
