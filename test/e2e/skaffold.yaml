@@ -21,7 +21,7 @@ build:
   artifacts:
     - image: webhook-injector
       ko:
-        main: ../../cmd/webhook-injector
+        main: github.com/sap-cloud-infrastructure/webhook-injector/cmd/webhook-injector
         dependencies:
           paths:
             - ../../pkg
