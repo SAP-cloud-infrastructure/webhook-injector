@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: skaffold/v4beta11
+apiVersion: skaffold/v2beta29
 kind: Config
 metadata:
   name: webhook-injector-e2e
@@ -41,7 +41,7 @@ deploy:
     hooks:
       before:
         - host:
-            command: ["sh", "-c", "if [ -f webhook-endpoint.txt ]; then export WEBHOOK_ENDPOINT=$(cat webhook-endpoint.txt) && envsubst < manifests/webhook-config.yaml > manifests/webhook-config-rendered.yaml; fi"]
+            command: ["sh", "-c", "export WEBHOOK_ENDPOINT=$(cat webhook-endpoint.txt) && envsubst < manifests/webhook-config.yaml > manifests/webhook-config-rendered.yaml"]
     manifests:
       - manifests/rbac.yaml
       - manifests/service.yaml
