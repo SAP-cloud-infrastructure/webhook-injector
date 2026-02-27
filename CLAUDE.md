@@ -70,7 +70,7 @@ The application contains two independent controllers with different leader elect
    - Watches: Certificate Secret (in hosting cluster)
    - Writes certificates to local filesystem (`/tmp/webhook-certs` by default)
    - Optimization: Only writes when certificate content changes (prevents unnecessary webhook server reloads)
-   - Leader election: Implements `NeedLeaderElection() = false`
+   - Leader election: Uses `WithOptions(controller.Options{NeedLeaderElection: ptr.To(false)})`
 
 ### Key Architectural Decisions
 
@@ -141,8 +141,9 @@ test/integration/               Integration tests (use envtest)
 
 **Leader election:**
 - Configured in main.go via manager options
-- WebhookReconciler: Does NOT implement `NeedLeaderElection()` interface → defaults to requiring leader
-- CertificateReloader: Implements `NeedLeaderElection() = false` → runs on all replicas
+- WebhookReconciler: Uses default leader election behavior (no WithOptions) → requires leader
+- CertificateReloader: Uses `WithOptions(controller.Options{NeedLeaderElection: ptr.To(false)})` → runs on all replicas
+- The explicit WithOptions approach is required because controller-runtime's builder doesn't always recognize the NeedLeaderElection interface method
 
 **Logging:**
 - Use `logger := log.FromContext(ctx)` not `log := log.FromContext(ctx)` to avoid shadowing imported `log` package

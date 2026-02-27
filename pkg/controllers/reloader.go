@@ -26,7 +26,6 @@ import (
 	"path/filepath"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -128,7 +127,7 @@ func (r *CertificateReloader) SetupWithManager(mgr ctrl.Manager) error {
 		For(&corev1.Secret{}).
 		WithEventFilter(secretPredicate).
 		WithOptions(controller.Options{
-			NeedLeaderElection: ptr.To(false),
+			NeedLeaderElection: new(bool), // false pointer
 		}).
 		Complete(r)
 }

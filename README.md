@@ -38,9 +38,9 @@ webhook-injector runs as a sidecar with two internal controllers:
 
 ### Leader Election Details
 
-Uses controller-runtime's `LeaderElectionRunnable` interface:
-- **WebhookReconciler**: Does NOT implement `NeedLeaderElection()` → defaults to requiring leader election
-- **CertificateReloader**: Implements `NeedLeaderElection() = false` → runs on all replicas
+Uses controller-runtime's leader election with explicit configuration via `WithOptions`:
+- **WebhookReconciler**: Uses default behavior (no WithOptions) → requires leader election
+- **CertificateReloader**: Uses `WithOptions(controller.Options{NeedLeaderElection: ptr.To(false)})` → runs on all replicas
 
 Example with 3 replicas:
 ```
