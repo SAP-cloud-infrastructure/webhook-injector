@@ -19,4 +19,7 @@ bin/
 kubeconfig
 
 # Build artifacts
-dist/
+build/
+
+# claude
+.claude/*.local.*

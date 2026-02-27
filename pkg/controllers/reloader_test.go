@@ -1,3 +1,17 @@
+// Copyright 2026 SAP SE or an SAP affiliate company
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package controllers
 
 import (
@@ -21,7 +35,9 @@ func TestCertificateReloader(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
 
 	// Create test secret
 	secret := &corev1.Secret{
@@ -90,7 +106,9 @@ func TestCertificateReloader_SkipsUnchangedCertificates(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
 
 	// Pre-populate files with existing certificate data
 	existingCerts := map[string][]byte{
@@ -189,7 +207,9 @@ func TestCertificateReloader_UpdatesChangedCertificates(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
 
 	// Pre-populate files with OLD certificate data
 	oldCerts := map[string][]byte{
@@ -269,7 +289,9 @@ func TestCertificateReloader_UpdatesOnlyChangedFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
 
 	// Pre-populate files
 	existingCerts := map[string][]byte{
@@ -298,9 +320,9 @@ func TestCertificateReloader_UpdatesOnlyChangedFiles(t *testing.T) {
 
 	// Create secret with ONE changed file (tls.crt)
 	newCerts := map[string][]byte{
-		"ca.crt":  []byte("unchanged-ca-cert"),     // SAME
-		"tls.crt": []byte("new-server-cert"),       // CHANGED
-		"tls.key": []byte("unchanged-server-key"),  // SAME
+		"ca.crt":  []byte("unchanged-ca-cert"),    // SAME
+		"tls.crt": []byte("new-server-cert"),      // CHANGED
+		"tls.key": []byte("unchanged-server-key"), // SAME
 	}
 
 	secret := &corev1.Secret{

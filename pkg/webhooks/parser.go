@@ -1,7 +1,22 @@
+// Copyright 2026 SAP SE or an SAP affiliate company
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package webhooks
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -33,7 +48,7 @@ func ParseWebhookConfigurations(data []byte) (*WebhookConfigurations, error) {
 		obj := &runtime.Unknown{}
 		err := decoder.Decode(obj)
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			return nil, fmt.Errorf("failed to decode YAML document: %w", err)
@@ -80,7 +95,7 @@ func ExtractServiceReferences(configs *WebhookConfigurations) []certificates.Ser
 			} else if webhook.ClientConfig.URL != nil && *webhook.ClientConfig.URL != "" {
 				// Parse URL to extract hostname
 				if hostname := extractHostnameFromURL(*webhook.ClientConfig.URL); hostname != "" {
-					key := fmt.Sprintf("hostname:%s", hostname)
+					key := "hostname:" + hostname
 					refMap[key] = certificates.ServiceReference{
 						Hostname: hostname,
 					}
@@ -101,7 +116,7 @@ func ExtractServiceReferences(configs *WebhookConfigurations) []certificates.Ser
 			} else if webhook.ClientConfig.URL != nil && *webhook.ClientConfig.URL != "" {
 				// Parse URL to extract hostname
 				if hostname := extractHostnameFromURL(*webhook.ClientConfig.URL); hostname != "" {
-					key := fmt.Sprintf("hostname:%s", hostname)
+					key := "hostname:" + hostname
 					refMap[key] = certificates.ServiceReference{
 						Hostname: hostname,
 					}

@@ -1,3 +1,17 @@
+// Copyright 2026 SAP SE or an SAP affiliate company
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package webhooks
 
 import (
@@ -135,12 +149,12 @@ func TestExtractServiceReferences_WithURLs(t *testing.T) {
 		Webhooks: []admissionv1.MutatingWebhook{
 			{
 				ClientConfig: admissionv1.WebhookClientConfig{
-					URL: strPtr("https://webhook.example.com:9443/mutate"),
+					URL: new("https://webhook.example.com:9443/mutate"),
 				},
 			},
 			{
 				ClientConfig: admissionv1.WebhookClientConfig{
-					URL: strPtr("https://another-webhook.example.com/validate"),
+					URL: new("https://another-webhook.example.com/validate"),
 				},
 			},
 		},
@@ -150,12 +164,12 @@ func TestExtractServiceReferences_WithURLs(t *testing.T) {
 		Webhooks: []admissionv1.ValidatingWebhook{
 			{
 				ClientConfig: admissionv1.WebhookClientConfig{
-					URL: strPtr("https://webhook.example.com:9443/mutate"), // Duplicate hostname
+					URL: new("https://webhook.example.com:9443/mutate"), // Duplicate hostname
 				},
 			},
 			{
 				ClientConfig: admissionv1.WebhookClientConfig{
-					URL: strPtr("https://third-webhook.test.local:8443/hook"),
+					URL: new("https://third-webhook.test.local:8443/hook"),
 				},
 			},
 		},
@@ -209,7 +223,7 @@ func TestExtractServiceReferences_MixedServiceAndURL(t *testing.T) {
 			},
 			{
 				ClientConfig: admissionv1.WebhookClientConfig{
-					URL: strPtr("https://external-webhook.example.com/mutate"),
+					URL: new("https://external-webhook.example.com/mutate"),
 				},
 			},
 		},
@@ -251,7 +265,7 @@ func TestExtractServiceReferences_InvalidURL(t *testing.T) {
 		Webhooks: []admissionv1.MutatingWebhook{
 			{
 				ClientConfig: admissionv1.WebhookClientConfig{
-					URL: strPtr("not-a-valid-url"),
+					URL: new("not-a-valid-url"),
 				},
 			},
 		},
@@ -267,8 +281,4 @@ func TestExtractServiceReferences_InvalidURL(t *testing.T) {
 	if len(refs) != 0 {
 		t.Errorf("Expected 0 references for invalid URL, got %d", len(refs))
 	}
-}
-
-func strPtr(s string) *string {
-	return &s
 }

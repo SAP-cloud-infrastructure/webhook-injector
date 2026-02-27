@@ -1,16 +1,31 @@
+// Copyright 2026 SAP SE or an SAP affiliate company
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package controllers
 
 import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -34,7 +49,7 @@ type WebhookReconciler struct {
 
 // Reconcile handles ConfigMap changes and certificate rotation
 func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Fetch the ConfigMap
 	configMap := &corev1.ConfigMap{}
@@ -43,12 +58,12 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	log.Info("Reconciling webhook configuration", "configmap", req.NamespacedName)
+	logger.Info("Reconciling webhook configuration", "configmap", req.NamespacedName)
 
 	// Parse webhook configurations
 	webhooksYAML, ok := configMap.Data["webhooks.yaml"]
 	if !ok {
-		return ctrl.Result{}, fmt.Errorf("webhooks.yaml not found in ConfigMap")
+		return ctrl.Result{}, errors.New("webhooks.yaml not found in ConfigMap")
 	}
 
 	configs, err := webhooks.ParseWebhookConfigurations([]byte(webhooksYAML))
@@ -59,7 +74,7 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Extract service references
 	services := webhooks.ExtractServiceReferences(configs)
 	if len(services) == 0 {
-		log.Info("No service references found in webhook configurations")
+		logger.Info("No service references found in webhook configurations")
 		return ctrl.Result{}, nil
 	}
 
@@ -70,7 +85,7 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if needsGeneration {
-		log.Info("Generating certificates", "services", len(services))
+		logger.Info("Generating certificates", "services", len(services))
 		if err := r.generateAndStoreCertificates(ctx, services); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to generate certificates: %w", err)
 		}
@@ -95,7 +110,7 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, fmt.Errorf("failed to apply webhook configurations: %w", err)
 	}
 
-	log.Info("Reconciliation complete")
+	logger.Info("Reconciliation complete")
 
 	// Requeue after sync period
 	return ctrl.Result{RequeueAfter: r.Config.SyncPeriod}, nil
@@ -111,7 +126,7 @@ func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []ce
 	secret := &corev1.Secret{}
 	err := r.Client.Get(ctx, secretKey, secret)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return nil, true, nil // Needs generation
 		}
 		return nil, false, err
@@ -131,13 +146,13 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 	// Get server certificate from secret
 	certPEM, ok := secret.Data["tls.crt"]
 	if !ok {
-		return true, fmt.Errorf("tls.crt not found in secret")
+		return true, errors.New("tls.crt not found in secret")
 	}
 
 	// Parse PEM block
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		return true, fmt.Errorf("failed to decode certificate PEM")
+		return true, errors.New("failed to decode certificate PEM")
 	}
 
 	// Parse certificate
@@ -238,7 +253,7 @@ func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, se
 	existing := &corev1.Secret{}
 	err = r.Client.Get(ctx, types.NamespacedName{Name: secret.Name, Namespace: secret.Namespace}, existing)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return r.Client.Create(ctx, secret)
 		}
 		return err
@@ -250,22 +265,22 @@ func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, se
 
 // applyWebhookConfigurations applies webhook configs to target cluster
 func (r *WebhookReconciler) applyWebhookConfigurations(ctx context.Context, configs *webhooks.WebhookConfigurations) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Apply mutating webhook configurations
 	for _, mwc := range configs.Mutating {
-		log.Info("Applying MutatingWebhookConfiguration", "name", mwc.Name)
+		logger.Info("Applying MutatingWebhookConfiguration", "name", mwc.Name)
 
 		existing := &admissionv1.MutatingWebhookConfiguration{}
 		err := r.TargetClient.Get(ctx, types.NamespacedName{Name: mwc.Name}, existing)
 
 		if err != nil {
-			if errors.IsNotFound(err) {
+			if apierrors.IsNotFound(err) {
 				// Create new
 				if err := r.TargetClient.Create(ctx, mwc); err != nil {
 					return fmt.Errorf("failed to create MutatingWebhookConfiguration %s: %w", mwc.Name, err)
 				}
-				log.Info("Created MutatingWebhookConfiguration", "name", mwc.Name)
+				logger.Info("Created MutatingWebhookConfiguration", "name", mwc.Name)
 			} else {
 				return fmt.Errorf("failed to get MutatingWebhookConfiguration %s: %w", mwc.Name, err)
 			}
@@ -275,24 +290,24 @@ func (r *WebhookReconciler) applyWebhookConfigurations(ctx context.Context, conf
 			if err := r.TargetClient.Update(ctx, existing); err != nil {
 				return fmt.Errorf("failed to update MutatingWebhookConfiguration %s: %w", mwc.Name, err)
 			}
-			log.Info("Updated MutatingWebhookConfiguration", "name", mwc.Name)
+			logger.Info("Updated MutatingWebhookConfiguration", "name", mwc.Name)
 		}
 	}
 
 	// Apply validating webhook configurations
 	for _, vwc := range configs.Validating {
-		log.Info("Applying ValidatingWebhookConfiguration", "name", vwc.Name)
+		logger.Info("Applying ValidatingWebhookConfiguration", "name", vwc.Name)
 
 		existing := &admissionv1.ValidatingWebhookConfiguration{}
 		err := r.TargetClient.Get(ctx, types.NamespacedName{Name: vwc.Name}, existing)
 
 		if err != nil {
-			if errors.IsNotFound(err) {
+			if apierrors.IsNotFound(err) {
 				// Create new
 				if err := r.TargetClient.Create(ctx, vwc); err != nil {
 					return fmt.Errorf("failed to create ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
 				}
-				log.Info("Created ValidatingWebhookConfiguration", "name", vwc.Name)
+				logger.Info("Created ValidatingWebhookConfiguration", "name", vwc.Name)
 			} else {
 				return fmt.Errorf("failed to get ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
 			}
@@ -302,7 +317,7 @@ func (r *WebhookReconciler) applyWebhookConfigurations(ctx context.Context, conf
 			if err := r.TargetClient.Update(ctx, existing); err != nil {
 				return fmt.Errorf("failed to update ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
 			}
-			log.Info("Updated ValidatingWebhookConfiguration", "name", vwc.Name)
+			logger.Info("Updated ValidatingWebhookConfiguration", "name", vwc.Name)
 		}
 	}
 

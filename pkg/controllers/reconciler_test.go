@@ -1,9 +1,24 @@
+// Copyright 2026 SAP SE or an SAP affiliate company
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package controllers
 
 import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"slices"
 	"testing"
 	"time"
 
@@ -21,8 +36,12 @@ import (
 
 func TestWebhookReconciler_ReconcileConfigMap(t *testing.T) {
 	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = admissionv1.AddToScheme(s)
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
+	if err := admissionv1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
 
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -115,13 +134,7 @@ webhooks:
 		"webhook-svc.default.svc.cluster.local",
 	}
 	for _, expectedSAN := range expectedSANs {
-		found := false
-		for _, dnsName := range cert.DNSNames {
-			if dnsName == expectedSAN {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(cert.DNSNames, expectedSAN)
 		if !found {
 			t.Errorf("Expected certificate to contain SAN '%s', found: %v", expectedSAN, cert.DNSNames)
 		}
@@ -130,8 +143,12 @@ webhooks:
 
 func TestWebhookReconciler_ApplyWebhooks(t *testing.T) {
 	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = admissionv1.AddToScheme(s)
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
+	if err := admissionv1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
 
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -215,17 +232,19 @@ webhooks:
 
 func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) {
 	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
 
 	// Create a certificate that will expire soon relative to total validity
 	// For 80% threshold on 30 day validity: rotate when < 24 days remain
 	// Generate cert with 25 days validity, then simulate it was created 20 days ago
 	// So remaining = 5 days out of 25 day total = 20% remaining < 80% threshold
 	cfg := &config.Config{
-		CertSecretName:         "test-certs",
-		CertSecretNamespace:    "default",
-		CertValidityDays:       30,
-		CertRotationThreshold:  0.8, // Rotate at 80% of validity
+		CertSecretName:        "test-certs",
+		CertSecretNamespace:   "default",
+		CertValidityDays:      30,
+		CertRotationThreshold: 0.8, // Rotate at 80% of validity
 	}
 
 	// Generate a certificate with short validity (6 hours)
@@ -271,19 +290,6 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) 
 	// Sleep briefly to let some time pass, reducing remaining validity below threshold
 	time.Sleep(2 * time.Second)
 
-	// Check certificates - should need rotation due to expiry
-	// With 6h validity and 80% threshold, needs rotation when < 4.8h remain
-	// After 2 seconds, ~5.99h remain out of 6h = 99.9% > 80%, so still valid
-	// But the point is to test the logic works
-	_, needsRotation, err := reconciler.checkCertificates(context.Background(), services)
-	if err != nil {
-		t.Fatalf("checkCertificates failed: %v", err)
-	}
-
-	// With such short validity (6h) and 80% threshold, it should need rotation
-	// Actually, let's use even shorter: 1 second validity
-	// Then after sleep, it's near expiry
-
 	// Better approach: Generate with 1 second validity, sleep 0.9s, check
 	// Remaining = 0.1s out of 1s = 10% < 80%
 
@@ -312,7 +318,7 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) 
 	time.Sleep(900 * time.Millisecond)
 
 	// Now check - should need rotation (10% remaining < 80% threshold)
-	_, needsRotation, err = reconciler.checkCertificates(context.Background(), services)
+	_, needsRotation, err := reconciler.checkCertificates(context.Background(), services)
 	if err != nil {
 		t.Fatalf("checkCertificates failed: %v", err)
 	}
@@ -324,13 +330,15 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) 
 
 func TestWebhookReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) {
 	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
 
 	cfg := &config.Config{
-		CertSecretName:         "test-certs",
-		CertSecretNamespace:    "default",
-		CertValidityDays:       30,
-		CertRotationThreshold:  0.8,
+		CertSecretName:        "test-certs",
+		CertSecretNamespace:   "default",
+		CertValidityDays:      30,
+		CertRotationThreshold: 0.8,
 	}
 
 	// Generate a fresh certificate (30 days validity, well above 80% threshold)
@@ -385,13 +393,15 @@ func TestWebhookReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) 
 
 func TestWebhookReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testing.T) {
 	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
 
 	cfg := &config.Config{
-		CertSecretName:         "test-certs",
-		CertSecretNamespace:    "default",
-		CertValidityDays:       30,
-		CertRotationThreshold:  0.8,
+		CertSecretName:        "test-certs",
+		CertSecretNamespace:   "default",
+		CertValidityDays:      30,
+		CertRotationThreshold: 0.8,
 	}
 
 	// Generate certificate with one service
@@ -449,4 +459,3 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testin
 		t.Error("Expected needsRotation=true when service references change")
 	}
 }
-

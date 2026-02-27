@@ -1,0 +1,63 @@
+metadata:
+  url: https://github.wdf.sap.corp/sap-cloud-infrastructure/webhook-injector
+
+binaries:
+  # we want to scikube to be the release binary
+  - name: webhook-injector
+    fromPackage: ./cmd/webhook-injector
+    installTo: bin/
+
+controllerGen:
+  enabled: false
+
+dockerfile:
+  enabled: true
+  entrypoint: [ "/usr/bin/webhook-injector" ]
+  extraIgnores:
+    - /_scratch
+  useBuildKit: true
+
+githubWorkflow:
+  global:
+    defaultBranch: main
+  ci:
+    enabled: true
+    ignorePaths: []
+
+golang:
+  enableVendoring: false
+  setGoModVersion: true
+
+golangciLint:
+  createConfig: true
+  timeout: 3m
+
+renovate:
+  enabled: true
+
+reuse:
+  annotations:
+  - SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and Gardener contributors
+    SPDX-License-Identifier: Apache-2.0
+    paths:
+    - internal/webhook/add.go
+    - internal/webhook/config/config.go
+    - internal/webhook/shootadmission/add.go
+    - internal/webhook/token/add.go
+    - test/integration/webhook/token/token_suite_test.go
+    - test/integration/webhook/token/token_test.go
+
+shellCheck:
+  ignorePaths:
+    - _scratch/*
+  opts: '--external-sources'
+
+testPackages:
+  except: test/integration
+
+verbatim: |
+  check: test-integration
+  test-integration: FORCE
+    @printf "\e[1;36m>> Running integration tests\e[0m\n"
+    KUBEBUILDER_ASSETS="$(shell setup-envtest use -p path 1.35.x)" go test -v -tags=integration ./test/integration/...
+    

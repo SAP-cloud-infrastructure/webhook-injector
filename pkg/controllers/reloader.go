@@ -1,8 +1,23 @@
+// Copyright 2026 SAP SE or an SAP affiliate company
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package controllers
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,7 +46,7 @@ func (r *CertificateReloader) NeedLeaderElection() bool {
 
 // Reconcile reads certificates from Secret and writes to disk
 func (r *CertificateReloader) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Fetch the Secret
 	secret := &corev1.Secret{}
@@ -40,7 +55,7 @@ func (r *CertificateReloader) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	log.Info("Reloading certificates from Secret", "secret", req.NamespacedName)
+	logger.Info("Reloading certificates from Secret", "secret", req.NamespacedName)
 
 	// Write certificates to disk
 	certFiles := map[string]string{
@@ -52,7 +67,7 @@ func (r *CertificateReloader) Reconcile(ctx context.Context, req ctrl.Request) (
 	for secretKey, fileName := range certFiles {
 		data, ok := secret.Data[secretKey]
 		if !ok {
-			log.Error(fmt.Errorf("missing key in secret"), "Missing certificate data", "key", secretKey)
+			logger.Error(errors.New("missing key in secret"), "Missing certificate data", "key", secretKey)
 			continue
 		}
 
@@ -61,7 +76,7 @@ func (r *CertificateReloader) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	log.Info("Certificates reloaded successfully")
+	logger.Info("Certificates reloaded successfully")
 	return ctrl.Result{}, nil
 }
 

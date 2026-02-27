@@ -1,3 +1,17 @@
+// Copyright 2026 SAP SE or an SAP affiliate company
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package certificates
 
 import (
@@ -6,13 +20,14 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
 )
 
 // GenerateCA generates a self-signed CA certificate and private key
-func GenerateCA(validity time.Duration) ([]byte, []byte, error) {
+func GenerateCA(validity time.Duration) (caCertPEM, caKeyPEM []byte, err error) {
 	// Generate private key
 	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -45,12 +60,12 @@ func GenerateCA(validity time.Duration) ([]byte, []byte, error) {
 	}
 
 	// Encode to PEM
-	caCertPEM := pem.EncodeToMemory(&pem.Block{
+	caCertPEM = pem.EncodeToMemory(&pem.Block{
 		Type:  "CERTIFICATE",
 		Bytes: caCertDER,
 	})
 
-	caKeyPEM := pem.EncodeToMemory(&pem.Block{
+	caKeyPEM = pem.EncodeToMemory(&pem.Block{
 		Type:  "RSA PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(caKey),
 	})
@@ -59,11 +74,11 @@ func GenerateCA(validity time.Duration) ([]byte, []byte, error) {
 }
 
 // GenerateServerCert generates a server certificate signed by the CA
-func GenerateServerCert(caCertPEM, caKeyPEM []byte, services []ServiceReference, validity time.Duration) ([]byte, []byte, error) {
+func GenerateServerCert(caCertPEM, caKeyPEM []byte, services []ServiceReference, validity time.Duration) (certPEM, keyPEM []byte, err error) {
 	// Parse CA certificate
 	caCertBlock, _ := pem.Decode(caCertPEM)
 	if caCertBlock == nil {
-		return nil, nil, fmt.Errorf("failed to decode CA certificate PEM")
+		return nil, nil, errors.New("failed to decode CA certificate PEM")
 	}
 	caCert, err := x509.ParseCertificate(caCertBlock.Bytes)
 	if err != nil {
@@ -73,7 +88,7 @@ func GenerateServerCert(caCertPEM, caKeyPEM []byte, services []ServiceReference,
 	// Parse CA private key
 	caKeyBlock, _ := pem.Decode(caKeyPEM)
 	if caKeyBlock == nil {
-		return nil, nil, fmt.Errorf("failed to decode CA private key PEM")
+		return nil, nil, errors.New("failed to decode CA private key PEM")
 	}
 	caKey, err := x509.ParsePKCS1PrivateKey(caKeyBlock.Bytes)
 	if err != nil {
@@ -127,15 +142,15 @@ func GenerateServerCert(caCertPEM, caKeyPEM []byte, services []ServiceReference,
 	}
 
 	// Encode to PEM
-	serverCertPEM := pem.EncodeToMemory(&pem.Block{
+	certPEM = pem.EncodeToMemory(&pem.Block{
 		Type:  "CERTIFICATE",
 		Bytes: serverCertDER,
 	})
 
-	serverKeyPEM := pem.EncodeToMemory(&pem.Block{
+	keyPEM = pem.EncodeToMemory(&pem.Block{
 		Type:  "RSA PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(serverKey),
 	})
 
-	return serverCertPEM, serverKeyPEM, nil
+	return certPEM, keyPEM, nil
 }

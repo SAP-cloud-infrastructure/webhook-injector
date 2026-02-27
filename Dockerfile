@@ -1,29 +1,75 @@
-# Build stage
-FROM golang:1.22 as builder
+# SPDX-FileCopyrightText: 2025 SAP SE or an SAP affiliate company
+# SPDX-License-Identifier: Apache-2.0
 
-WORKDIR /workspace
+FROM keppel.eu-de-1.cloud.sap/ccloud-dockerhub-mirror/library/golang:1.26.0-alpine3.23 AS builder
 
-# Copy go mod files
-COPY go.mod go.mod
-COPY go.sum go.sum
+RUN apk add --no-cache --no-progress ca-certificates gcc git make musl-dev
 
-# Cache dependencies
-RUN go mod download
+COPY . /src
+ARG BININFO_BUILD_DATE BININFO_COMMIT_HASH BININFO_VERSION # provided to 'make install'
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+  make -C /src install PREFIX=/pkg GOTOOLCHAIN=local
 
-# Copy source code
-COPY cmd/ cmd/
-COPY pkg/ pkg/
+################################################################################
 
-# Build
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o webhook-injector ./cmd/webhook-injector
+# To only build the tests run: docker build . --target test
+# We can't do `FROM builder AS test` here, as then make prepare-static-check would not be cached during interactive use when developing
+# and caching all the tools, especially golangci-lint, takes a few minutes.
+FROM keppel.eu-de-1.cloud.sap/ccloud-dockerhub-mirror/library/golang:1.26.0-alpine3.23 AS test
 
-# Runtime stage
-FROM gcr.io/distroless/static:nonroot
+COPY Makefile /src/Makefile
 
-WORKDIR /
+# used below by USER
+RUN addgroup -g 4200 appgroup \
+  && adduser -h /home/appuser -s /sbin/nologin -G appgroup -D -u 4200 appuser
 
-COPY --from=builder /workspace/webhook-injector .
+RUN apk add --no-cache --no-progress git make typos py3-pip \
+  && pip3 install --break-system-packages reuse \
+  && make -C /src prepare-static-check
 
-USER 65532:65532
 
-ENTRYPOINT ["/webhook-injector"]
+# We only copy here because we want the "prepare-static-check" to be cacheable.
+# It is not a problem that we are overwriting the go cache from the earlier steps because we do not need to rebuild those tools.
+COPY --from=builder /go /go
+COPY --from=builder /src /src
+
+RUN make -C /src static-check
+
+# Some things like postgres do not like to run as root. For simplicity, just always run as an unprivileged user,
+# but for it to be able to read the go cache, we need to allow it.
+RUN chown -R 4200:4200 /src/ /go/
+USER 4200:4200
+RUN cd /src \
+  && git config --global --add safe.directory /src \
+  && make build/cover.out
+
+################################################################################
+
+FROM keppel.eu-de-1.cloud.sap/ccloud-dockerhub-mirror/library/alpine:3.23
+
+RUN addgroup -g 4200 appgroup \
+  && adduser -h /home/appuser -s /sbin/nologin -G appgroup -D -u 4200 appuser
+
+# upgrade all installed packages to fix potential CVEs in advance
+# also remove apk package manager to hopefully remove dependency on OpenSSL 🤞
+RUN apk upgrade --no-cache --no-progress \
+  && apk del --no-cache --no-progress apk-tools alpine-keys alpine-release musl-utils
+
+COPY --from=builder /etc/ssl/certs/ /etc/ssl/certs/
+COPY --from=builder /etc/ssl/cert.pem /etc/ssl/cert.pem
+COPY --from=builder /pkg/ /usr/
+# make sure all binaries can be executed
+RUN set -x \
+  && webhook-injector --version 2>/dev/null
+
+ARG BININFO_BUILD_DATE BININFO_COMMIT_HASH BININFO_VERSION
+LABEL source_repository="https://github.wdf.sap.corp/sap-cloud-infrastructure/webhook-injector" \
+  org.opencontainers.image.url="https://github.wdf.sap.corp/sap-cloud-infrastructure/webhook-injector" \
+  org.opencontainers.image.created=${BININFO_BUILD_DATE} \
+  org.opencontainers.image.revision=${BININFO_COMMIT_HASH} \
+  org.opencontainers.image.version=${BININFO_VERSION}
+
+USER 4200:4200
+WORKDIR /home/appuser
+ENTRYPOINT [ "/usr/bin/webhook-injector" ]

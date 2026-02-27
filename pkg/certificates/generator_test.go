@@ -1,8 +1,23 @@
+// Copyright 2026 SAP SE or an SAP affiliate company
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package certificates
 
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"slices"
 	"testing"
 	"time"
 )
@@ -80,13 +95,7 @@ func TestGenerateServerCert(t *testing.T) {
 	}
 
 	for _, expectedSAN := range expectedSANs {
-		found := false
-		for _, san := range cert.DNSNames {
-			if san == expectedSAN {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(cert.DNSNames, expectedSAN)
 		if !found {
 			t.Errorf("Expected SAN '%s' not found in certificate", expectedSAN)
 		}
@@ -135,13 +144,7 @@ func TestGenerateServerCert_WithHostnames(t *testing.T) {
 	}
 
 	for _, expectedSAN := range expectedSANs {
-		found := false
-		for _, dnsName := range cert.DNSNames {
-			if dnsName == expectedSAN {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(cert.DNSNames, expectedSAN)
 		if !found {
 			t.Errorf("Expected SAN '%s' not found in certificate. Found: %v", expectedSAN, cert.DNSNames)
 		}
@@ -162,10 +165,10 @@ func TestGenerateServerCert_MixedServiceAndHostname(t *testing.T) {
 
 	// Generate server cert with mixed service and hostname references
 	services := []ServiceReference{
-		{Name: "webhook-svc", Namespace: "default"},      // Service-based
-		{Hostname: "external-webhook.example.com"},      // URL-based
-		{Name: "another-svc", Namespace: "test-ns"},     // Service-based
-		{Hostname: "second-external.test.local"},        // URL-based
+		{Name: "webhook-svc", Namespace: "default"}, // Service-based
+		{Hostname: "external-webhook.example.com"},  // URL-based
+		{Name: "another-svc", Namespace: "test-ns"}, // Service-based
+		{Hostname: "second-external.test.local"},    // URL-based
 	}
 
 	serverCert, _, err := GenerateServerCert(caCert, caKey, services, 30*24*time.Hour)
@@ -197,13 +200,7 @@ func TestGenerateServerCert_MixedServiceAndHostname(t *testing.T) {
 	}
 
 	for _, expectedSAN := range expectedSANs {
-		found := false
-		for _, dnsName := range cert.DNSNames {
-			if dnsName == expectedSAN {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(cert.DNSNames, expectedSAN)
 		if !found {
 			t.Errorf("Expected SAN '%s' not found in certificate. Found: %v", expectedSAN, cert.DNSNames)
 		}
