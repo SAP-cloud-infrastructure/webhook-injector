@@ -42,13 +42,6 @@ type CertificateReloader struct {
 	Config *config.Config
 }
 
-// NeedLeaderElection implements manager.LeaderElectionRunnable
-// Returns false because certificate reloading should happen on ALL replicas,
-// not just the leader. Each replica needs to sync certificates to its own filesystem.
-func (r *CertificateReloader) NeedLeaderElection() bool {
-	return false
-}
-
 // Reconcile reads certificates from Secret and writes to disk
 func (r *CertificateReloader) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -118,7 +111,12 @@ func (r *CertificateReloader) writeCertFile(fileName string, data []byte) error 
 	return nil
 }
 
-// SetupWithManager sets up the controller with the Manager
+// SetupWithManager sets up the controller with the Manager.
+// Leader election is explicitly disabled via WithOptions to ensure this controller
+// runs on ALL replicas. Each replica needs to sync certificates to its own filesystem
+// from the shared Secret. The explicit WithOptions approach is used because
+// controller-runtime's builder doesn't always recognize the NeedLeaderElection
+// interface method.
 func (r *CertificateReloader) SetupWithManager(mgr ctrl.Manager) error {
 	// Only watch the specific certificate Secret
 	secretPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {

@@ -89,6 +89,11 @@ func main() {
 		LeaderElection:          cfg.EnableLeaderElection,
 		LeaderElectionID:        cfg.LeaderElectionID,
 		LeaderElectionNamespace: cfg.LeaderElectionNamespace,
+		// Cache configuration: Restrict manager to watch only the pod's namespace.
+		// This prevents cluster-wide RBAC requirements - the ServiceAccount only needs
+		// namespace-scoped permissions for ConfigMaps and Secrets. Without this, the
+		// manager would attempt to watch at cluster scope and fail with RBAC errors
+		// ("cannot list resource at the cluster scope").
 		Cache: cache.Options{
 			DefaultNamespaces: map[string]cache.Config{
 				getPodNamespace(cfg): {},
@@ -116,17 +121,17 @@ func main() {
 	// How it works:
 	// 1. Manager is configured with LeaderElection: true (see ctrl.Options above)
 	// 2. When multiple replicas start, they compete for a Kubernetes Lease
-	// 3. The winner becomes "leader" and runs ALL controllers
-	// 4. EXCEPT: Controllers implementing LeaderElectionRunnable.NeedLeaderElection() = false
+	// 3. The winner becomes "leader" and runs ALL controllers by default
+	// 4. EXCEPT: Controllers configured with WithOptions(controller.Options{NeedLeaderElection: ptr.To(false)})
 	//    run on ALL replicas regardless of leader election status
 	//
 	// Controller behavior:
-	// - CertificateReloader: implements NeedLeaderElection() = false
+	// - CertificateReloader: Uses WithOptions with NeedLeaderElection=false
 	//   → Runs on ALL replicas (leader + followers)
 	//   → Each replica syncs certificates to its own filesystem
 	//   → Enables webhook servers on all replicas to reload certificates
 	//
-	// - WebhookReconciler: does NOT implement NeedLeaderElection (defaults to true)
+	// - WebhookReconciler: Uses default leader election behavior
 	//   → Runs ONLY on the leader replica
 	//   → Prevents multiple replicas from generating different certificates
 	//   → Prevents race conditions when applying webhooks to target cluster
@@ -136,7 +141,7 @@ func main() {
 	//   Replica 2 (Follower):  CertificateReloader ✓  WebhookReconciler ✗
 	//   Replica 3 (Follower):  CertificateReloader ✓  WebhookReconciler ✗
 
-	// Set up certificate reloader (runs on ALL replicas via NeedLeaderElection() = false)
+	// Set up certificate reloader (runs on ALL replicas via WithOptions)
 	certReloader := &controllers.CertificateReloader{
 		Client: mgr.GetClient(),
 		Config: cfg,

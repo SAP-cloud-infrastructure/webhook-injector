@@ -142,7 +142,7 @@ func teardownClusters(t *testing.T) {
 }
 
 func deployWithSkaffold(t *testing.T) error {
-	cmd := exec.Command("skaffold", "run", "--status-check=false")
+	cmd := exec.Command("skaffold", "run")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -179,7 +179,9 @@ func waitForWebhookReady(t *testing.T, client *kubernetes.Clientset, expectedRep
 	for {
 		select {
 		case <-timeout:
-			// Print pod status before timing out
+			// Print detailed pod status on timeout to aid debugging.
+			// This diagnostic output is intentionally kept as it provides valuable
+			// information when tests fail (container states, restart counts, failure reasons).
 			pods, err := client.CoreV1().Pods("default").List(ctx, metav1.ListOptions{
 				LabelSelector: "app=webhook-server",
 			})

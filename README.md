@@ -309,10 +309,20 @@ gmake e2e-teardown
 ```
 
 **What's tested:**
-- Multi-cluster communication (hosting → target)
-- Load balancing across 3 replicas
-- Zero-downtime during certificate rotation
-- All replicas independently reload certificates
+- **Multi-cluster architecture**: Hosting cluster (webhook server runs) and target cluster (webhooks enforced)
+- **Cross-cluster networking**: Target API server calls webhook in hosting cluster via NodePort + host.docker.internal
+- **High availability**: 3 replicas with leader election - leader generates certs, all replicas reload certs
+- **Load balancing**: Kubernetes Service distributes webhook requests across all 3 replicas
+- **Zero-downtime rotation**: Webhook requests continue succeeding during certificate regeneration and reload
+- **Certificate hot reload**: All replicas independently detect cert changes and reload without restart
+- **Leader election verification**: Only leader generates certificates, but all replicas serve webhook requests
+
+**Test infrastructure:**
+- Uses [ko](https://ko.build/) via Skaffold for fast Go binary builds without Dockerfiles
+- Two kind clusters: `kind-hosting` (2 nodes) and `kind-target` (1 node)
+- NodePort 30443 with kind extraPortMappings for cross-cluster access
+- Test webhook validates ConfigMap creations in target cluster
+- Metrics endpoint tracks request counts and certificate serial numbers per replica
 
 ## Development
 

@@ -40,6 +40,10 @@ type Config struct {
 	CertRotationThreshold float64
 
 	// Target cluster settings
+	// Kubeconfig is intentionally named TARGET_KUBECONFIG (not KUBECONFIG) to avoid
+	// conflicts with controller-runtime's manager setup. The manager uses
+	// ctrl.GetConfigOrDie() which checks the KUBECONFIG environment variable first,
+	// and would incorrectly connect to the target cluster instead of the hosting cluster.
 	Kubeconfig string
 
 	// Leader election settings
