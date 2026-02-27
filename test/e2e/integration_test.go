@@ -142,7 +142,7 @@ func teardownClusters(t *testing.T) {
 }
 
 func deployWithSkaffold(t *testing.T) error {
-	cmd := exec.Command("skaffold", "run")
+	cmd := exec.Command("skaffold", "run", "--status-check=false")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -179,6 +179,25 @@ func waitForWebhookReady(t *testing.T, client *kubernetes.Clientset, expectedRep
 	for {
 		select {
 		case <-timeout:
+			// Print pod status before timing out
+			pods, err := client.CoreV1().Pods("default").List(ctx, metav1.ListOptions{
+				LabelSelector: "app=webhook-server",
+			})
+			if err == nil {
+				t.Logf("Pod status at timeout:")
+				for _, pod := range pods.Items {
+					t.Logf("  Pod %s: Phase=%s", pod.Name, pod.Status.Phase)
+					for _, cs := range pod.Status.ContainerStatuses {
+						t.Logf("    Container %s: Ready=%v, RestartCount=%d", cs.Name, cs.Ready, cs.RestartCount)
+						if cs.State.Waiting != nil {
+							t.Logf("      Waiting: %s - %s", cs.State.Waiting.Reason, cs.State.Waiting.Message)
+						}
+						if cs.State.Terminated != nil {
+							t.Logf("      Terminated: %s - %s", cs.State.Terminated.Reason, cs.State.Terminated.Message)
+						}
+					}
+				}
+			}
 			return fmt.Errorf("timeout waiting for %d replicas to be ready", expectedReplicas)
 		case <-ticker.C:
 			deployment, err := client.AppsV1().Deployments("default").Get(ctx, "webhook-server", metav1.GetOptions{})
