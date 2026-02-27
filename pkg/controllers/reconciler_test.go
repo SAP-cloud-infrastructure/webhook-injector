@@ -78,7 +78,7 @@ webhooks:
 		WebhookConfigNamespace: "default",
 		CertSecretName:         "test-certs",
 		CertSecretNamespace:    "default",
-		CertValidityDays:       30,
+		CertValidity:           30 * 24 * time.Hour,
 		CertDir:                t.TempDir(),
 	}
 
@@ -189,7 +189,7 @@ webhooks:
 		WebhookConfigNamespace: "default",
 		CertSecretName:         "test-certs",
 		CertSecretNamespace:    "default",
-		CertValidityDays:       30,
+		CertValidity:           30 * 24 * time.Hour,
 		CertDir:                t.TempDir(),
 	}
 
@@ -243,7 +243,7 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) 
 	cfg := &config.Config{
 		CertSecretName:        "test-certs",
 		CertSecretNamespace:   "default",
-		CertValidityDays:      30,
+		CertValidity:          30 * 24 * time.Hour,
 		CertRotationThreshold: 0.8, // Rotate at 80% of validity
 	}
 
@@ -337,7 +337,7 @@ func TestWebhookReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) 
 	cfg := &config.Config{
 		CertSecretName:        "test-certs",
 		CertSecretNamespace:   "default",
-		CertValidityDays:      30,
+		CertValidity:          30 * 24 * time.Hour,
 		CertRotationThreshold: 0.8,
 	}
 
@@ -400,7 +400,7 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testin
 	cfg := &config.Config{
 		CertSecretName:        "test-certs",
 		CertSecretNamespace:   "default",
-		CertValidityDays:      30,
+		CertValidity:          30 * 24 * time.Hour,
 		CertRotationThreshold: 0.8,
 	}
 

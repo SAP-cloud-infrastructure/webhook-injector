@@ -223,7 +223,7 @@ func buildExpectedSANs(services []certificates.ServiceReference) map[string]bool
 
 // generateAndStoreCertificates generates certificates and stores them in a Secret
 func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, services []certificates.ServiceReference) error {
-	validity := time.Duration(r.Config.CertValidityDays) * 24 * time.Hour
+	validity := r.Config.CertValidity
 
 	// Generate CA
 	caCert, caKey, err := certificates.GenerateCA(validity)

@@ -22,24 +22,23 @@ import (
 func TestLoadFromEnv(t *testing.T) {
 	// Set test environment variables
 	t.Setenv("WEBHOOK_CONFIG_NAME", "test-config")
-	t.Setenv("CERT_VALIDITY_DAYS", "60")
-	t.Setenv("ENABLE_LEADER_ELECTION", "false")
+	t.Setenv("WEBHOOK_CONFIG_NAMESPACE", "test-ns")
 
-	cfg := LoadFromEnv()
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv failed: %v", err)
+	}
 
 	if cfg.WebhookConfigName != "test-config" {
 		t.Errorf("Expected WebhookConfigName 'test-config', got '%s'", cfg.WebhookConfigName)
 	}
-	if cfg.CertValidityDays != 60 {
-		t.Errorf("Expected CertValidityDays 60, got %d", cfg.CertValidityDays)
-	}
-	if cfg.EnableLeaderElection {
-		t.Error("Expected EnableLeaderElection false, got true")
-	}
 }
 
 func TestLoadFromEnvDefaults(t *testing.T) {
-	cfg := LoadFromEnv()
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv failed: %v", err)
+	}
 
 	if cfg.CertSecretName != "webhook-injector-certs" {
 		t.Errorf("Expected default CertSecretName, got '%s'", cfg.CertSecretName)
@@ -47,13 +46,77 @@ func TestLoadFromEnvDefaults(t *testing.T) {
 	if cfg.CertDir != "/tmp/webhook-certs" {
 		t.Errorf("Expected default CertDir, got '%s'", cfg.CertDir)
 	}
-	if cfg.CertValidityDays != 30 {
-		t.Errorf("Expected default CertValidityDays 30, got %d", cfg.CertValidityDays)
+	if cfg.CertValidity != 720*time.Hour {
+		t.Errorf("Expected default CertValidity 720h, got %v", cfg.CertValidity)
 	}
 	if cfg.CertRotationThreshold != 0.8 {
 		t.Errorf("Expected default CertRotationThreshold 0.8, got %f", cfg.CertRotationThreshold)
 	}
 	if cfg.SyncPeriod != 5*time.Minute {
 		t.Errorf("Expected default SyncPeriod 5m, got %v", cfg.SyncPeriod)
+	}
+}
+
+func TestLoadFromEnv_CertValidity_Duration(t *testing.T) {
+	tests := []struct {
+		name     string
+		envValue string
+		expected time.Duration
+		wantErr  bool
+	}{
+		{
+			name:     "seconds",
+			envValue: "60s",
+			expected: 60 * time.Second,
+			wantErr:  false,
+		},
+		{
+			name:     "minutes",
+			envValue: "5m",
+			expected: 5 * time.Minute,
+			wantErr:  false,
+		},
+		{
+			name:     "hours",
+			envValue: "720h",
+			expected: 720 * time.Hour,
+			wantErr:  false,
+		},
+		{
+			name:     "invalid duration",
+			envValue: "invalid",
+			expected: 0,
+			wantErr:  true,
+		},
+		{
+			name:     "default when empty",
+			envValue: "",
+			expected: 720 * time.Hour, // 30 days default
+			wantErr:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envValue != "" {
+				t.Setenv("CERT_VALIDITY", tt.envValue)
+			}
+
+			cfg, err := LoadFromEnv()
+			if tt.wantErr {
+				if err == nil {
+					t.Error("Expected error but got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+
+			if cfg.CertValidity != tt.expected {
+				t.Errorf("Expected CertValidity %v, got %v", tt.expected, cfg.CertValidity)
+			}
+		})
 	}
 }

@@ -15,6 +15,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -32,7 +33,7 @@ type Config struct {
 	CertDir             string
 
 	// Certificate generation settings
-	CertValidityDays      int
+	CertValidity          time.Duration
 	CertRotationThreshold float64
 
 	// Target cluster settings
@@ -55,14 +56,21 @@ type Config struct {
 }
 
 // LoadFromEnv loads configuration from environment variables with defaults
-func LoadFromEnv() *Config {
+func LoadFromEnv() (*Config, error) {
+	// Parse certificate validity
+	validityStr := getEnv("CERT_VALIDITY", "720h")
+	validity, err := time.ParseDuration(validityStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid CERT_VALIDITY duration: %w", err)
+	}
+
 	return &Config{
 		WebhookConfigName:       getEnv("WEBHOOK_CONFIG_NAME", ""),
 		WebhookConfigNamespace:  getEnv("WEBHOOK_CONFIG_NAMESPACE", ""),
 		CertSecretName:          getEnv("CERT_SECRET_NAME", "webhook-injector-certs"),
 		CertSecretNamespace:     getEnv("CERT_SECRET_NAMESPACE", ""),
 		CertDir:                 getEnv("CERT_DIR", "/tmp/webhook-certs"),
-		CertValidityDays:        getEnvInt("CERT_VALIDITY_DAYS", 30),
+		CertValidity:            validity,
 		CertRotationThreshold:   getEnvFloat("CERT_ROTATION_THRESHOLD", 0.8),
 		Kubeconfig:              getEnv("KUBECONFIG", ""),
 		EnableLeaderElection:    getEnvBool("ENABLE_LEADER_ELECTION", true),
@@ -72,7 +80,7 @@ func LoadFromEnv() *Config {
 		MetricsAddr:             getEnv("METRICS_ADDR", ":8080"),
 		HealthAddr:              getEnv("HEALTH_ADDR", ":8081"),
 		LogLevel:                getEnv("LOG_LEVEL", "info"),
-	}
+	}, nil
 }
 
 // Validate checks if required configuration is present
@@ -86,15 +94,6 @@ func (c *Config) Validate() error {
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
-	}
-	return defaultValue
-}
-
-func getEnvInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intVal, err := strconv.Atoi(value); err == nil {
-			return intVal
-		}
 	}
 	return defaultValue
 }

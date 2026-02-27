@@ -59,7 +59,11 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// Load configuration
-	cfg := config.LoadFromEnv()
+	cfg, err := config.LoadFromEnv()
+	if err != nil {
+		setupLog.Error(err, "failed to load configuration")
+		os.Exit(1)
+	}
 	if err := cfg.Validate(); err != nil {
 		setupLog.Error(err, "Invalid configuration")
 		os.Exit(1)
