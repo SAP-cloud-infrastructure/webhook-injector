@@ -116,7 +116,14 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	logger.Info("Reconciliation complete")
 
-	// Requeue after sync period
+	// Calculate next rotation time from certificate expiry
+	nextRotation := r.calculateNextRotation(secret)
+	if nextRotation > 0 {
+		logger.Info("Scheduling next rotation check", "after", nextRotation)
+		return ctrl.Result{RequeueAfter: nextRotation}, nil
+	}
+
+	// Fallback to sync period if we can't calculate rotation time
 	return ctrl.Result{RequeueAfter: r.Config.SyncPeriod}, nil
 }
 
@@ -230,6 +237,47 @@ func buildExpectedSANs(services []certificates.ServiceReference) map[string]bool
 		}
 	}
 	return sans
+}
+
+// calculateNextRotation calculates when the next certificate rotation check should occur
+// based on the certificate's expiry time and the configured rotation threshold.
+// Returns the duration until the next check, or 0 if the certificate info can't be parsed.
+func (r *WebhookReconciler) calculateNextRotation(secret *corev1.Secret) time.Duration {
+	// Get server certificate from secret
+	certPEM, ok := secret.Data["tls.crt"]
+	if !ok {
+		return 0
+	}
+
+	// Parse PEM block
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return 0
+	}
+
+	// Parse certificate
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return 0
+	}
+
+	// Calculate when the certificate will reach the rotation threshold
+	now := time.Now()
+	totalValidity := cert.NotAfter.Sub(cert.NotBefore)
+
+	// Time when rotation should happen: NotBefore + (totalValidity * threshold)
+	rotationTime := cert.NotBefore.Add(time.Duration(float64(totalValidity) * r.Config.CertRotationThreshold))
+
+	// Calculate duration until rotation time
+	untilRotation := rotationTime.Sub(now)
+
+	// If rotation time has passed or is very soon, return a short duration
+	if untilRotation <= 0 {
+		return time.Second
+	}
+
+	// Add a small buffer (1 second) to ensure we don't miss the rotation window
+	return untilRotation + time.Second
 }
 
 // generateAndStoreCertificates generates certificates and stores them in a Secret
