@@ -46,22 +46,14 @@ spec:
               name: webhook
             - containerPort: 8082
               name: health
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: 8082
-              scheme: HTTP
-            initialDelaySeconds: 60
-            periodSeconds: 10
-            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /readyz
               port: 8082
               scheme: HTTP
-            initialDelaySeconds: 30
+            initialDelaySeconds: 5
             periodSeconds: 5
-            failureThreshold: 6
+            failureThreshold: 2
           volumeMounts:
             - name: webhook-certs
               mountPath: /tmp/webhook-certs
