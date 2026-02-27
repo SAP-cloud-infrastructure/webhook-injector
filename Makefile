@@ -33,11 +33,28 @@ endif
 
 default: build-all
 
-check: test-integration
-test-integration: FORCE
-	@printf "\e[1;36m>> Running integration tests\e[0m\n"
-	KUBEBUILDER_ASSETS="$(shell setup-envtest use -p path 1.35.x)" go test -v -tags=integration ./test/integration/...
-  
+check: test-e2e
+
+.PHONY: test-e2e
+test-e2e: FORCE
+	@printf "\e[1;36m>> Running E2E tests\e[0m\n"
+	cd test/e2e && go test -v -timeout 10m ./...
+
+.PHONY: e2e-setup
+e2e-setup: FORCE
+	@printf "\e[1;36m>> Setting up E2E environment\e[0m\n"
+	cd test/e2e && ./setup.sh
+
+.PHONY: e2e-dev
+e2e-dev: e2e-setup
+	@printf "\e[1;36m>> Starting Skaffold dev mode\e[0m\n"
+	cd test/e2e && skaffold dev
+
+.PHONY: e2e-teardown
+e2e-teardown: FORCE
+	@printf "\e[1;36m>> Tearing down E2E environment\e[0m\n"
+	cd test/e2e && ./teardown.sh
+
 install-goimports: FORCE
 	@if ! hash goimports 2>/dev/null; then printf "\e[1;36m>> Installing goimports (this may take a while)...\e[0m\n"; go install golang.org/x/tools/cmd/goimports@latest; fi
 
