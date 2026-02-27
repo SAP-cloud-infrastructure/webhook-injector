@@ -282,13 +282,21 @@ gmake test
 
 End-to-end tests use two kind clusters to validate multi-cluster, multi-replica behavior:
 
-```bash
-# Automated E2E test
-gmake test-e2e
+**Prerequisites:**
+- [kind](https://kind.sigs.k8s.io/) >= 0.20.0 - `brew install kind`
+- [kubectl](https://kubernetes.io/docs/tasks/tools/) >= 1.28 - `brew install kubectl`
+- [skaffold](https://skaffold.dev/) >= 2.10.0 - `brew install skaffold`
+- [docker](https://www.docker.com/) - Docker Desktop or Docker Engine running
 
-# Manual development workflow
-gmake e2e-setup      # Create clusters
-gmake e2e-dev        # Skaffold dev mode (hot reload)
+**Automated E2E test:**
+```bash
+gmake test-e2e
+```
+
+**Manual development workflow:**
+```bash
+gmake e2e-setup      # Create kind clusters (hosting + target)
+gmake e2e-dev        # Build images with ko, deploy with Skaffold (hot reload)
 
 # Test webhook manually
 kubectl --context kind-target create configmap test-1 --from-literal=key=value
@@ -300,7 +308,11 @@ kubectl --context kind-hosting logs -l app=webhook-server -f
 gmake e2e-teardown
 ```
 
-**Prerequisites:** kind, kubectl, skaffold, docker
+**What's tested:**
+- Multi-cluster communication (hosting → target)
+- Load balancing across 3 replicas
+- Zero-downtime during certificate rotation
+- All replicas independently reload certificates
 
 ## Development
 
