@@ -66,6 +66,18 @@ func main() {
 	lastRequestTime.Store(time.Time{})
 	lastReloadTime.Store(time.Time{})
 
+	// Wait for certificates to be created by webhook-injector
+	log.Println("Waiting for certificates to be generated...")
+	for {
+		if _, err := os.Stat(certFile); err == nil {
+			if _, err := os.Stat(keyFile); err == nil {
+				log.Println("Certificates found, starting server...")
+				break
+			}
+		}
+		time.Sleep(1 * time.Second)
+	}
+
 	// Create certificate watcher for hot reload
 	watcher, err := certwatcher.New(certFile, keyFile)
 	if err != nil {
