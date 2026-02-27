@@ -43,19 +43,22 @@ spec:
           image: test-webhook-server  # Replaced by ko
           ports:
             - containerPort: 9443
+              name: webhook
+            - containerPort: 8082
+              name: health
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 9443
-              scheme: HTTPS
+              port: 8082
+              scheme: HTTP
             initialDelaySeconds: 60
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 9443
-              scheme: HTTPS
+              port: 8082
+              scheme: HTTP
             initialDelaySeconds: 30
             periodSeconds: 5
             failureThreshold: 6
