@@ -270,17 +270,39 @@ func main() {
 - Provides zero-downtime certificate rotation
 - No manual setup or code required
 
-## Development
+## Testing
 
-### Run Tests
+### Unit Tests
 
 ```bash
-# Unit tests
-make test
-
-# Integration tests (requires envtest)
-make test-integration
+gmake test
 ```
+
+### E2E Integration Tests
+
+End-to-end tests use two kind clusters to validate multi-cluster, multi-replica behavior:
+
+```bash
+# Automated E2E test
+gmake test-e2e
+
+# Manual development workflow
+gmake e2e-setup      # Create clusters
+gmake e2e-dev        # Skaffold dev mode (hot reload)
+
+# Test webhook manually
+kubectl --context kind-target create configmap test-1 --from-literal=key=value
+
+# Watch logs
+kubectl --context kind-hosting logs -l app=webhook-server -f
+
+# Cleanup
+gmake e2e-teardown
+```
+
+**Prerequisites:** kind, kubectl, skaffold, docker
+
+## Development
 
 ### Linting
 

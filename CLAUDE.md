@@ -23,8 +23,13 @@ make check                     # MUST pass before committing
 make static-check              # golangci-lint, shellcheck, go-licence-detector, REUSE
 make test                      # Unit tests only (excludes test/integration)
 
-# Integration tests
-make test-integration          # Requires envtest, uses KUBEBUILDER_ASSETS
+# E2E Integration tests
+make test-e2e                  # E2E tests with kind clusters (replaces test-integration)
+
+# Manual E2E development
+make e2e-setup                 # Create kind clusters
+make e2e-dev                   # Skaffold dev mode
+make e2e-teardown              # Cleanup clusters
 
 # Linting
 golangci-lint run              # Run linter directly
@@ -150,11 +155,12 @@ test/integration/               Integration tests (use envtest)
 - Use `t.Setenv()` not `os.Setenv()` in tests
 - Test files must have Apache-2.0 license headers
 
-**Integration tests:**
-- Located in `test/integration/`
-- Require envtest (KUBEBUILDER_ASSETS)
-- Tagged with `//go:build integration`
-- Excluded from unit test runs via `Makefile.maker.yaml`
+**E2E Integration tests:**
+- Located in `test/e2e/`
+- Use two kind clusters (hosting and target)
+- Test multi-cluster, multi-replica scenarios
+- Require kind, kubectl, skaffold, docker
+- Run with `make test-e2e` or manual workflow with `make e2e-setup`, `make e2e-dev`, `make e2e-teardown`
 
 **Test patterns:**
 - Create fake clients with proper schemes
