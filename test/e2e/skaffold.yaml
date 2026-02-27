@@ -38,6 +38,7 @@ build:
     useDockerCLI: true
 
 deploy:
+  kubeContext: kind-hosting
   kubectl:
     defaultNamespace: default
     manifests:
