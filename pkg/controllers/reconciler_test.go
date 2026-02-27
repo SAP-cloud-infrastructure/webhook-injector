@@ -626,3 +626,306 @@ webhooks:
 		}
 	}
 }
+
+func TestWebhookReconciler_CalculateNextRotation(t *testing.T) {
+	tests := []struct {
+		name              string
+		certValidity      time.Duration
+		rotationThreshold float64
+		expectedDuration  time.Duration
+		tolerance         time.Duration
+	}{
+		{
+			name:              "60 second cert with 0.5 threshold",
+			certValidity:      60 * time.Second,
+			rotationThreshold: 0.5,
+			expectedDuration:  30 * time.Second,
+			tolerance:         2 * time.Second,
+		},
+		{
+			name:              "30 day cert with 0.8 threshold",
+			certValidity:      30 * 24 * time.Hour,
+			rotationThreshold: 0.8,
+			expectedDuration:  24 * 24 * time.Hour, // 24 days
+			tolerance:         1 * time.Hour,
+		},
+		{
+			name:              "1 hour cert with 0.9 threshold",
+			certValidity:      1 * time.Hour,
+			rotationThreshold: 0.9,
+			expectedDuration:  54 * time.Minute,
+			tolerance:         1 * time.Minute,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Generate certificate
+			caCert, caKey, err := certificates.GenerateCA(tt.certValidity)
+			if err != nil {
+				t.Fatalf("Failed to generate CA: %v", err)
+			}
+
+			serverCert, serverKey, err := certificates.GenerateServerCert(
+				caCert, caKey,
+				[]certificates.ServiceReference{
+					{Name: "test", Namespace: "default"},
+				},
+				tt.certValidity,
+			)
+			if err != nil {
+				t.Fatalf("Failed to generate server cert: %v", err)
+			}
+
+			// Create secret with certificate
+			secret := &corev1.Secret{
+				Data: map[string][]byte{
+					"ca.crt":  caCert,
+					"tls.crt": serverCert,
+					"tls.key": serverKey,
+				},
+			}
+
+			cfg := &config.Config{
+				CertRotationThreshold: tt.rotationThreshold,
+			}
+
+			reconciler := &WebhookReconciler{
+				Config: cfg,
+			}
+
+			// Calculate next rotation
+			nextRotation := reconciler.calculateNextRotation(secret)
+
+			// Verify duration is approximately correct (within tolerance)
+			diff := nextRotation - tt.expectedDuration
+			if diff < 0 {
+				diff = -diff
+			}
+
+			if diff > tt.tolerance {
+				t.Errorf("Expected next rotation in ~%v, got %v (diff: %v, tolerance: %v)",
+					tt.expectedDuration, nextRotation, diff, tt.tolerance)
+			}
+
+			t.Logf("Certificate valid for %v, threshold %.1f%%, will rotate in %v",
+				tt.certValidity, tt.rotationThreshold*100, nextRotation)
+		})
+	}
+}
+
+func TestWebhookReconciler_CalculateNextRotation_InvalidCert(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret *corev1.Secret
+	}{
+		{
+			name: "missing tls.crt",
+			secret: &corev1.Secret{
+				Data: map[string][]byte{
+					"tls.key": []byte("key"),
+				},
+			},
+		},
+		{
+			name: "invalid PEM",
+			secret: &corev1.Secret{
+				Data: map[string][]byte{
+					"tls.crt": []byte("not a pem"),
+				},
+			},
+		},
+		{
+			name: "invalid certificate",
+			secret: &corev1.Secret{
+				Data: map[string][]byte{
+					"tls.crt": []byte("-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----"),
+				},
+			},
+		},
+	}
+
+	cfg := &config.Config{
+		CertRotationThreshold: 0.8,
+	}
+
+	reconciler := &WebhookReconciler{
+		Config: cfg,
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nextRotation := reconciler.calculateNextRotation(tt.secret)
+			if nextRotation != 0 {
+				t.Errorf("Expected 0 for invalid certificate, got %v", nextRotation)
+			}
+		})
+	}
+}
+
+func TestWebhookReconciler_CalculateNextRotation_AlreadyPastThreshold(t *testing.T) {
+	// Generate certificate that's already past rotation threshold
+	caCert, caKey, err := certificates.GenerateCA(1 * time.Second)
+	if err != nil {
+		t.Fatalf("Failed to generate CA: %v", err)
+	}
+
+	serverCert, _, err := certificates.GenerateServerCert(
+		caCert, caKey,
+		[]certificates.ServiceReference{
+			{Name: "test", Namespace: "default"},
+		},
+		1*time.Second,
+	)
+	if err != nil {
+		t.Fatalf("Failed to generate server cert: %v", err)
+	}
+
+	// Wait for cert to be past rotation threshold (0.8 * 1 second = 0.8 seconds)
+	time.Sleep(1 * time.Second)
+
+	secret := &corev1.Secret{
+		Data: map[string][]byte{
+			"tls.crt": serverCert,
+		},
+	}
+
+	cfg := &config.Config{
+		CertRotationThreshold: 0.8,
+	}
+
+	reconciler := &WebhookReconciler{
+		Config: cfg,
+	}
+
+	nextRotation := reconciler.calculateNextRotation(secret)
+
+	// Should return 1 second (minimum) since rotation time has passed
+	if nextRotation != 1*time.Second {
+		t.Errorf("Expected 1 second for past-threshold cert, got %v", nextRotation)
+	}
+}
+
+func TestWebhookReconciler_RequeueAfterUsesCalculatedRotation(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
+	if err := admissionv1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add to scheme: %v", err)
+	}
+
+	// Generate certificate with known expiry
+	certValidity := 60 * time.Second
+	threshold := 0.5
+	expectedRequeue := time.Duration(float64(certValidity) * threshold)
+
+	caCert, caKey, err := certificates.GenerateCA(certValidity)
+	if err != nil {
+		t.Fatalf("Failed to generate CA: %v", err)
+	}
+
+	serverCert, serverKey, err := certificates.GenerateServerCert(
+		caCert, caKey,
+		[]certificates.ServiceReference{
+			{Name: "webhook-service", Namespace: "default"},
+		},
+		certValidity,
+	)
+	if err != nil {
+		t.Fatalf("Failed to generate server cert: %v", err)
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"ca.crt":  caCert,
+			"tls.crt": serverCert,
+			"tls.key": serverKey,
+		},
+	}
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "webhook-config",
+			Namespace: "default",
+		},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: validate.example.com
+    clientConfig:
+      service:
+        name: webhook-service
+        namespace: default
+        path: /validate
+      caBundle: ""
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["configmaps"]
+    admissionReviewVersions: ["v1"]
+    sideEffects: None`,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(secret, configMap).
+		Build()
+
+	cfg := &config.Config{
+		WebhookConfigName:      "webhook-config",
+		WebhookConfigNamespace: "default",
+		CertSecretName:         "test-certs",
+		CertSecretNamespace:    "default",
+		CertValidity:           certValidity,
+		CertRotationThreshold:  threshold,
+		SyncPeriod:             5 * time.Minute, // Should NOT use this
+		CertDir:                t.TempDir(),
+	}
+
+	reconciler := &WebhookReconciler{
+		Client:       fakeClient,
+		TargetClient: fakeClient,
+		Config:       cfg,
+		Scheme:       s,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "webhook-config",
+			Namespace: "default",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	// Verify RequeueAfter is based on certificate rotation time, not SYNC_PERIOD
+	tolerance := 2 * time.Second
+	diff := result.RequeueAfter - expectedRequeue
+	if diff < 0 {
+		diff = -diff
+	}
+
+	if diff > tolerance {
+		t.Errorf("Expected RequeueAfter ~%v (calculated from cert), got %v (diff: %v)",
+			expectedRequeue, result.RequeueAfter, diff)
+	}
+
+	if result.RequeueAfter > cfg.SyncPeriod-10*time.Second {
+		t.Errorf("RequeueAfter (%v) should be much less than SyncPeriod (%v) for short-lived cert",
+			result.RequeueAfter, cfg.SyncPeriod)
+	}
+
+	t.Logf("RequeueAfter: %v (expected: ~%v)", result.RequeueAfter, expectedRequeue)
+}
