@@ -22,6 +22,7 @@ build:
     - image: webhook-injector
       ko:
         main: github.com/sap-cloud-infrastructure/webhook-injector/cmd/webhook-injector
+        dir: ../..
         dependencies:
           paths:
             - ../../pkg
