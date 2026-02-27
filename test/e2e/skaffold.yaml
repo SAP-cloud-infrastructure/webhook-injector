@@ -38,10 +38,6 @@ build:
 
 deploy:
   kubectl:
-    hooks:
-      before:
-        - host:
-            command: ["sh", "-c", "export WEBHOOK_ENDPOINT=$(cat webhook-endpoint.txt) && envsubst < manifests/webhook-config.yaml > manifests/webhook-config-rendered.yaml"]
     manifests:
       - manifests/rbac.yaml
       - manifests/service.yaml

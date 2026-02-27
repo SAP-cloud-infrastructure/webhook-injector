@@ -3,3 +3,7 @@
 
 # Ignore test artifacts
 *.log
+
+# Ignore generated webhook configs
+webhook-endpoint.txt
+manifests/webhook-config-rendered.yaml

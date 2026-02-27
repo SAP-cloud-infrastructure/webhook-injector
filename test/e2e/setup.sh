@@ -86,6 +86,10 @@ echo "Webhook endpoint: $WEBHOOK_ENDPOINT"
 # Write webhook endpoint to file for skaffold to use
 echo "$WEBHOOK_ENDPOINT" > webhook-endpoint.txt
 
+# Pre-render the webhook config with the endpoint
+echo "==> Generating webhook configuration..."
+envsubst < manifests/webhook-config.yaml > manifests/webhook-config-rendered.yaml
+
 echo ""
 echo "==> Setup complete!"
 echo ""
