@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -405,15 +406,16 @@ func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return r.Config.WebhookConfigName == object.GetName() && r.getNamespace(r.Config.WebhookConfigNamespace) == object.GetNamespace()
 	})
 
-	// Only watch the specific certificate Secret
-	secretPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
-		return object.GetName() == r.Config.CertSecretName &&
-			object.GetNamespace() == r.getNamespace(r.Config.CertSecretNamespace)
-	})
-
 	// Map Secret events to ConfigMap reconcile requests
 	// When the Secret changes (e.g., rotation annotation added), we reconcile the ConfigMap
+	// IMPORTANT: Filter inside the mapper since WithEventFilter doesn't apply to secondary watches
 	secretToConfigMapMapper := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+		// Only map events for the specific certificate Secret
+		if obj.GetName() != r.Config.CertSecretName ||
+			obj.GetNamespace() != r.getNamespace(r.Config.CertSecretNamespace) {
+			return nil
+		}
+
 		return []ctrl.Request{
 			{
 				NamespacedName: types.NamespacedName{
@@ -425,10 +427,8 @@ func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	})
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&corev1.ConfigMap{}).
-		WithEventFilter(configMapPredicate).
+		For(&corev1.ConfigMap{}, builder.WithPredicates(configMapPredicate)).
 		// Watch the certificate Secret for annotation-based rotation triggers
 		Watches(&corev1.Secret{}, secretToConfigMapMapper).
-		WithEventFilter(secretPredicate).
 		Complete(r)
 }
