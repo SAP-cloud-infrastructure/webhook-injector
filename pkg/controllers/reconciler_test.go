@@ -497,7 +497,7 @@ func TestWebhookReconciler_CheckCertificates_ForceRotation_Annotation(t *testing
 			Name:      "test-certs",
 			Namespace: "default",
 			Annotations: map[string]string{
-				"webhook-injector.sap.com/force-rotation": "true",
+				ForceRotationAnnotation: "true",
 			},
 		},
 		Data: map[string][]byte{
@@ -545,7 +545,7 @@ func TestWebhookReconciler_RemovesAnnotationAfterRotation(t *testing.T) {
 			Name:      "test-certs",
 			Namespace: "default",
 			Annotations: map[string]string{
-				"webhook-injector.sap.com/force-rotation": "true",
+				ForceRotationAnnotation: "true",
 			},
 		},
 		Data: map[string][]byte{
@@ -621,7 +621,7 @@ webhooks:
 	}
 
 	if updatedSecret.Annotations != nil {
-		if _, exists := updatedSecret.Annotations["webhook-injector.sap.com/force-rotation"]; exists {
+		if _, exists := updatedSecret.Annotations[ForceRotationAnnotation]; exists {
 			t.Error("Expected force-rotation annotation to be removed after rotation")
 		}
 	}

@@ -44,6 +44,12 @@ import (
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/webhooks"
 )
 
+const (
+	// ForceRotationAnnotation is the annotation key used to trigger certificate rotation.
+	// When set to "true" on the certificate Secret, it forces immediate rotation.
+	ForceRotationAnnotation = "webhook-injector.sap.com/force-rotation"
+)
+
 // WebhookReconciler reconciles webhook ConfigMap and manages certificates
 type WebhookReconciler struct {
 	Client       client.Client // Hosting cluster client
@@ -146,7 +152,7 @@ func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []ce
 
 	// Check for force-rotation annotation
 	if secret.Annotations != nil {
-		if forceRotation, exists := secret.Annotations["webhook-injector.sap.com/force-rotation"]; exists && forceRotation == "true" {
+		if forceRotation, exists := secret.Annotations[ForceRotationAnnotation]; exists && forceRotation == "true" {
 			return secret, true, nil // Force rotation
 		}
 	}
