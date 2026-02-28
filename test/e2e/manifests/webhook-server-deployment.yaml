@@ -69,7 +69,8 @@ spec:
             - name: CERT_SECRET_NAMESPACE
               value: default
             - name: CERT_VALIDITY
-              value: "60s"  # Short validity for testing
+              #value: "60s"  # Short validity for testing
+              value: "1h"  # Short validity for testing
             - name: CERT_ROTATION_THRESHOLD
               value: "0.5"
             - name: TARGET_KUBECONFIG
