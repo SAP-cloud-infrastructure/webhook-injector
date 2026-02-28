@@ -77,7 +77,8 @@ func (v *ConfigMapValidator) Handle(ctx context.Context, req admission.Request) 
 	totalRequests.Add(1)
 	lastRequestTime.Store(time.Now())
 
-	setupLog.Info("Webhook request received",
+	// Log at V(1) level to reduce verbosity - only shown with --zap-log-level=debug
+	setupLog.V(1).Info("Webhook request received",
 		"replica", replicaName,
 		"operation", req.Operation,
 		"namespace", req.Namespace,
@@ -104,7 +105,7 @@ func main() {
 	flag.StringVar(&certDir, "cert-dir", "/tmp/webhook-certs", "Directory containing TLS certificates.")
 
 	opts := zap.Options{
-		Development: true,
+		Development: false, // Reduce log verbosity for integration tests
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
