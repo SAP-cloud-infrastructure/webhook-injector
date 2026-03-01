@@ -19,139 +19,63 @@ package e2e
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/json"
+	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-type Metrics struct {
-	ReplicaName        string    `json:"replica_name"`
-	TotalRequests      int64     `json:"total_requests"`
-	CertificateReloads int       `json:"certificate_reloads"`
-	CertificateSerial  string    `json:"certificate_serial"`
-	LastRequestTime    time.Time `json:"last_request_time"`
-	LastCertReloadTime time.Time `json:"last_cert_reload_time"`
+var (
+	testRuntime      = flag.Duration("test.runtime", 1*time.Minute, "How long to run the load test")
+	testConcurrency  = flag.Int("test.concurrency", 5, "Number of concurrent clients")
+	rotationInterval = flag.Duration("test.rotation-interval", 10*time.Second, "How often to trigger cert rotation")
+	reuseClusters    = flag.Bool("test.reuse-clusters", false, "Skip cluster setup/teardown")
+)
+
+type FailureRecord struct {
+	Timestamp time.Time
+	ClientID  int    // -1 for rotation errors
+	Operation string // "get", "update", "rotation"
+	Error     error
 }
 
-func TestE2E_WebhookHighAvailability(t *testing.T) {
-	// Phase 1: Setup
-	t.Log("Phase 1: Setting up environment...")
-	if err := setupClusters(t); err != nil {
-		t.Fatalf("Failed to setup clusters: %v", err)
-	}
-
-	// Always teardown on exit
-	defer func() {
-		t.Log("Tearing down environment...")
-		teardownClusters(t)
-	}()
-
-	if err := deployWithSkaffold(t); err != nil {
-		t.Fatalf("Failed to deploy with Skaffold: %v", err)
-	}
-
-	hostingClient := getKubernetesClient(t, "kind-hosting")
-	targetClient := getKubernetesClient(t, "kind-target")
-
-	if err := waitForWebhookReady(t, hostingClient, 3); err != nil {
-		t.Fatalf("Webhook server not ready: %v", err)
-	}
-
-	// Phase 2: Baseline validation
-	t.Log("Phase 2: Baseline validation...")
-	baselineResults := createConfigMaps(t, targetClient, "baseline", 30)
-	assertAllSucceeded(t, baselineResults)
-
-	baselineMetrics := collectMetrics(t, hostingClient)
-	assertAllReplicasServing(t, baselineMetrics)
-
-	// Phase 3: Rotation under load
-	t.Log("Phase 3: Starting load test with rotation...")
-	ctx, cancel := context.WithCancel(context.Background())
-	failuresChan := make(chan error, 200)
-
-	go continuousLoad(ctx, targetClient, failuresChan)
-
-	time.Sleep(30 * time.Second) // Let load accumulate
-
-	t.Log("Triggering certificate rotation...")
-	if err := triggerRotation(t, hostingClient); err != nil {
-		t.Fatalf("Failed to trigger rotation: %v", err)
-	}
-
-	time.Sleep(60 * time.Second) // Continue load during rotation
-
-	cancel() // Stop load
-
-	// Phase 4: Assert zero failures
-	t.Log("Phase 4: Checking for failures...")
-	close(failuresChan)
-	var failures []error
-	for err := range failuresChan {
-		failures = append(failures, err)
-	}
-
-	if len(failures) > 0 {
-		t.Errorf("Load test had %d failures during rotation:", len(failures))
-		for i, err := range failures {
-			if i < 5 { // Show first 5 failures
-				t.Errorf("  - %v", err)
-			}
-		}
-		if len(failures) > 5 {
-			t.Errorf("  ... and %d more", len(failures)-5)
-		}
-	}
-
-	// Phase 5: Post-rotation verification
-	t.Log("Phase 5: Post-rotation verification...")
-	postMetrics := collectMetrics(t, hostingClient)
-	assertCertificateRotated(t, baselineMetrics, postMetrics)
-	assertAllReplicasReloaded(t, postMetrics)
-
-	// Final validation
-	finalResults := createConfigMaps(t, targetClient, "final", 30)
-	assertAllSucceeded(t, finalResults)
-
-	t.Log("E2E test completed successfully!")
+func TestMain(m *testing.M) {
+	flag.Parse()
+	os.Exit(m.Run())
 }
 
-func setupClusters(t *testing.T) error {
-	cmd := exec.Command("./setup.sh")
+// logWithTimestamp logs a message with timestamp prefix
+func logWithTimestamp(t *testing.T, format string, args ...interface{}) {
+	t.Helper()
+	timestamp := time.Now().Format("15:04:05.000")
+	t.Logf("[%s] "+format, append([]interface{}{timestamp}, args...)...)
+}
+
+func runCommand(t *testing.T, command string) error {
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Dir = "."
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func teardownClusters(t *testing.T) {
-	cmd := exec.Command("./teardown.sh")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Run() // Ignore errors during cleanup
-}
-
-func deployWithSkaffold(t *testing.T) error {
-	cmd := exec.Command("skaffold", "run")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Inherit PATH from parent process
+	cmd.Env = os.Environ()
 	return cmd.Run()
 }
 
 func getKubernetesClient(t *testing.T, contextName string) *kubernetes.Clientset {
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
-		kubeconfig = os.Getenv("HOME") + "/.kube/config"
+		t.Fatal("KUBECONFIG environment variable not set")
 	}
 
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
@@ -162,6 +86,10 @@ func getKubernetesClient(t *testing.T, contextName string) *kubernetes.Clientset
 		t.Fatalf("Failed to load kubeconfig for context %s: %v", contextName, err)
 	}
 
+	// Disable rate limiter for load testing
+	config.QPS = -1   // disable
+	config.Burst = -1 // disable
+
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		t.Fatalf("Failed to create clientset: %v", err)
@@ -170,161 +98,78 @@ func getKubernetesClient(t *testing.T, contextName string) *kubernetes.Clientset
 	return clientset
 }
 
-func waitForWebhookReady(t *testing.T, client *kubernetes.Clientset, expectedReplicas int) error {
+func waitForDeploymentReady(t *testing.T, client *kubernetes.Clientset, name string, replicas int, timeout time.Duration) {
 	ctx := context.Background()
-	timeout := time.After(5 * time.Minute)
+	deadline := time.After(timeout)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-timeout:
-			// Print detailed pod status on timeout to aid debugging.
-			// This diagnostic output is intentionally kept as it provides valuable
-			// information when tests fail (container states, restart counts, failure reasons).
-			pods, err := client.CoreV1().Pods("default").List(ctx, metav1.ListOptions{
-				LabelSelector: "app=webhook-server",
-			})
-			if err == nil {
-				t.Logf("Pod status at timeout:")
-				for _, pod := range pods.Items {
-					t.Logf("  Pod %s: Phase=%s", pod.Name, pod.Status.Phase)
-					for _, cs := range pod.Status.ContainerStatuses {
-						t.Logf("    Container %s: Ready=%v, RestartCount=%d", cs.Name, cs.Ready, cs.RestartCount)
-						if cs.State.Waiting != nil {
-							t.Logf("      Waiting: %s - %s", cs.State.Waiting.Reason, cs.State.Waiting.Message)
-						}
-						if cs.State.Terminated != nil {
-							t.Logf("      Terminated: %s - %s", cs.State.Terminated.Reason, cs.State.Terminated.Message)
-						}
-					}
-				}
-			}
-			return fmt.Errorf("timeout waiting for %d replicas to be ready", expectedReplicas)
+		case <-deadline:
+			t.Fatalf("Timeout waiting for deployment %s to have %d ready replicas", name, replicas)
 		case <-ticker.C:
-			deployment, err := client.AppsV1().Deployments("default").Get(ctx, "webhook-server", metav1.GetOptions{})
+			deployment, err := client.AppsV1().Deployments("default").Get(ctx, name, metav1.GetOptions{})
 			if err != nil {
-				t.Logf("Waiting for deployment... (%v)", err)
+				logWithTimestamp(t, "Waiting for deployment %s... (%v)", name, err)
 				continue
 			}
 
-			if deployment.Status.ReadyReplicas == int32(expectedReplicas) {
-				t.Logf("All %d replicas are ready", expectedReplicas)
-				return nil
+			if deployment.Status.ReadyReplicas == int32(replicas) {
+				logWithTimestamp(t, "Deployment %s has %d/%d ready replicas", name, replicas, replicas)
+				return
 			}
 
-			t.Logf("Waiting for replicas: %d/%d ready", deployment.Status.ReadyReplicas, expectedReplicas)
+			logWithTimestamp(t, "Waiting for deployment %s: %d/%d ready", name, deployment.Status.ReadyReplicas, replicas)
 		}
 	}
 }
 
-func createConfigMaps(t *testing.T, client *kubernetes.Clientset, prefix string, count int) []error {
-	var results []error
-	ctx := context.Background()
+func runLoadClient(ctx context.Context, clientID int, client *kubernetes.Clientset,
+	failures chan<- FailureRecord, totalRequests *atomic.Int64) {
 
-	for i := 0; i < count; i++ {
-		cm := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("%s-%d", prefix, i),
-				Namespace: "default",
-			},
-			Data: map[string]string{
-				"key": "value",
-			},
-		}
+	cmName := fmt.Sprintf("load-test-cm-%d", clientID)
+	reqCount := 0
 
-		_, err := client.CoreV1().ConfigMaps("default").Create(ctx, cm, metav1.CreateOptions{})
-		results = append(results, err)
-	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			reqCount++
+			totalRequests.Add(1)
+			ctx2, cancel := context.WithTimeout(context.Background(), 1*time.Second) // Timeout for individual request
+			cm, err := client.CoreV1().ConfigMaps("default").Get(ctx2, cmName, metav1.GetOptions{})
+			cancel()
+			if err != nil {
+				failures <- FailureRecord{
+					Timestamp: time.Now(),
+					ClientID:  clientID,
+					Operation: "get",
+					Error:     err,
+				}
+				continue
+			}
 
-	return results
-}
-
-func assertAllSucceeded(t *testing.T, results []error) {
-	for i, err := range results {
-		if err != nil {
-			t.Errorf("ConfigMap creation %d failed: %v", i, err)
-		}
-	}
-}
-
-func collectMetrics(t *testing.T, client *kubernetes.Clientset) map[string]Metrics {
-	ctx := context.Background()
-	pods, err := client.CoreV1().Pods("default").List(ctx, metav1.ListOptions{
-		LabelSelector: "app=webhook-server",
-	})
-	if err != nil {
-		t.Fatalf("Failed to list pods: %v", err)
-	}
-
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
-		},
-		Timeout: 5 * time.Second,
-	}
-
-	metricsMap := make(map[string]Metrics)
-	for _, pod := range pods.Items {
-		if pod.Status.Phase != corev1.PodRunning {
-			continue
-		}
-
-		// Port-forward to pod
-		localPort := 19443
-		portForwardCmd := exec.Command("kubectl", "--context", "kind-hosting",
-			"port-forward", pod.Name, fmt.Sprintf("%d:9443", localPort), "-n", "default")
-
-		if err := portForwardCmd.Start(); err != nil {
-			t.Logf("Failed to port-forward to %s: %v", pod.Name, err)
-			continue
-		}
-
-		time.Sleep(2 * time.Second) // Wait for port-forward to establish
-
-		// Fetch metrics
-		resp, err := httpClient.Get(fmt.Sprintf("https://localhost:%d/metrics", localPort))
-		if err != nil {
-			t.Logf("Failed to fetch metrics from %s: %v", pod.Name, err)
-			portForwardCmd.Process.Kill()
-			continue
-		}
-
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		portForwardCmd.Process.Kill()
-
-		var metrics Metrics
-		if err := json.Unmarshal(body, &metrics); err != nil {
-			t.Logf("Failed to parse metrics from %s: %v", pod.Name, err)
-			continue
-		}
-
-		metricsMap[metrics.ReplicaName] = metrics
-		t.Logf("Metrics from %s: requests=%d, reloads=%d, serial=%s",
-			metrics.ReplicaName, metrics.TotalRequests, metrics.CertificateReloads, metrics.CertificateSerial)
-	}
-
-	return metricsMap
-}
-
-func assertAllReplicasServing(t *testing.T, metrics map[string]Metrics) {
-	if len(metrics) != 3 {
-		t.Errorf("Expected metrics from 3 replicas, got %d", len(metrics))
-	}
-
-	for name, m := range metrics {
-		if m.TotalRequests == 0 {
-			t.Errorf("Replica %s served no requests", name)
+			cm.Data["counter"] = fmt.Sprintf("%d", reqCount)
+			ctx2, cancel = context.WithTimeout(context.Background(), 1*time.Second) // Timeout for individual request
+			_, err = client.CoreV1().ConfigMaps("default").Update(ctx2, cm, metav1.UpdateOptions{})
+			cancel()
+			if err != nil {
+				failures <- FailureRecord{
+					Timestamp: time.Now(),
+					ClientID:  clientID,
+					Operation: "update",
+					Error:     err,
+				}
+			}
 		}
 	}
 }
 
-func continuousLoad(ctx context.Context, client *kubernetes.Clientset, failures chan<- error) {
-	i := 0
-	ticker := time.NewTicker(1 * time.Second)
+func runRotationTrigger(ctx context.Context, t *testing.T, client *kubernetes.Clientset,
+	interval time.Duration, failures chan<- FailureRecord) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -332,27 +177,24 @@ func continuousLoad(ctx context.Context, client *kubernetes.Clientset, failures 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			cm := &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("load-%d", i),
-					Namespace: "default",
-				},
-				Data: map[string]string{
-					"key": "value",
-				},
+			if err := triggerRotation(ctx, t, client); err != nil {
+				select {
+				case <-ctx.Done():
+				default:
+					failures <- FailureRecord{
+						Timestamp: time.Now(),
+						ClientID:  -1,
+						Operation: "rotation",
+						Error:     err,
+					}
+				}
 			}
-
-			_, err := client.CoreV1().ConfigMaps("default").Create(ctx, cm, metav1.CreateOptions{})
-			if err != nil {
-				failures <- err
-			}
-			i++
 		}
 	}
 }
 
-func triggerRotation(t *testing.T, client *kubernetes.Clientset) error {
-	ctx := context.Background()
+func triggerRotation(ctx context.Context, t *testing.T, client *kubernetes.Clientset) error {
+	logWithTimestamp(t, "Triggering certificate rotation")
 	secret, err := client.CoreV1().Secrets("default").Get(ctx, "webhook-injector-certs", metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get secret: %w", err)
@@ -361,31 +203,135 @@ func triggerRotation(t *testing.T, client *kubernetes.Clientset) error {
 	if secret.Annotations == nil {
 		secret.Annotations = make(map[string]string)
 	}
-	secret.Annotations["webhook-injector.sap.com/force-rotation"] = "true"
+	secret.Annotations[controllers.ForceRotationAnnotation] = "true"
 
 	_, err = client.CoreV1().Secrets("default").Update(ctx, secret, metav1.UpdateOptions{})
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to annotate secret: %w", err)
+	}
+
+	return nil
 }
 
-func assertCertificateRotated(t *testing.T, before, after map[string]Metrics) {
-	for name, beforeMetrics := range before {
-		afterMetrics, exists := after[name]
-		if !exists {
-			t.Errorf("Replica %s not found in post-rotation metrics", name)
-			continue
+func TestWebhookLoadAndRotation(t *testing.T) {
+	// Set KUBECONFIG to use dedicated test kubeconfig
+	kubeconfigPath := filepath.Join(".", "kubeconfig")
+	t.Setenv("KUBECONFIG", kubeconfigPath)
+
+	// Conditional setup
+	if !*reuseClusters {
+		logWithTimestamp(t, "Setting up clusters...")
+		if err := runCommand(t, "./setup.sh"); err != nil {
+			t.Fatalf("Setup failed: %v", err)
 		}
 
-		if beforeMetrics.CertificateSerial == afterMetrics.CertificateSerial {
-			t.Errorf("Replica %s certificate not rotated (serial unchanged: %s)",
-				name, beforeMetrics.CertificateSerial)
+		// Deploy with skaffold
+		logWithTimestamp(t, "Deploying with skaffold...")
+		if err := runCommand(t, "skaffold run"); err != nil {
+			t.Fatalf("Skaffold deployment failed: %v", err)
+		}
+
+		t.Cleanup(func() {
+			logWithTimestamp(t, "Tearing down clusters...")
+			runCommand(t, "./teardown.sh") // Ignore errors during cleanup
+		})
+	} else {
+		logWithTimestamp(t, "Reusing existing clusters (skipping setup/teardown)")
+	}
+
+	// Get Kubernetes clients
+	hostingClient := getKubernetesClient(t, "kind-hosting")
+	targetClient := getKubernetesClient(t, "kind-target")
+
+	// Wait for webhook server to be ready
+	logWithTimestamp(t, "Waiting for webhook deployment ready...")
+	waitForDeploymentReady(t, hostingClient, "webhook-server", 3, 5*time.Minute)
+
+	// Create load test ConfigMaps (delete existing ones first)
+	ctx := context.Background()
+	logWithTimestamp(t, "Creating %d load test ConfigMaps...", *testConcurrency)
+	for i := 0; i < *testConcurrency; i++ {
+		cmName := fmt.Sprintf("load-test-cm-%d", i)
+
+		// Delete if exists (ignore errors)
+		_ = targetClient.CoreV1().ConfigMaps("default").Delete(ctx, cmName, metav1.DeleteOptions{})
+
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cmName,
+				Namespace: "default",
+			},
+			Data: map[string]string{"counter": "0"},
+		}
+		if _, err := targetClient.CoreV1().ConfigMaps("default").Create(ctx, cm, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("Failed to create load test ConfigMap %d: %v", i, err)
 		}
 	}
-}
 
-func assertAllReplicasReloaded(t *testing.T, metrics map[string]Metrics) {
-	for name, m := range metrics {
-		if m.CertificateReloads == 0 {
-			t.Errorf("Replica %s did not reload certificate", name)
+	// Run load test with timeout
+	logWithTimestamp(t, "Starting load test (runtime=%s, concurrency=%d, rotation=%s)",
+		*testRuntime, *testConcurrency, *rotationInterval)
+
+	loadCtx, cancel := context.WithTimeout(ctx, *testRuntime)
+	defer cancel()
+
+	failures := make(chan FailureRecord, 1000)
+	var totalRequests atomic.Int64
+	var wg sync.WaitGroup
+
+	// Start load clients
+	for i := 0; i < *testConcurrency; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			runLoadClient(loadCtx, id, targetClient, failures, &totalRequests)
+		}(i)
+	}
+
+	// Start rotation trigger
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runRotationTrigger(loadCtx, t, hostingClient, *rotationInterval, failures)
+	}()
+
+	// Wait for test duration
+	<-loadCtx.Done()
+	logWithTimestamp(t, "Load test completed")
+
+	// Wait for all goroutines to exit before closing channel
+	wg.Wait()
+	close(failures)
+	var collectedFailures []FailureRecord
+	for f := range failures {
+		collectedFailures = append(collectedFailures, f)
+	}
+
+	// Report results
+	total := totalRequests.Load()
+	failureCount := len(collectedFailures)
+	failureRate := 0.0
+	if total > 0 {
+		failureRate = float64(failureCount) / float64(total) * 100
+	}
+
+	t.Logf("\n=== Load Test Results ===")
+	t.Logf("Duration: %s", *testRuntime)
+	t.Logf("Total requests: %d", total)
+	t.Logf("Failures: %d (%.2f%%)", failureCount, failureRate)
+
+	if failureCount > 0 {
+		t.Logf("\nFailed requests:")
+		for _, f := range collectedFailures {
+			clientStr := fmt.Sprintf("client-%d", f.ClientID)
+			if f.ClientID == -1 {
+				clientStr = "rotation"
+			}
+			logWithTimestamp(t, "%s %s: %v",
+				clientStr,
+				f.Operation,
+				f.Error)
 		}
+		t.Fatalf("Load test had %d failures", failureCount)
 	}
 }

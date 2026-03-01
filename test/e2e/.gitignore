@@ -1,8 +1,10 @@
 # Ignore kind cluster kubeconfig files
 *.kubeconfig
+kubeconfig
 
 # Ignore test artifacts
 *.log
+*.test
 
 # Ignore generated webhook configs
 webhook-endpoint.txt

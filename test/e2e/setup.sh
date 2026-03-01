@@ -16,6 +16,24 @@
 
 set -euo pipefail
 
+# Use dedicated kubeconfig for e2e tests to avoid polluting user's config
+KUBECONFIG="$(pwd)/kubeconfig"
+export KUBECONFIG
+
+if [ ! -f "$KUBECONFIG" ]; then
+    echo "==> Creating dedicated kubeconfig at $KUBECONFIG..."
+    cat > "$KUBECONFIG" <<EOF
+apiVersion: v1
+kind: Config
+clusters: []
+contexts: []
+current-context: ""
+users: []
+EOF
+else
+    echo "==> Using existing kubeconfig at $KUBECONFIG"
+fi
+
 echo "==> Checking prerequisites..."
 for cmd in kind kubectl skaffold docker; do
     if ! command -v "$cmd" &> /dev/null; then

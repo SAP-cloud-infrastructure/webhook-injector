@@ -16,6 +16,10 @@
 
 set -euo pipefail
 
+# Use dedicated kubeconfig for e2e tests
+KUBECONFIG="$(pwd)/kubeconfig"
+export KUBECONFIG
+
 echo "==> Deleting kind clusters..."
 
 if kind get clusters | grep -q "^hosting$"; then
@@ -30,5 +34,8 @@ fi
 
 # Clean up temporary files
 rm -f webhook-endpoint.txt
+
+echo "==> Removing dedicated kubeconfig..."
+rm -f kubeconfig
 
 echo "==> Teardown complete!"

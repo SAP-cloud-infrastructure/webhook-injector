@@ -19,14 +19,11 @@ package main
 
 import (
 	"context"
-	"crypto/x509"
-	"encoding/json"
-	"encoding/pem"
 	"flag"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"os"
-	"sync/atomic"
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -42,14 +39,12 @@ import (
 )
 
 var (
-	scheme             = runtime.NewScheme()
-	setupLog           = ctrl.Log.WithName("setup")
-	totalRequests      atomic.Int64
-	certificateReloads atomic.Int32
-	lastRequestTime    atomic.Value
-	lastReloadTime     atomic.Value
-	replicaName        string
-	certFile           string
+	scheme       = runtime.NewScheme()
+	setupLog     = ctrl.Log.WithName("setup")
+	probeAddr    string
+	certDir      string
+	webhookDelay time.Duration
+	randGen      *rand.Rand
 )
 
 func init() {
@@ -59,30 +54,26 @@ func init() {
 	_ = admissionv1.AddToScheme(scheme)
 }
 
-type Metrics struct {
-	ReplicaName        string    `json:"replica_name"`
-	TotalRequests      int64     `json:"total_requests"`
-	CertificateReloads int       `json:"certificate_reloads"`
-	CertificateSerial  string    `json:"certificate_serial"`
-	LastRequestTime    time.Time `json:"last_request_time"`
-	LastCertReloadTime time.Time `json:"last_cert_reload_time"`
-}
-
 // ConfigMapValidator validates ConfigMap admissions (always allows)
 type ConfigMapValidator struct {
 	decoder *admission.Decoder
 }
 
 func (v *ConfigMapValidator) Handle(ctx context.Context, req admission.Request) admission.Response {
-	totalRequests.Add(1)
-	lastRequestTime.Store(time.Now())
+	// Add jittered delay: ±20% of configured delay
+	jitter := 1.0 + (randGen.Float64()*0.4 - 0.2) // Range: 0.8 to 1.2
+	delay := time.Duration(float64(webhookDelay) * jitter)
+	time.Sleep(delay)
 
-	// Log at V(1) level to reduce verbosity - only shown with --zap-log-level=debug
-	setupLog.V(1).Info("Webhook request received",
-		"replica", replicaName,
+	// Log the incoming request
+	log := ctrl.LoggerFrom(ctx)
+	log.Info("Processed webhook request",
 		"operation", req.Operation,
 		"namespace", req.Namespace,
+		"duration", delay.String(),
 		"name", req.Name,
+		"kind", req.Kind.Kind,
+		"uid", req.UID,
 	)
 
 	// Always allow (this is a test webhook)
@@ -96,13 +87,9 @@ func (v *ConfigMapValidator) InjectDecoder(d *admission.Decoder) error {
 }
 
 func main() {
-	var metricsAddr string
-	var probeAddr string
-	var certDir string
-
-	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8082", "The address the probe endpoint binds to.")
 	flag.StringVar(&certDir, "cert-dir", "/tmp/webhook-certs", "Directory containing TLS certificates.")
+	flag.DurationVar(&webhookDelay, "webhook-delay", 100*time.Millisecond, "Average webhook processing delay with ±20% jitter")
 
 	opts := zap.Options{
 		Development: false, // Reduce log verbosity for integration tests
@@ -112,17 +99,11 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	replicaName = os.Getenv("HOSTNAME")
-	if replicaName == "" {
-		replicaName = "unknown"
-	}
+	// Initialize random generator for jitter (modern Go 1.20+ approach)
+	randGen = rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	certFile = fmt.Sprintf("%s/tls.crt", certDir)
+	certFile := fmt.Sprintf("%s/tls.crt", certDir)
 	keyFile := fmt.Sprintf("%s/tls.key", certDir)
-
-	// Initialize atomic values
-	lastRequestTime.Store(time.Time{})
-	lastReloadTime.Store(time.Time{})
 
 	// Wait for certificates to be created by webhook-injector
 	setupLog.Info("Waiting for certificates to be generated...")
@@ -135,9 +116,6 @@ func main() {
 		}
 		time.Sleep(1 * time.Second)
 	}
-
-	// Track certificate reloads
-	go trackCertificateReloads(certFile)
 
 	// Create a minimal REST config - we don't actually need to connect to a cluster
 	// since this is just a test webhook server
@@ -156,7 +134,7 @@ func main() {
 			KeyName:  "tls.key",
 		}),
 		Metrics: metricsserver.Options{
-			BindAddress: "0", // Disable default metrics server, we use custom endpoint on webhook server
+			BindAddress: "0", // Disable default metrics server
 		},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         false, // No need for leader election in test webhook
@@ -170,9 +148,6 @@ func main() {
 	mgr.GetWebhookServer().Register("/validate", &webhook.Admission{
 		Handler: &ConfigMapValidator{},
 	})
-
-	// Register custom metrics endpoint on webhook server (port 9443)
-	mgr.GetWebhookServer().Register("/metrics", http.HandlerFunc(handleMetrics))
 
 	// Add health checks
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -191,7 +166,6 @@ func main() {
 	}
 
 	setupLog.Info("Starting webhook server",
-		"replica", replicaName,
 		"port", 9443,
 		"certDir", certDir,
 	)
@@ -199,62 +173,5 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Problem running manager")
 		os.Exit(1)
-	}
-}
-
-func handleMetrics(w http.ResponseWriter, r *http.Request) {
-	lastReq := lastRequestTime.Load().(time.Time)
-	lastReload := lastReloadTime.Load().(time.Time)
-
-	metrics := Metrics{
-		ReplicaName:        replicaName,
-		TotalRequests:      totalRequests.Load(),
-		CertificateReloads: int(certificateReloads.Load()),
-		CertificateSerial:  getCertificateSerial(certFile),
-		LastRequestTime:    lastReq,
-		LastCertReloadTime: lastReload,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(metrics)
-}
-
-func getCertificateSerial(certPath string) string {
-	data, err := os.ReadFile(certPath)
-	if err != nil {
-		return "error-reading-cert"
-	}
-
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return "error-decoding-pem"
-	}
-
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return "error-parsing-cert"
-	}
-
-	return cert.SerialNumber.String()
-}
-
-func trackCertificateReloads(certPath string) {
-	var lastSerial string
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		currentSerial := getCertificateSerial(certPath)
-		if currentSerial != lastSerial && lastSerial != "" {
-			certificateReloads.Add(1)
-			lastReloadTime.Store(time.Now())
-			setupLog.Info("Certificate reloaded",
-				"replica", replicaName,
-				"oldSerial", lastSerial,
-				"newSerial", currentSerial,
-			)
-		}
-		lastSerial = currentSerial
 	}
 }

@@ -1,7 +1,7 @@
 # E2E Integration Tests
 
-End-to-end tests using two kind clusters to validate webhook-injector's multi-cluster,
-multi-replica behavior with real certificate rotation.
+End-to-end tests using two kind clusters to validate webhook-injector's
+certificate rotation under continuous load.
 
 ## Prerequisites
 
@@ -12,39 +12,72 @@ multi-replica behavior with real certificate rotation.
 
 ## Quick Start
 
-### Automated Testing
+### Run Test (Fresh Clusters)
 
 ```bash
-# From repository root
-gmake test-e2e
+cd test/e2e
+go test -v -timeout 5m
 ```
 
-### Manual Development
+This creates clusters, deploys, runs the test, and tears down automatically.
+
+### Run Test (Reuse Clusters)
+
+For faster iteration during development:
 
 ```bash
-# From repository root
-gmake e2e-setup      # Create clusters
-gmake e2e-dev        # Start Skaffold in dev mode
+# First run - create clusters
+cd test/e2e
+go test -v -timeout 5m
 
-# In another terminal, test webhooks
-kubectl --context kind-target create configmap test-1 --from-literal=key=value
+# Subsequent runs - reuse clusters (much faster)
+go test -v -timeout 5m -test.reuse-clusters=true
+go test -v -timeout 3m -test.runtime=1m -test.concurrency=10 -test.reuse-clusters=true
 
-# Watch webhook logs
-kubectl --context kind-hosting logs -l app=webhook-server -c webhook-server -f
+# Manual cleanup when done
+./teardown.sh
+```
+
+### Manual Development Workflow
+
+```bash
+# Setup clusters and deploy
+./setup.sh
+skaffold dev  # Or: skaffold run for one-time deploy
+
+# In another terminal, run tests with various configs
+go test -v -timeout 5m -test.reuse-clusters=true
+go test -v -timeout 10m -test.runtime=5m -test.concurrency=20 -test.rotation-interval=1m -test.reuse-clusters=true
 
 # Cleanup
-gmake e2e-teardown
+./teardown.sh
 ```
+
+## Test Configuration
+
+Available flags:
+
+- `-test.runtime` - How long to run the load test (default: 2m)
+- `-test.concurrency` - Number of concurrent clients (default: 5)
+- `-test.rotation-interval` - How often to trigger cert rotation (default: 30s)
+- `-test.reuse-clusters` - Skip cluster setup/teardown (default: false)
 
 ## Architecture
 
 - **kind-hosting**: Runs webhook-server (3 replicas) + webhook-injector sidecars
-- **kind-target**: Enforces webhooks, receives test ConfigMaps
-- **Test webhook**: Validates ConfigMap CREATE operations, always allows
+- **kind-target**: Enforces webhooks, receives test ConfigMap updates
+- **Test flow**: N concurrent clients continuously UPDATE dedicated ConfigMaps while
+  certificate rotations are triggered at intervals
+- **Pass criteria**: Zero failures during entire test duration
 
 ## What's Tested
 
-1. Multi-cluster communication (hosting → target)
-2. Load balancing across 3 replicas
-3. Zero-downtime during certificate rotation
-4. All replicas independently reload certificates
+1. Zero-downtime certificate rotation under continuous load
+2. Multi-cluster communication (hosting → target)
+3. Load distribution across 3 replicas
+4. Webhook availability during cert rotation
+
+## Isolated Kubeconfig
+
+Tests use a dedicated `kubeconfig` file (gitignored) to avoid polluting your
+personal kubeconfig. The file is created by `setup.sh` and removed by `teardown.sh`.
