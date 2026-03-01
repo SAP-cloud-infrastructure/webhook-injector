@@ -61,9 +61,9 @@ func TestCertificateReloader(t *testing.T) {
 		Build()
 
 	cfg := &config.Config{
-		CertSecretName:      "test-certs",
-		CertSecretNamespace: "default",
-		CertDir:             tmpDir,
+		CertSecretName: "test-certs",
+		Namespace:      "default",
+		CertDir:        tmpDir,
 	}
 
 	reloader := &CertificateReloader{
@@ -153,9 +153,9 @@ func TestCertificateReloader_SkipsUnchangedCertificates(t *testing.T) {
 		Build()
 
 	cfg := &config.Config{
-		CertSecretName:      "test-certs",
-		CertSecretNamespace: "default",
-		CertDir:             tmpDir,
+		CertSecretName: "test-certs",
+		Namespace:      "default",
+		CertDir:        tmpDir,
 	}
 
 	reloader := &CertificateReloader{
@@ -249,9 +249,9 @@ func TestCertificateReloader_UpdatesChangedCertificates(t *testing.T) {
 		Build()
 
 	cfg := &config.Config{
-		CertSecretName:      "test-certs",
-		CertSecretNamespace: "default",
-		CertDir:             tmpDir,
+		CertSecretName: "test-certs",
+		Namespace:      "default",
+		CertDir:        tmpDir,
 	}
 
 	reloader := &CertificateReloader{
@@ -342,9 +342,9 @@ func TestCertificateReloader_UpdatesOnlyChangedFiles(t *testing.T) {
 		Build()
 
 	cfg := &config.Config{
-		CertSecretName:      "test-certs",
-		CertSecretNamespace: "default",
-		CertDir:             tmpDir,
+		CertSecretName: "test-certs",
+		Namespace:      "default",
+		CertDir:        tmpDir,
 	}
 
 	reloader := &CertificateReloader{

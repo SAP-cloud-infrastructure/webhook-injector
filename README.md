@@ -216,16 +216,14 @@ All configuration via environment variables:
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
 | `WEBHOOK_CONFIG_NAME` | ConfigMap name containing webhook definitions | - | Yes |
-| `WEBHOOK_CONFIG_NAMESPACE` | ConfigMap namespace | Pod namespace | No |
+| `NAMESPACE` | Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from pod's serviceaccount if not set | `default` | No |
 | `CERT_SECRET_NAME` | Secret name for storing certificates | `webhook-injector-certs` | No |
-| `CERT_SECRET_NAMESPACE` | Secret namespace | Pod namespace | No |
 | `CERT_DIR` | Directory to write certificates | `/tmp/webhook-certs` | No |
 | `CERT_VALIDITY` | Certificate validity as duration (e.g., "720h", "30d", "1y") | `720h` (30 days) | No |
 | `CERT_ROTATION_THRESHOLD` | Rotation threshold as decimal (0-1) | `0.8` | No |
 | `TARGET_KUBECONFIG` | Path to target cluster kubeconfig | In-cluster config | No |
 | `ENABLE_LEADER_ELECTION` | Enable leader election | `true` | No |
 | `LEADER_ELECTION_ID` | Leader election lease name | `webhook-injector-leader` | No |
-| `LEADER_ELECTION_NAMESPACE` | Leader election lease namespace | Pod namespace | No |
 | `SYNC_PERIOD` | Reconciliation sync period | `5m` | No |
 | `METRICS_ADDR` | Metrics bind address | `:8080` | No |
 | `HEALTH_ADDR` | Health probe bind address | `:8081` | No |

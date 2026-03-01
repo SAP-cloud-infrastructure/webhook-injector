@@ -77,12 +77,11 @@ webhooks:
 		Build()
 
 	cfg := &config.Config{
-		WebhookConfigName:      "webhook-config",
-		WebhookConfigNamespace: "default",
-		CertSecretName:         "test-certs",
-		CertSecretNamespace:    "default",
-		CertValidity:           30 * 24 * time.Hour,
-		CertDir:                t.TempDir(),
+		WebhookConfigName: "webhook-config",
+		Namespace:         "default",
+		CertSecretName:    "test-certs",
+		CertValidity:      30 * 24 * time.Hour,
+		CertDir:           t.TempDir(),
 	}
 
 	reconciler := &WebhookReconciler{
@@ -188,12 +187,11 @@ webhooks:
 		Build()
 
 	cfg := &config.Config{
-		WebhookConfigName:      "webhook-config",
-		WebhookConfigNamespace: "default",
-		CertSecretName:         "test-certs",
-		CertSecretNamespace:    "default",
-		CertValidity:           30 * 24 * time.Hour,
-		CertDir:                t.TempDir(),
+		WebhookConfigName: "webhook-config",
+		Namespace:         "default",
+		CertSecretName:    "test-certs",
+		CertValidity:      30 * 24 * time.Hour,
+		CertDir:           t.TempDir(),
 	}
 
 	reconciler := &WebhookReconciler{
@@ -245,7 +243,7 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) 
 	// So remaining = 5 days out of 25 day total = 20% remaining < 80% threshold
 	cfg := &config.Config{
 		CertSecretName:        "test-certs",
-		CertSecretNamespace:   "default",
+		Namespace:             "default",
 		CertValidity:          30 * 24 * time.Hour,
 		CertRotationThreshold: 0.8, // Rotate at 80% of validity
 	}
@@ -339,7 +337,7 @@ func TestWebhookReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) 
 
 	cfg := &config.Config{
 		CertSecretName:        "test-certs",
-		CertSecretNamespace:   "default",
+		Namespace:             "default",
 		CertValidity:          30 * 24 * time.Hour,
 		CertRotationThreshold: 0.8,
 	}
@@ -402,7 +400,7 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testin
 
 	cfg := &config.Config{
 		CertSecretName:        "test-certs",
-		CertSecretNamespace:   "default",
+		Namespace:             "default",
 		CertValidity:          30 * 24 * time.Hour,
 		CertRotationThreshold: 0.8,
 	}
@@ -471,7 +469,7 @@ func TestWebhookReconciler_CheckCertificates_ForceRotation_Annotation(t *testing
 
 	cfg := &config.Config{
 		CertSecretName:        "test-certs",
-		CertSecretNamespace:   "default",
+		Namespace:             "default",
 		CertValidity:          720 * time.Hour,
 		CertRotationThreshold: 0.8,
 	}
@@ -584,12 +582,11 @@ webhooks:
 		Build()
 
 	cfg := &config.Config{
-		WebhookConfigName:      "webhook-config",
-		WebhookConfigNamespace: "default",
-		CertSecretName:         "test-certs",
-		CertSecretNamespace:    "default",
-		CertValidity:           720 * time.Hour,
-		CertDir:                t.TempDir(),
+		WebhookConfigName: "webhook-config",
+		Namespace:         "default",
+		CertSecretName:    "test-certs",
+		CertValidity:      720 * time.Hour,
+		CertDir:           t.TempDir(),
 	}
 
 	reconciler := &WebhookReconciler{
@@ -883,14 +880,13 @@ webhooks:
 		Build()
 
 	cfg := &config.Config{
-		WebhookConfigName:      "webhook-config",
-		WebhookConfigNamespace: "default",
-		CertSecretName:         "test-certs",
-		CertSecretNamespace:    "default",
-		CertValidity:           certValidity,
-		CertRotationThreshold:  threshold,
-		SyncPeriod:             5 * time.Minute, // Should NOT use this
-		CertDir:                t.TempDir(),
+		WebhookConfigName:     "webhook-config",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          certValidity,
+		CertRotationThreshold: threshold,
+		SyncPeriod:            5 * time.Minute, // Should NOT use this
+		CertDir:               t.TempDir(),
 	}
 
 	reconciler := &WebhookReconciler{

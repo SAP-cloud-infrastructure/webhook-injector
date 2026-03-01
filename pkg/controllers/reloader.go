@@ -134,8 +134,8 @@ func (r *CertificateReloader) SetupWithManager(mgr ctrl.Manager) error {
 
 // getNamespace returns the configured namespace or pod namespace
 func (r *CertificateReloader) getNamespace() string {
-	if r.Config.CertSecretNamespace != "" {
-		return r.Config.CertSecretNamespace
+	if r.Config.Namespace != "" {
+		return r.Config.Namespace
 	}
 	// Try to read from pod
 	if ns, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {

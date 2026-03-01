@@ -27,13 +27,12 @@ import (
 // Config holds all configuration for webhook-injector
 type Config struct {
 	// Webhook ConfigMap settings
-	WebhookConfigName      string
-	WebhookConfigNamespace string
+	WebhookConfigName string
+	Namespace         string
 
 	// Certificate Secret settings
-	CertSecretName      string
-	CertSecretNamespace string
-	CertDir             string
+	CertSecretName string
+	CertDir        string
 
 	// Certificate generation settings
 	CertValidity          time.Duration
@@ -62,8 +61,33 @@ type Config struct {
 	LogLevel string
 }
 
+const serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+// detectNamespaceWithPath allows testing with custom serviceaccount path
+func detectNamespaceWithPath(saPath string) string {
+	// Try NAMESPACE env var first
+	if ns := os.Getenv("NAMESPACE"); ns != "" {
+		return ns
+	}
+
+	// Try reading from serviceaccount file
+	if data, err := os.ReadFile(saPath); err == nil {
+		if ns := string(data); ns != "" {
+			return ns
+		}
+	}
+
+	// Default to "default"
+	return "default"
+}
+
 // LoadFromEnv loads configuration from environment variables with defaults
 func LoadFromEnv() (*Config, error) {
+	return loadFromEnvWithSAPath(serviceAccountNamespaceFile)
+}
+
+// loadFromEnvWithSAPath allows testing with custom serviceaccount path
+func loadFromEnvWithSAPath(saPath string) (*Config, error) {
 	// Parse certificate validity
 	validityStr := getEnv("CERT_VALIDITY", "720h")
 	validity, err := time.ParseDuration(validityStr)
@@ -73,16 +97,15 @@ func LoadFromEnv() (*Config, error) {
 
 	return &Config{
 		WebhookConfigName:       getEnv("WEBHOOK_CONFIG_NAME", ""),
-		WebhookConfigNamespace:  getEnv("WEBHOOK_CONFIG_NAMESPACE", ""),
+		Namespace:               detectNamespaceWithPath(saPath),
 		CertSecretName:          getEnv("CERT_SECRET_NAME", "webhook-injector-certs"),
-		CertSecretNamespace:     getEnv("CERT_SECRET_NAMESPACE", ""),
 		CertDir:                 getEnv("CERT_DIR", "/tmp/webhook-certs"),
 		CertValidity:            validity,
 		CertRotationThreshold:   getEnvFloat("CERT_ROTATION_THRESHOLD", 0.8),
 		Kubeconfig:              getEnv("TARGET_KUBECONFIG", ""),
 		EnableLeaderElection:    getEnvBool("ENABLE_LEADER_ELECTION", true),
 		LeaderElectionID:        getEnv("LEADER_ELECTION_ID", "webhook-injector-leader"),
-		LeaderElectionNamespace: getEnv("LEADER_ELECTION_NAMESPACE", ""),
+		LeaderElectionNamespace: detectNamespaceWithPath(saPath),
 		SyncPeriod:              getEnvDuration("SYNC_PERIOD", 5*time.Minute),
 		MetricsAddr:             getEnv("METRICS_ADDR", ":8080"),
 		HealthAddr:              getEnv("HEALTH_ADDR", ":8081"),

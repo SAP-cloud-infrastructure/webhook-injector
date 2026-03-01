@@ -18,6 +18,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -25,7 +27,7 @@ import (
 func TestLoadFromEnv(t *testing.T) {
 	// Set test environment variables
 	t.Setenv("WEBHOOK_CONFIG_NAME", "test-config")
-	t.Setenv("WEBHOOK_CONFIG_NAMESPACE", "test-ns")
+	t.Setenv("NAMESPACE", "test-ns")
 
 	cfg, err := LoadFromEnv()
 	if err != nil {
@@ -34,6 +36,9 @@ func TestLoadFromEnv(t *testing.T) {
 
 	if cfg.WebhookConfigName != "test-config" {
 		t.Errorf("Expected WebhookConfigName 'test-config', got '%s'", cfg.WebhookConfigName)
+	}
+	if cfg.Namespace != "test-ns" {
+		t.Errorf("Expected Namespace 'test-ns', got '%s'", cfg.Namespace)
 	}
 }
 
@@ -57,6 +62,10 @@ func TestLoadFromEnvDefaults(t *testing.T) {
 	}
 	if cfg.SyncPeriod != 5*time.Minute {
 		t.Errorf("Expected default SyncPeriod 5m, got %v", cfg.SyncPeriod)
+	}
+	// Note: Namespace will be "default" when no NAMESPACE env var and no serviceaccount file
+	if cfg.Namespace != "default" {
+		t.Errorf("Expected default Namespace 'default', got '%s'", cfg.Namespace)
 	}
 }
 
@@ -188,4 +197,68 @@ func TestValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadFromEnv_NamespaceResolution(t *testing.T) {
+	tests := []struct {
+		name                string
+		envNamespace        string
+		setupServiceAccount bool
+		expected            string
+	}{
+		{
+			name:                "NAMESPACE env var takes precedence",
+			envNamespace:        "custom-namespace",
+			setupServiceAccount: true,
+			expected:            "custom-namespace",
+		},
+		{
+			name:                "Falls back to serviceaccount file",
+			envNamespace:        "",
+			setupServiceAccount: true,
+			expected:            "sa-namespace",
+		},
+		{
+			name:                "Defaults to 'default' if no env and no serviceaccount",
+			envNamespace:        "",
+			setupServiceAccount: false,
+			expected:            "default",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			if tt.envNamespace != "" {
+				t.Setenv("NAMESPACE", tt.envNamespace)
+			}
+			t.Setenv("WEBHOOK_CONFIG_NAME", "test-config")
+
+			var saPath string
+			if tt.setupServiceAccount {
+				// Create temp serviceaccount file
+				tmpDir := t.TempDir()
+				saPath = filepath.Join(tmpDir, "namespace")
+				err := os.WriteFile(saPath, []byte("sa-namespace"), 0600)
+				if err != nil {
+					t.Fatalf("Failed to create test serviceaccount file: %v", err)
+				}
+			}
+
+			// Test
+			cfg, err := LoadFromEnvWithSAPath(saPath)
+			if err != nil {
+				t.Fatalf("LoadFromEnv failed: %v", err)
+			}
+
+			if cfg.Namespace != tt.expected {
+				t.Errorf("Expected namespace %q, got %q", tt.expected, cfg.Namespace)
+			}
+		})
+	}
+}
+
+// LoadFromEnvWithSAPath is a helper function for testing with custom serviceaccount path
+func LoadFromEnvWithSAPath(saPath string) (*Config, error) {
+	return loadFromEnvWithSAPath(saPath)
 }

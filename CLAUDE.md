@@ -182,6 +182,7 @@ test/e2e/                       E2E integration tests with kind clusters
 
 All configuration via environment variables (no flags). See `pkg/config/config.go` for:
 - `WEBHOOK_CONFIG_NAME` (required) - ConfigMap with webhook definitions
+- `NAMESPACE` - Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from pod's serviceaccount if not set, defaults to "default"
 - `CERT_SECRET_NAME` - Where to store certificates
 - `CERT_DIR` - Where to write certificate files
 - `CERT_VALIDITY` - Certificate lifetime as duration (e.g., "720h", "30d", "1y")

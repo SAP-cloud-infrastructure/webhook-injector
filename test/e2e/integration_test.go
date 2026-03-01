@@ -24,16 +24,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers"
 )
 
 var (
@@ -56,10 +58,10 @@ func TestMain(m *testing.M) {
 }
 
 // logWithTimestamp logs a message with timestamp prefix
-func logWithTimestamp(t *testing.T, format string, args ...interface{}) {
+func logWithTimestamp(t *testing.T, format string, args ...any) {
 	t.Helper()
 	timestamp := time.Now().Format("15:04:05.000")
-	t.Logf("[%s] "+format, append([]interface{}{timestamp}, args...)...)
+	t.Logf("[%s] "+format, append([]any{timestamp}, args...)...)
 }
 
 func runCommand(t *testing.T, command string) error {
@@ -151,7 +153,7 @@ func runLoadClient(ctx context.Context, clientID int, client *kubernetes.Clients
 				continue
 			}
 
-			cm.Data["counter"] = fmt.Sprintf("%d", reqCount)
+			cm.Data["counter"] = strconv.Itoa(reqCount)
 			ctx2, cancel = context.WithTimeout(context.Background(), 1*time.Second) // Timeout for individual request
 			_, err = client.CoreV1().ConfigMaps("default").Update(ctx2, cm, metav1.UpdateOptions{})
 			cancel()
@@ -169,6 +171,7 @@ func runLoadClient(ctx context.Context, clientID int, client *kubernetes.Clients
 
 func runRotationTrigger(ctx context.Context, t *testing.T, client *kubernetes.Clientset,
 	interval time.Duration, failures chan<- FailureRecord) {
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -250,7 +253,7 @@ func TestWebhookLoadAndRotation(t *testing.T) {
 	// Create load test ConfigMaps (delete existing ones first)
 	ctx := context.Background()
 	logWithTimestamp(t, "Creating %d load test ConfigMaps...", *testConcurrency)
-	for i := 0; i < *testConcurrency; i++ {
+	for i := range *testConcurrency {
 		cmName := fmt.Sprintf("load-test-cm-%d", i)
 
 		// Delete if exists (ignore errors)
@@ -280,7 +283,7 @@ func TestWebhookLoadAndRotation(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Start load clients
-	for i := 0; i < *testConcurrency; i++ {
+	for i := range *testConcurrency {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -289,11 +292,9 @@ func TestWebhookLoadAndRotation(t *testing.T) {
 	}
 
 	// Start rotation trigger
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		runRotationTrigger(loadCtx, t, hostingClient, *rotationInterval, failures)
-	}()
+	})
 
 	// Wait for test duration
 	<-loadCtx.Done()

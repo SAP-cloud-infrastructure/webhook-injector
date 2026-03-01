@@ -74,8 +74,9 @@ func main() {
 	}
 
 	setupLog.Info("Starting webhook-injector",
-		"config-name", cfg.WebhookConfigNamespace+"/"+cfg.WebhookConfigName,
-		"cert-secret", cfg.CertSecretNamespace+"/"+cfg.CertSecretName,
+		"namespace", cfg.Namespace,
+		"config-name", cfg.WebhookConfigName,
+		"cert-secret", cfg.CertSecretName,
 		"leader-election", cfg.EnableLeaderElection,
 	)
 
@@ -96,7 +97,7 @@ func main() {
 		// ("cannot list resource at the cluster scope").
 		Cache: cache.Options{
 			DefaultNamespaces: map[string]cache.Config{
-				getPodNamespace(cfg): {},
+				cfg.Namespace: {},
 			},
 		},
 	})
@@ -210,22 +211,4 @@ func getTargetClient(cfg *config.Config) (client.Client, error) {
 	}
 
 	return targetClient, nil
-}
-
-// getPodNamespace returns the namespace the pod is running in
-func getPodNamespace(cfg *config.Config) string {
-	// Try config namespaces first
-	if cfg.WebhookConfigNamespace != "" {
-		return cfg.WebhookConfigNamespace
-	}
-	if cfg.CertSecretNamespace != "" {
-		return cfg.CertSecretNamespace
-	}
-
-	// Try to read from pod
-	if ns, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
-		return string(ns)
-	}
-
-	return "default"
 }

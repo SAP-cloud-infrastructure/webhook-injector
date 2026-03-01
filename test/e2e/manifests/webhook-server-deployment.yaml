@@ -64,9 +64,7 @@ spec:
           env:
             - name: WEBHOOK_CONFIG_NAME
               value: webhook-config
-            - name: WEBHOOK_CONFIG_NAMESPACE
-              value: default
-            - name: CERT_SECRET_NAMESPACE
+            - name: NAMESPACE
               value: default
             - name: CERT_VALIDITY
               #value: "60s"  # Short validity for testing
@@ -77,8 +75,6 @@ spec:
               value: /etc/target-kubeconfig/kubeconfig
             - name: ENABLE_LEADER_ELECTION
               value: "true"
-            - name: LEADER_ELECTION_NAMESPACE
-              value: default
           volumeMounts:
             - name: webhook-certs
               mountPath: /tmp/webhook-certs

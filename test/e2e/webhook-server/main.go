@@ -102,8 +102,8 @@ func main() {
 	// Initialize random generator for jitter (modern Go 1.20+ approach)
 	randGen = rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	certFile := fmt.Sprintf("%s/tls.crt", certDir)
-	keyFile := fmt.Sprintf("%s/tls.key", certDir)
+	certFile := certDir + "/tls.crt"
+	keyFile := certDir + "/tls.key"
 
 	// Wait for certificates to be created by webhook-injector
 	setupLog.Info("Waiting for certificates to be generated...")

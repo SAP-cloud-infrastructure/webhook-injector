@@ -105,7 +105,7 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		secret = &corev1.Secret{}
 		secretKey := types.NamespacedName{
 			Name:      r.Config.CertSecretName,
-			Namespace: r.getNamespace(r.Config.CertSecretNamespace),
+			Namespace: r.getNamespace(r.Config.Namespace),
 		}
 		if err := r.Client.Get(ctx, secretKey, secret); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to get generated secret: %w", err)
@@ -138,7 +138,7 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []certificates.ServiceReference) (*corev1.Secret, bool, error) {
 	secretKey := types.NamespacedName{
 		Name:      r.Config.CertSecretName,
-		Namespace: r.getNamespace(r.Config.CertSecretNamespace),
+		Namespace: r.getNamespace(r.Config.Namespace),
 	}
 
 	secret := &corev1.Secret{}
@@ -307,7 +307,7 @@ func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, se
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      r.Config.CertSecretName,
-			Namespace: r.getNamespace(r.Config.CertSecretNamespace),
+			Namespace: r.getNamespace(r.Config.Namespace),
 			// Remove force-rotation annotation if present
 			Annotations: map[string]string{},
 		},
@@ -409,7 +409,7 @@ func (r *WebhookReconciler) getNamespace(namespace string) string {
 func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Only watch the specific webhook ConfigMap
 	configMapPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
-		return r.Config.WebhookConfigName == object.GetName() && r.getNamespace(r.Config.WebhookConfigNamespace) == object.GetNamespace()
+		return r.Config.WebhookConfigName == object.GetName() && r.getNamespace(r.Config.Namespace) == object.GetNamespace()
 	})
 
 	// Map Secret events to ConfigMap reconcile requests
@@ -418,7 +418,7 @@ func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	secretToConfigMapMapper := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
 		// Only map events for the specific certificate Secret
 		if obj.GetName() != r.Config.CertSecretName ||
-			obj.GetNamespace() != r.getNamespace(r.Config.CertSecretNamespace) {
+			obj.GetNamespace() != r.getNamespace(r.Config.Namespace) {
 			return nil
 		}
 
@@ -426,7 +426,7 @@ func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			{
 				NamespacedName: types.NamespacedName{
 					Name:      r.Config.WebhookConfigName,
-					Namespace: r.getNamespace(r.Config.WebhookConfigNamespace),
+					Namespace: r.getNamespace(r.Config.Namespace),
 				},
 			},
 		}
