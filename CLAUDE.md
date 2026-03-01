@@ -58,7 +58,9 @@ The application contains two independent controllers with different leader elect
 
 1. **WebhookReconciler** (runs on **leader only**)
    - Location: `pkg/controllers/reconciler.go`
-   - Watches: ConfigMap containing webhook definitions (in hosting cluster)
+   - Watches:
+     - ConfigMap containing webhook definitions (in hosting cluster)
+     - Certificate Secret for force-rotation annotation (in hosting cluster)
    - Generates/rotates CA and server certificates with dynamic SANs
    - Stores certificates in Secret (in hosting cluster)
    - Injects CA bundle into webhook configurations
@@ -114,7 +116,7 @@ pkg/webhooks/                   Webhook configuration parsing
   parser.go                     ParseWebhookConfigurations(), ExtractServiceReferences()
   injector.go                   InjectCABundle()
 
-test/integration/               Integration tests (use envtest)
+test/e2e/                       E2E integration tests with kind clusters
 ```
 
 ## Certificate Lifecycle
@@ -123,6 +125,7 @@ test/integration/               Integration tests (use envtest)
 1. ConfigMap changes (new webhook definitions)
 2. Time-based rotation: remaining validity < threshold × total validity (default: 80%)
 3. Config-based rotation: Service references or URLs change (new SANs required)
+4. Manual rotation: Force-rotation annotation on Secret (`webhook-injector.sap.com/force-rotation: "true"`)
 
 **Certificate SANs:**
 - Service-based webhooks: `<service>.<namespace>.svc`, `<service>.<namespace>.svc.cluster.local`
@@ -134,6 +137,13 @@ test/integration/               Integration tests (use envtest)
 3. Webhook server watches filesystem → automatically reloads (if using controller-runtime v0.17+)
 
 ## Important Implementation Details
+
+**ForceRotationAnnotation constant:**
+- Defined in `pkg/controllers/reconciler.go` as a public constant
+- Value: `"webhook-injector.sap.com/force-rotation"`
+- Used by WebhookReconciler to check for manual rotation triggers
+- Used by tests and e2e tests to trigger rotation
+- The e2e tests import this constant from the controllers package via replace directive in test/e2e/go.mod
 
 **Import aliasing for k8s errors:**
 - Always use `apierrors "k8s.io/apimachinery/pkg/api/errors"` to avoid conflicts with standard `errors` package

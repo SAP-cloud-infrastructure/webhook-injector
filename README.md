@@ -20,9 +20,11 @@ webhook-injector runs as a sidecar with two internal controllers:
 
 ### 1. WebhookReconciler (runs on leader only)
    - **What it does**: Manages webhook lifecycle and certificate generation
-   - **Watches**: Webhook ConfigMap for changes
+   - **Watches**:
+     - Webhook ConfigMap for configuration changes
+     - Certificate Secret for force-rotation annotation
    - **Generates**: CA + server certificates with dynamic SANs from service/URL references
-   - **Rotates**: Certificates when approaching expiry or when SANs change
+   - **Rotates**: Certificates when approaching expiry, when SANs change, or when force-rotation annotation is set
    - **Stores**: Certificates in Secret in hosting cluster
    - **Injects**: CA bundle into webhook configurations
    - **Applies**: Webhook configurations to target cluster
@@ -202,6 +204,11 @@ Certificates are automatically rotated when:
    - Changing service name/namespace → SANs change → rotation triggered
    - Changing URL hostname → SAN change → rotation triggered
 
+3. **Manual rotation**: Add annotation to certificate Secret to force immediate rotation
+   - Add `webhook-injector.sap.com/force-rotation: "true"` to Secret annotations
+   - WebhookReconciler watches for this annotation and triggers rotation
+   - Annotation is automatically removed after rotation completes
+
 ## Configuration
 
 All configuration via environment variables:
@@ -213,7 +220,7 @@ All configuration via environment variables:
 | `CERT_SECRET_NAME` | Secret name for storing certificates | `webhook-injector-certs` | No |
 | `CERT_SECRET_NAMESPACE` | Secret namespace | Pod namespace | No |
 | `CERT_DIR` | Directory to write certificates | `/tmp/webhook-certs` | No |
-| `CERT_VALIDITY_DAYS` | Certificate validity period in days | `30` | No |
+| `CERT_VALIDITY` | Certificate validity as duration (e.g., "720h", "30d", "1y") | `720h` (30 days) | No |
 | `CERT_ROTATION_THRESHOLD` | Rotation threshold as decimal (0-1) | `0.8` | No |
 | `TARGET_KUBECONFIG` | Path to target cluster kubeconfig | In-cluster config | No |
 | `ENABLE_LEADER_ELECTION` | Enable leader election | `true` | No |
