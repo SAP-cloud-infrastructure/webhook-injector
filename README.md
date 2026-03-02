@@ -7,7 +7,7 @@ A Kubernetes controller that runs as a sidecar to webhook servers, managing webh
 - **Automatic Certificate Management**: Generates and rotates self-signed certificates with dynamic SANs
 - **Smart Rotation**: Time-based (80% validity threshold), config-based (SAN changes), or manual (annotation)
 - **Remote Cluster Support**: Manage webhooks in clusters where the webhook server doesn't run
-- **Generic Solution**: Works with any webhook server (any language/framework)
+- **Language Agnostic**: Works with any webhook server that can watch certificate files for changes
 - **High Availability**: Leader election with multi-replica support, zero-downtime rotation
 
 ## Architecture
@@ -84,6 +84,7 @@ webhook-injector runs as a sidecar with two controllers:
 - Kubernetes cluster (hosting cluster)
 - kubectl configured
 - (Optional) Target cluster kubeconfig if managing remote cluster
+- **Webhook server requirement**: Must watch certificate files and reload on changes (controller-runtime v0.17+ does this automatically)
 
 ### Build
 
@@ -153,6 +154,8 @@ data:
         # ... standard webhook config
 ```
 
+**Note:** Your webhook server must watch the certificate directory and reload certificates when `tls.crt` or `tls.key` change. Controller-runtime webhook servers (v0.17+) provide this functionality automatically via an internal `certwatcher`. For other frameworks, implement file watching using inotify/fsnotify or periodic polling.
+
 ## Certificate Management
 
 **Rotation triggers:**
@@ -164,7 +167,7 @@ data:
 - `tls.crt`: Self-signed certificate with SANs from service/URL references
 - `tls.key`: Private key
 
-The same certificate serves as both server cert and CA bundle. Controller-runtime webhook servers (v0.17+) automatically hot-reload certificates via fsnotify.
+The same certificate serves as both server cert and CA bundle. Your webhook server must reload these files when they change - controller-runtime webhook servers (v0.17+) handle this automatically via fsnotify.
 
 ## Configuration
 
