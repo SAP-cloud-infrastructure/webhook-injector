@@ -46,8 +46,8 @@ func TestCertificateReloader(t *testing.T) {
 			Name:      "test-certs",
 			Namespace: "default",
 		},
+		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"ca.crt":  []byte("test-ca-cert"),
 			"tls.crt": []byte("test-server-cert"),
 			"tls.key": []byte("test-server-key"),
 		},
@@ -79,7 +79,7 @@ func TestCertificateReloader(t *testing.T) {
 	}
 
 	// Verify files were written
-	files := []string{"ca.crt", "tls.crt", "tls.key"}
+	files := []string{"tls.crt", "tls.key"}
 	for _, file := range files {
 		path := filepath.Join(tmpDir, file)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -96,6 +96,12 @@ func TestCertificateReloader(t *testing.T) {
 			t.Errorf("File %s: expected content '%s', got '%s'", file, expectedContent, content)
 		}
 	}
+
+	// Verify ca.crt was NOT written
+	caCrtPath := filepath.Join(tmpDir, "ca.crt")
+	if _, err := os.Stat(caCrtPath); err == nil {
+		t.Errorf("ca.crt should not have been written")
+	}
 }
 
 func TestCertificateReloader_SkipsUnchangedCertificates(t *testing.T) {
@@ -109,7 +115,6 @@ func TestCertificateReloader_SkipsUnchangedCertificates(t *testing.T) {
 
 	// Pre-populate files with existing certificate data
 	existingCerts := map[string][]byte{
-		"ca.crt":  []byte("existing-ca-cert"),
 		"tls.crt": []byte("existing-server-cert"),
 		"tls.key": []byte("existing-server-key"),
 	}
@@ -138,6 +143,7 @@ func TestCertificateReloader_SkipsUnchangedCertificates(t *testing.T) {
 			Name:      "test-certs",
 			Namespace: "default",
 		},
+		Type: corev1.SecretTypeTLS,
 		Data: existingCerts, // Same content as existing files
 	}
 
@@ -206,7 +212,6 @@ func TestCertificateReloader_UpdatesChangedCertificates(t *testing.T) {
 
 	// Pre-populate files with OLD certificate data
 	oldCerts := map[string][]byte{
-		"ca.crt":  []byte("old-ca-cert"),
 		"tls.crt": []byte("old-server-cert"),
 		"tls.key": []byte("old-server-key"),
 	}
@@ -220,7 +225,6 @@ func TestCertificateReloader_UpdatesChangedCertificates(t *testing.T) {
 
 	// Create secret with NEW content (changed)
 	newCerts := map[string][]byte{
-		"ca.crt":  []byte("new-ca-cert"),
 		"tls.crt": []byte("new-server-cert"),
 		"tls.key": []byte("new-server-key"),
 	}
@@ -230,6 +234,7 @@ func TestCertificateReloader_UpdatesChangedCertificates(t *testing.T) {
 			Name:      "test-certs",
 			Namespace: "default",
 		},
+		Type: corev1.SecretTypeTLS,
 		Data: newCerts, // Different content
 	}
 
@@ -284,7 +289,6 @@ func TestCertificateReloader_UpdatesOnlyChangedFiles(t *testing.T) {
 
 	// Pre-populate files
 	existingCerts := map[string][]byte{
-		"ca.crt":  []byte("unchanged-ca-cert"),
 		"tls.crt": []byte("old-server-cert"),
 		"tls.key": []byte("unchanged-server-key"),
 	}
@@ -309,7 +313,6 @@ func TestCertificateReloader_UpdatesOnlyChangedFiles(t *testing.T) {
 
 	// Create secret with ONE changed file (tls.crt)
 	newCerts := map[string][]byte{
-		"ca.crt":  []byte("unchanged-ca-cert"),    // SAME
 		"tls.crt": []byte("new-server-cert"),      // CHANGED
 		"tls.key": []byte("unchanged-server-key"), // SAME
 	}
@@ -319,6 +322,7 @@ func TestCertificateReloader_UpdatesOnlyChangedFiles(t *testing.T) {
 			Name:      "test-certs",
 			Namespace: "default",
 		},
+		Type: corev1.SecretTypeTLS,
 		Data: newCerts,
 	}
 
@@ -348,7 +352,7 @@ func TestCertificateReloader_UpdatesOnlyChangedFiles(t *testing.T) {
 	}
 
 	// Verify ca.crt and tls.key were NOT rewritten (unchanged)
-	for _, file := range []string{"ca.crt", "tls.key"} {
+	for _, file := range []string{"tls.key"} {
 		path := filepath.Join(tmpDir, file)
 		info, err := os.Stat(path)
 		if err != nil {

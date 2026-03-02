@@ -4,7 +4,7 @@ A Kubernetes controller that runs as a sidecar to webhook servers, managing the 
 
 ## Features
 
-- **Automatic Certificate Management**: Generates and rotates CA and server certificates
+- **Automatic Certificate Management**: Generates and rotates self-signed certificates
 - **Smart Certificate Rotation**: Time-based (80% of validity) and config-based (SAN changes)
 - **Remote Cluster Support**: Manage webhooks in clusters where the webhook server doesn't run
 - **URL and Service Support**: Webhooks can reference services (in-cluster) or URLs (remote)
@@ -23,7 +23,7 @@ webhook-injector runs as a sidecar with two internal controllers:
    - **Watches**:
      - Webhook ConfigMap for configuration changes
      - Certificate Secret for force-rotation annotation
-   - **Generates**: CA + server certificates with dynamic SANs from service/URL references
+   - **Generates**: Self-signed certificates with dynamic SANs from service/URL references
    - **Rotates**: Certificates when approaching expiry, when SANs change, or when force-rotation annotation is set
    - **Stores**: Certificates in Secret in hosting cluster
    - **Injects**: CA bundle into webhook configurations
@@ -258,9 +258,10 @@ This ensures the namespace is always explicitly configured or auto-detected from
 ## Certificate Output
 
 Files written to `--cert-dir`:
-- `ca.crt`: CA certificate (PEM)
-- `tls.crt`: Server certificate with dynamic SANs (PEM)
-- `tls.key`: Server private key (PEM)
+- `tls.crt`: Self-signed certificate with dynamic SANs (PEM)
+- `tls.key`: Private key (PEM)
+
+Note: The same certificate is used as both the server certificate and CA bundle for validation.
 
 **Certificate SANs include:**
 - For service-based webhooks: `<service>.<namespace>.svc` and `<service>.<namespace>.svc.cluster.local`

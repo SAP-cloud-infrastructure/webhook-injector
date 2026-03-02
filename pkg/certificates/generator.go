@@ -23,85 +23,17 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"math/big"
 	"time"
 )
 
-// GenerateCA generates a self-signed CA certificate and private key
-func GenerateCA(validity time.Duration) (caCertPEM, caKeyPEM []byte, err error) {
+// GenerateSelfSignedCert generates a self-signed server certificate and private key
+func GenerateSelfSignedCert(services []ServiceReference, validity time.Duration) (certPEM, keyPEM []byte, err error) {
 	// Generate private key
-	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate CA private key: %w", err)
-	}
-
-	// Create CA certificate template
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate serial number: %w", err)
-	}
-
-	now := time.Now()
-	template := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			CommonName: "webhook-injector-ca",
-		},
-		NotBefore:             now,
-		NotAfter:              now.Add(validity),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-
-	// Self-sign the CA certificate
-	caCertDER, err := x509.CreateCertificate(rand.Reader, template, template, &caKey.PublicKey, caKey)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create CA certificate: %w", err)
-	}
-
-	// Encode to PEM
-	caCertPEM = pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: caCertDER,
-	})
-
-	caKeyPEM = pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(caKey),
-	})
-
-	return caCertPEM, caKeyPEM, nil
-}
-
-// GenerateServerCert generates a server certificate signed by the CA
-func GenerateServerCert(caCertPEM, caKeyPEM []byte, services []ServiceReference, validity time.Duration) (certPEM, keyPEM []byte, err error) {
-	// Parse CA certificate
-	caCertBlock, _ := pem.Decode(caCertPEM)
-	if caCertBlock == nil {
-		return nil, nil, errors.New("failed to decode CA certificate PEM")
-	}
-	caCert, err := x509.ParseCertificate(caCertBlock.Bytes)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse CA certificate: %w", err)
-	}
-
-	// Parse CA private key
-	caKeyBlock, _ := pem.Decode(caKeyPEM)
-	if caKeyBlock == nil {
-		return nil, nil, errors.New("failed to decode CA private key PEM")
-	}
-	caKey, err := x509.ParsePKCS1PrivateKey(caKeyBlock.Bytes)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse CA private key: %w", err)
-	}
-
-	// Generate server private key
-	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate server private key: %w", err)
+		return nil, nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
 
 	// Build DNS SANs from service references
@@ -119,7 +51,7 @@ func GenerateServerCert(caCertPEM, caKeyPEM []byte, services []ServiceReference,
 		}
 	}
 
-	// Create server certificate template
+	// Create certificate template
 	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate serial number: %w", err)
@@ -129,31 +61,34 @@ func GenerateServerCert(caCertPEM, caKeyPEM []byte, services []ServiceReference,
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			CommonName: "webhook-injector-server",
+			CommonName: "webhook-injector",
 		},
-		DNSNames:    dnsNames,
-		NotBefore:   now,
-		NotAfter:    now.Add(validity),
-		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:              dnsNames,
+		NotBefore:             now,
+		NotAfter:              now.Add(validity),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  false,
 	}
 
-	// Sign server certificate with CA
-	serverCertDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &serverKey.PublicKey, caKey)
+	// Self-sign the certificate (template is both cert and parent)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create server certificate: %w", err)
+		return nil, nil, fmt.Errorf("failed to create certificate: %w", err)
 	}
 
 	// Encode to PEM
 	certPEM = pem.EncodeToMemory(&pem.Block{
 		Type:  "CERTIFICATE",
-		Bytes: serverCertDER,
+		Bytes: certDER,
 	})
 
 	keyPEM = pem.EncodeToMemory(&pem.Block{
 		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(serverKey),
+		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
 	})
 
 	return certPEM, keyPEM, nil
 }
+

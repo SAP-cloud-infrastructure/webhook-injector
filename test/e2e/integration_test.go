@@ -250,8 +250,37 @@ func TestWebhookLoadAndRotation(t *testing.T) {
 	logWithTimestamp(t, "Waiting for webhook deployment ready...")
 	waitForDeploymentReady(t, hostingClient, "webhook-server", 3, 5*time.Minute)
 
-	// Create load test ConfigMaps (delete existing ones first)
+	// Create context for API calls
 	ctx := context.Background()
+
+	// Verify certificate Secret structure
+	logWithTimestamp(t, "Verifying certificate Secret structure...")
+	secret, err := hostingClient.CoreV1().Secrets("default").Get(ctx, "webhook-injector-certs", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get certificate Secret: %v", err)
+	}
+
+	// Verify Secret type
+	if secret.Type != corev1.SecretTypeTLS {
+		t.Fatalf("Expected Secret type %s, got %s", corev1.SecretTypeTLS, secret.Type)
+	}
+
+	// Verify only tls.crt and tls.key are present (no ca.crt)
+	if _, exists := secret.Data["ca.crt"]; exists {
+		t.Fatalf("Secret should not contain ca.crt (self-signed certificates)")
+	}
+	if _, exists := secret.Data["tls.crt"]; !exists {
+		t.Fatalf("Secret missing required tls.crt")
+	}
+	if _, exists := secret.Data["tls.key"]; !exists {
+		t.Fatalf("Secret missing required tls.key")
+	}
+	if len(secret.Data) != 2 {
+		t.Fatalf("Secret should contain exactly 2 keys (tls.crt, tls.key), found %d", len(secret.Data))
+	}
+	logWithTimestamp(t, "Certificate Secret structure verified")
+
+	// Create load test ConfigMaps (delete existing ones first)
 	logWithTimestamp(t, "Creating %d load test ConfigMaps...", *testConcurrency)
 	for i := range *testConcurrency {
 		cmName := fmt.Sprintf("load-test-cm-%d", i)

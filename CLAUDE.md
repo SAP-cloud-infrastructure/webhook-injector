@@ -61,7 +61,7 @@ The application contains two independent controllers with different leader elect
    - Watches:
      - ConfigMap containing webhook definitions (in hosting cluster)
      - Certificate Secret for force-rotation annotation (in hosting cluster)
-   - Generates/rotates CA and server certificates with dynamic SANs
+   - Generates/rotates self-signed certificates with dynamic SANs
    - Stores certificates in Secret (in hosting cluster)
    - Injects CA bundle into webhook configurations
    - Applies webhook configurations to **target cluster** (may be remote)
@@ -102,7 +102,7 @@ cmd/webhook-injector/           Main entrypoint
   main.go                       Creates manager, sets up both controllers, handles target cluster client
 
 pkg/certificates/               Certificate generation using crypto/x509
-  generator.go                  GenerateCA(), GenerateServerCert() with dynamic SANs
+  generator.go                  GenerateSelfSignedCert() with dynamic SANs
   types.go                      ServiceReference struct
 
 pkg/config/                     Environment variable configuration
@@ -127,12 +127,17 @@ test/e2e/                       E2E integration tests with kind clusters
 3. Config-based rotation: Service references or URLs change (new SANs required)
 4. Manual rotation: Force-rotation annotation on Secret (`webhook-injector.sap.com/force-rotation: "true"`)
 
+**Certificate approach:**
+- Single self-signed certificate (not CA + server cert)
+- Same certificate used for serving and validation (validates itself)
+- Simpler Secret structure: 2 files (tls.crt, tls.key)
+
 **Certificate SANs:**
 - Service-based webhooks: `<service>.<namespace>.svc`, `<service>.<namespace>.svc.cluster.local`
 - URL-based webhooks: hostname extracted from URL (e.g., `webhook.example.com`)
 
 **Storage flow:**
-1. WebhookReconciler generates certs → stores in Secret (hosting cluster)
+1. WebhookReconciler generates self-signed cert → stores in Secret (hosting cluster)
 2. CertificateReloader watches Secret → writes to `/tmp/webhook-certs/`
 3. Webhook server watches filesystem → automatically reloads (if using controller-runtime v0.17+)
 

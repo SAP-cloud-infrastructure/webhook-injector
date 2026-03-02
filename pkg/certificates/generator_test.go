@@ -25,47 +25,90 @@ import (
 	"time"
 )
 
-func TestGenerateCA(t *testing.T) {
+func TestGenerateSelfSignedCert(t *testing.T) {
 	validity := 30 * 24 * time.Hour
 
-	caCert, caKey, err := GenerateCA(validity)
+	// Define service references
+	services := []ServiceReference{
+		{Name: "webhook-service", Namespace: "default"},
+		{Hostname: "webhook.example.com"},
+	}
+
+	certPEM, keyPEM, err := GenerateSelfSignedCert(services, validity)
 	if err != nil {
-		t.Fatalf("Failed to generate CA: %v", err)
+		t.Fatalf("Failed to generate self-signed cert: %v", err)
 	}
 
-	// Verify CA cert
-	block, _ := pem.Decode(caCert)
-	if block == nil || block.Type != "CERTIFICATE" {
-		t.Fatal("Failed to decode CA certificate PEM")
+	// Verify certificate PEM
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil || certBlock.Type != "CERTIFICATE" {
+		t.Fatal("Failed to decode certificate PEM")
 	}
 
-	cert, err := x509.ParseCertificate(block.Bytes)
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
 	if err != nil {
-		t.Fatalf("Failed to parse CA certificate: %v", err)
+		t.Fatalf("Failed to parse certificate: %v", err)
 	}
 
-	if !cert.IsCA {
-		t.Error("Certificate is not a CA")
-	}
-	if cert.Subject.CommonName != "webhook-injector-ca" {
-		t.Errorf("Expected CN 'webhook-injector-ca', got '%s'", cert.Subject.CommonName)
+	// Verify it's self-signed (issuer == subject)
+	if cert.Issuer.CommonName != cert.Subject.CommonName {
+		t.Errorf("Certificate is not self-signed: issuer='%s', subject='%s'",
+			cert.Issuer.CommonName, cert.Subject.CommonName)
 	}
 
-	// Verify CA key
-	keyBlock, _ := pem.Decode(caKey)
+	// Verify IsCA is false
+	if cert.IsCA {
+		t.Error("Certificate should not be a CA")
+	}
+
+	// Verify subject CN
+	if cert.Subject.CommonName != "webhook-injector" {
+		t.Errorf("Expected CN 'webhook-injector', got '%s'", cert.Subject.CommonName)
+	}
+
+	// Verify SANs
+	expectedSANs := []string{
+		"webhook-service.default.svc",
+		"webhook-service.default.svc.cluster.local",
+		"webhook.example.com",
+	}
+
+	for _, expectedSAN := range expectedSANs {
+		found := slices.Contains(cert.DNSNames, expectedSAN)
+		if !found {
+			t.Errorf("Expected SAN '%s' not found in certificate. Found: %v", expectedSAN, cert.DNSNames)
+		}
+	}
+
+	// Verify key usage
+	if cert.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		t.Error("Certificate should have DigitalSignature key usage")
+	}
+	if cert.KeyUsage&x509.KeyUsageKeyEncipherment == 0 {
+		t.Error("Certificate should have KeyEncipherment key usage")
+	}
+
+	// Verify extended key usage
+	hasServerAuth := false
+	for _, usage := range cert.ExtKeyUsage {
+		if usage == x509.ExtKeyUsageServerAuth {
+			hasServerAuth = true
+			break
+		}
+	}
+	if !hasServerAuth {
+		t.Error("Certificate should have ServerAuth extended key usage")
+	}
+
+	// Verify private key PEM
+	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil || keyBlock.Type != "RSA PRIVATE KEY" {
-		t.Fatal("Failed to decode CA private key PEM")
+		t.Fatal("Failed to decode private key PEM")
 	}
 }
 
-func TestGenerateServerCert(t *testing.T) {
+func TestGenerateSelfSignedCert_ServiceReferences(t *testing.T) {
 	validity := 30 * 24 * time.Hour
-
-	// Generate CA first
-	caCertPEM, caKeyPEM, err := GenerateCA(validity)
-	if err != nil {
-		t.Fatalf("Failed to generate CA: %v", err)
-	}
 
 	// Define service references
 	services := []ServiceReference{
@@ -73,20 +116,20 @@ func TestGenerateServerCert(t *testing.T) {
 		{Name: "my-webhook", Namespace: "test-ns"},
 	}
 
-	serverCert, serverKey, err := GenerateServerCert(caCertPEM, caKeyPEM, services, validity)
+	certPEM, keyPEM, err := GenerateSelfSignedCert(services, validity)
 	if err != nil {
-		t.Fatalf("Failed to generate server cert: %v", err)
+		t.Fatalf("Failed to generate self-signed cert: %v", err)
 	}
 
-	// Verify server cert
-	block, _ := pem.Decode(serverCert)
-	if block == nil || block.Type != "CERTIFICATE" {
-		t.Fatal("Failed to decode server certificate PEM")
+	// Verify certificate
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil || certBlock.Type != "CERTIFICATE" {
+		t.Fatal("Failed to decode certificate PEM")
 	}
 
-	cert, err := x509.ParseCertificate(block.Bytes)
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
 	if err != nil {
-		t.Fatalf("Failed to parse server certificate: %v", err)
+		t.Fatalf("Failed to parse certificate: %v", err)
 	}
 
 	// Check SANs
@@ -104,40 +147,34 @@ func TestGenerateServerCert(t *testing.T) {
 		}
 	}
 
-	// Verify server key
-	keyBlock, _ := pem.Decode(serverKey)
+	// Verify key
+	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil || keyBlock.Type != "RSA PRIVATE KEY" {
-		t.Fatal("Failed to decode server private key PEM")
+		t.Fatal("Failed to decode private key PEM")
 	}
 }
 
-func TestGenerateServerCert_WithHostnames(t *testing.T) {
-	// Generate CA
-	caCert, caKey, err := GenerateCA(30 * 24 * time.Hour)
-	if err != nil {
-		t.Fatalf("Failed to generate CA: %v", err)
-	}
-
-	// Generate server cert with hostnames (URL-based webhooks)
+func TestGenerateSelfSignedCert_WithHostnames(t *testing.T) {
+	// Generate cert with hostnames (URL-based webhooks)
 	services := []ServiceReference{
 		{Hostname: "webhook.example.com"},
 		{Hostname: "another-webhook.test.local"},
 	}
 
-	serverCert, _, err := GenerateServerCert(caCert, caKey, services, 30*24*time.Hour)
+	certPEM, _, err := GenerateSelfSignedCert(services, 30*24*time.Hour)
 	if err != nil {
-		t.Fatalf("Failed to generate server certificate: %v", err)
+		t.Fatalf("Failed to generate certificate: %v", err)
 	}
 
 	// Verify certificate
-	block, _ := pem.Decode(serverCert)
+	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		t.Fatal("Failed to decode server certificate")
+		t.Fatal("Failed to decode certificate")
 	}
 
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		t.Fatalf("Failed to parse server certificate: %v", err)
+		t.Fatalf("Failed to parse certificate: %v", err)
 	}
 
 	// Verify SANs contain hostnames
@@ -159,14 +196,8 @@ func TestGenerateServerCert_WithHostnames(t *testing.T) {
 	}
 }
 
-func TestGenerateServerCert_MixedServiceAndHostname(t *testing.T) {
-	// Generate CA
-	caCert, caKey, err := GenerateCA(30 * 24 * time.Hour)
-	if err != nil {
-		t.Fatalf("Failed to generate CA: %v", err)
-	}
-
-	// Generate server cert with mixed service and hostname references
+func TestGenerateSelfSignedCert_MixedServiceAndHostname(t *testing.T) {
+	// Generate cert with mixed service and hostname references
 	services := []ServiceReference{
 		{Name: "webhook-svc", Namespace: "default"}, // Service-based
 		{Hostname: "external-webhook.example.com"},  // URL-based
@@ -174,20 +205,20 @@ func TestGenerateServerCert_MixedServiceAndHostname(t *testing.T) {
 		{Hostname: "second-external.test.local"},    // URL-based
 	}
 
-	serverCert, _, err := GenerateServerCert(caCert, caKey, services, 30*24*time.Hour)
+	certPEM, _, err := GenerateSelfSignedCert(services, 30*24*time.Hour)
 	if err != nil {
-		t.Fatalf("Failed to generate server certificate: %v", err)
+		t.Fatalf("Failed to generate certificate: %v", err)
 	}
 
 	// Verify certificate
-	block, _ := pem.Decode(serverCert)
+	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		t.Fatal("Failed to decode server certificate")
+		t.Fatal("Failed to decode certificate")
 	}
 
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		t.Fatalf("Failed to parse server certificate: %v", err)
+		t.Fatalf("Failed to parse certificate: %v", err)
 	}
 
 	// Verify SANs contain both service DNS names and hostnames

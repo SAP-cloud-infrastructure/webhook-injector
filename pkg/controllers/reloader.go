@@ -20,7 +20,6 @@ package controllers
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,20 +53,22 @@ func (r *CertificateReloader) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	logger.Info("Reloading certificates from Secret", "secret", req.NamespacedName)
 
+	// Validate Secret has required keys
+	requiredKeys := []string{"tls.crt", "tls.key"}
+	for _, key := range requiredKeys {
+		if _, ok := secret.Data[key]; !ok {
+			return ctrl.Result{}, fmt.Errorf("secret missing required keys: tls.crt and tls.key")
+		}
+	}
+
 	// Write certificates to disk
 	certFiles := map[string]string{
-		"ca.crt":  "ca.crt",
 		"tls.crt": "tls.crt",
 		"tls.key": "tls.key",
 	}
 
 	for secretKey, fileName := range certFiles {
-		data, ok := secret.Data[secretKey]
-		if !ok {
-			logger.Error(errors.New("missing key in secret"), "Missing certificate data", "key", secretKey)
-			continue
-		}
-
+		data := secret.Data[secretKey]
 		if err := r.writeCertFile(fileName, data); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to write %s: %w", fileName, err)
 		}

@@ -115,8 +115,8 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// Inject CA bundle into webhook configurations
-	caCert := secret.Data["ca.crt"]
+	// Inject CA bundle into webhook configurations (use tls.crt as it's self-signed)
+	caCert := secret.Data["tls.crt"]
 	webhooks.InjectCABundle(configs, caCert)
 
 	// Apply webhook configurations to target cluster
@@ -294,16 +294,10 @@ func (r *WebhookReconciler) calculateNextRotation(secret *corev1.Secret) time.Du
 func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, services []certificates.ServiceReference) error {
 	validity := r.CertValidity
 
-	// Generate CA
-	caCert, caKey, err := certificates.GenerateCA(validity)
+	// Generate self-signed certificate
+	certPEM, keyPEM, err := certificates.GenerateSelfSignedCert(services, validity)
 	if err != nil {
-		return fmt.Errorf("failed to generate CA: %w", err)
-	}
-
-	// Generate server certificate
-	serverCert, serverKey, err := certificates.GenerateServerCert(caCert, caKey, services, validity)
-	if err != nil {
-		return fmt.Errorf("failed to generate server certificate: %w", err)
+		return fmt.Errorf("failed to generate self-signed certificate: %w", err)
 	}
 
 	// Create or update Secret
@@ -314,10 +308,10 @@ func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, se
 			// Remove force-rotation annotation if present
 			Annotations: map[string]string{},
 		},
+		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"ca.crt":  caCert,
-			"tls.crt": serverCert,
-			"tls.key": serverKey,
+			"tls.crt": certPEM,
+			"tls.key": keyPEM,
 		},
 	}
 
@@ -330,6 +324,7 @@ func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, se
 		return err
 	}
 
+	existing.Type = secret.Type
 	existing.Data = secret.Data
 	existing.Annotations = secret.Annotations
 	return r.Client.Update(ctx, existing)

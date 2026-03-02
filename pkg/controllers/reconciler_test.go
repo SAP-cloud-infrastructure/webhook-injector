@@ -109,11 +109,16 @@ webhooks:
 	}
 
 	// Verify Secret has certificate data
-	requiredKeys := []string{"ca.crt", "tls.crt", "tls.key"}
+	requiredKeys := []string{"tls.crt", "tls.key"}
 	for _, key := range requiredKeys {
 		if _, ok := secret.Data[key]; !ok {
 			t.Errorf("Expected Secret to contain key '%s'", key)
 		}
+	}
+
+	// Verify Secret type is kubernetes.io/tls
+	if secret.Type != corev1.SecretTypeTLS {
+		t.Errorf("Expected Secret type %s, got %s", corev1.SecretTypeTLS, secret.Type)
 	}
 
 	// Verify certificate SANs
@@ -236,17 +241,12 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) 
 	// Generate a certificate with short validity (6 hours)
 	// This simulates an old certificate that's about to expire
 	validity := 6 * time.Hour
-	caCert, caKey, err := certificates.GenerateCA(validity)
-	if err != nil {
-		t.Fatalf("Failed to generate CA: %v", err)
-	}
-
 	services := []certificates.ServiceReference{
 		{Name: "webhook-svc", Namespace: "default"},
 	}
-	serverCert, serverKey, err := certificates.GenerateServerCert(caCert, caKey, services, validity)
+	certPEM, keyPEM, err := certificates.GenerateSelfSignedCert(services, validity)
 	if err != nil {
-		t.Fatalf("Failed to generate server cert: %v", err)
+		t.Fatalf("Failed to generate self-signed cert: %v", err)
 	}
 
 	secret := &corev1.Secret{
@@ -254,11 +254,10 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) 
 			Name:      "test-certs",
 			Namespace: "default",
 		},
+		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"ca.crt":  caCert,
-			"ca.key":  caKey,
-			"tls.crt": serverCert,
-			"tls.key": serverKey,
+			"tls.crt": certPEM,
+			"tls.key": keyPEM,
 		},
 	}
 
@@ -285,19 +284,13 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) 
 
 	// Regenerate with 1 second validity
 	validity2 := 1 * time.Second
-	caCert2, caKey2, err := certificates.GenerateCA(validity2)
+	certPEM2, keyPEM2, err := certificates.GenerateSelfSignedCert(services, validity2)
 	if err != nil {
-		t.Fatalf("Failed to generate CA: %v", err)
-	}
-	serverCert2, serverKey2, err := certificates.GenerateServerCert(caCert2, caKey2, services, validity2)
-	if err != nil {
-		t.Fatalf("Failed to generate server cert: %v", err)
+		t.Fatalf("Failed to generate self-signed cert: %v", err)
 	}
 
-	secret.Data["ca.crt"] = caCert2
-	secret.Data["ca.key"] = caKey2
-	secret.Data["tls.crt"] = serverCert2
-	secret.Data["tls.key"] = serverKey2
+	secret.Data["tls.crt"] = certPEM2
+	secret.Data["tls.key"] = keyPEM2
 
 	err = fakeClient.Update(context.Background(), secret)
 	if err != nil {
@@ -326,17 +319,12 @@ func TestWebhookReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) 
 
 	// Generate a fresh certificate (30 days validity, well above 80% threshold)
 	validity := 30 * 24 * time.Hour
-	caCert, caKey, err := certificates.GenerateCA(validity)
-	if err != nil {
-		t.Fatalf("Failed to generate CA: %v", err)
-	}
-
 	services := []certificates.ServiceReference{
 		{Name: "webhook-svc", Namespace: "default"},
 	}
-	serverCert, serverKey, err := certificates.GenerateServerCert(caCert, caKey, services, validity)
+	certPEM, keyPEM, err := certificates.GenerateSelfSignedCert(services, validity)
 	if err != nil {
-		t.Fatalf("Failed to generate server cert: %v", err)
+		t.Fatalf("Failed to generate self-signed cert: %v", err)
 	}
 
 	secret := &corev1.Secret{
@@ -344,11 +332,10 @@ func TestWebhookReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) 
 			Name:      "test-certs",
 			Namespace: "default",
 		},
+		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"ca.crt":  caCert,
-			"ca.key":  caKey,
-			"tls.crt": serverCert,
-			"tls.key": serverKey,
+			"tls.crt": certPEM,
+			"tls.key": keyPEM,
 		},
 	}
 
@@ -386,17 +373,12 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testin
 
 	// Generate certificate with one service
 	validity := 30 * 24 * time.Hour
-	caCert, caKey, err := certificates.GenerateCA(validity)
-	if err != nil {
-		t.Fatalf("Failed to generate CA: %v", err)
-	}
-
 	oldServices := []certificates.ServiceReference{
 		{Name: "webhook-svc", Namespace: "default"},
 	}
-	serverCert, serverKey, err := certificates.GenerateServerCert(caCert, caKey, oldServices, validity)
+	certPEM, keyPEM, err := certificates.GenerateSelfSignedCert(oldServices, validity)
 	if err != nil {
-		t.Fatalf("Failed to generate server cert: %v", err)
+		t.Fatalf("Failed to generate self-signed cert: %v", err)
 	}
 
 	secret := &corev1.Secret{
@@ -404,11 +386,10 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testin
 			Name:      "test-certs",
 			Namespace: "default",
 		},
+		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"ca.crt":  caCert,
-			"ca.key":  caKey,
-			"tls.crt": serverCert,
-			"tls.key": serverKey,
+			"tls.crt": certPEM,
+			"tls.key": keyPEM,
 		},
 	}
 
@@ -452,17 +433,12 @@ func TestWebhookReconciler_CheckCertificates_ForceRotation_Annotation(t *testing
 
 	// Generate a fresh certificate (should not need rotation based on time)
 	validity := 720 * time.Hour
-	caCert, caKey, err := certificates.GenerateCA(validity)
-	if err != nil {
-		t.Fatalf("Failed to generate CA: %v", err)
-	}
-
 	services := []certificates.ServiceReference{
 		{Name: "webhook-svc", Namespace: "default"},
 	}
-	serverCert, serverKey, err := certificates.GenerateServerCert(caCert, caKey, services, validity)
+	certPEM, keyPEM, err := certificates.GenerateSelfSignedCert(services, validity)
 	if err != nil {
-		t.Fatalf("Failed to generate server cert: %v", err)
+		t.Fatalf("Failed to generate self-signed cert: %v", err)
 	}
 
 	// Create secret WITH force-rotation annotation
@@ -474,11 +450,10 @@ func TestWebhookReconciler_CheckCertificates_ForceRotation_Annotation(t *testing
 				ForceRotationAnnotation: "true",
 			},
 		},
+		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"ca.crt":  caCert,
-			"ca.key":  caKey,
-			"tls.crt": serverCert,
-			"tls.key": serverKey,
+			"tls.crt": certPEM,
+			"tls.key": keyPEM,
 		},
 	}
 
@@ -526,8 +501,8 @@ func TestWebhookReconciler_RemovesAnnotationAfterRotation(t *testing.T) {
 				ForceRotationAnnotation: "true",
 			},
 		},
+		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"ca.crt":  []byte("old-ca"),
 			"tls.crt": []byte("old-cert"),
 			"tls.key": []byte("old-key"),
 		},
@@ -634,28 +609,21 @@ func TestWebhookReconciler_CalculateNextRotation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Generate certificate
-			caCert, caKey, err := certificates.GenerateCA(tt.certValidity)
-			if err != nil {
-				t.Fatalf("Failed to generate CA: %v", err)
-			}
-
-			serverCert, serverKey, err := certificates.GenerateServerCert(
-				caCert, caKey,
+			certPEM, keyPEM, err := certificates.GenerateSelfSignedCert(
 				[]certificates.ServiceReference{
 					{Name: "test", Namespace: "default"},
 				},
 				tt.certValidity,
 			)
 			if err != nil {
-				t.Fatalf("Failed to generate server cert: %v", err)
+				t.Fatalf("Failed to generate self-signed cert: %v", err)
 			}
 
 			// Create secret with certificate
 			secret := &corev1.Secret{
 				Data: map[string][]byte{
-					"ca.crt":  caCert,
-					"tls.crt": serverCert,
-					"tls.key": serverKey,
+					"tls.crt": certPEM,
+					"tls.key": keyPEM,
 				},
 			}
 
@@ -730,20 +698,14 @@ func TestWebhookReconciler_CalculateNextRotation_InvalidCert(t *testing.T) {
 
 func TestWebhookReconciler_CalculateNextRotation_AlreadyPastThreshold(t *testing.T) {
 	// Generate certificate that's already past rotation threshold
-	caCert, caKey, err := certificates.GenerateCA(1 * time.Second)
-	if err != nil {
-		t.Fatalf("Failed to generate CA: %v", err)
-	}
-
-	serverCert, _, err := certificates.GenerateServerCert(
-		caCert, caKey,
+	certPEM, _, err := certificates.GenerateSelfSignedCert(
 		[]certificates.ServiceReference{
 			{Name: "test", Namespace: "default"},
 		},
 		1*time.Second,
 	)
 	if err != nil {
-		t.Fatalf("Failed to generate server cert: %v", err)
+		t.Fatalf("Failed to generate self-signed cert: %v", err)
 	}
 
 	// Wait for cert to be past rotation threshold (0.8 * 1 second = 0.8 seconds)
@@ -751,7 +713,7 @@ func TestWebhookReconciler_CalculateNextRotation_AlreadyPastThreshold(t *testing
 
 	secret := &corev1.Secret{
 		Data: map[string][]byte{
-			"tls.crt": serverCert,
+			"tls.crt": certPEM,
 		},
 	}
 
@@ -781,20 +743,14 @@ func TestWebhookReconciler_RequeueAfterUsesCalculatedRotation(t *testing.T) {
 	threshold := 0.5
 	expectedRequeue := time.Duration(float64(certValidity) * threshold)
 
-	caCert, caKey, err := certificates.GenerateCA(certValidity)
-	if err != nil {
-		t.Fatalf("Failed to generate CA: %v", err)
-	}
-
-	serverCert, serverKey, err := certificates.GenerateServerCert(
-		caCert, caKey,
+	certPEM, keyPEM, err := certificates.GenerateSelfSignedCert(
 		[]certificates.ServiceReference{
 			{Name: "webhook-service", Namespace: "default"},
 		},
 		certValidity,
 	)
 	if err != nil {
-		t.Fatalf("Failed to generate server cert: %v", err)
+		t.Fatalf("Failed to generate self-signed cert: %v", err)
 	}
 
 	secret := &corev1.Secret{
@@ -802,10 +758,10 @@ func TestWebhookReconciler_RequeueAfterUsesCalculatedRotation(t *testing.T) {
 			Name:      "test-certs",
 			Namespace: "default",
 		},
+		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"ca.crt":  caCert,
-			"tls.crt": serverCert,
-			"tls.key": serverKey,
+			"tls.crt": certPEM,
+			"tls.key": keyPEM,
 		},
 	}
 
