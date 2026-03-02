@@ -40,7 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
-	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/config"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/webhooks"
 )
 
@@ -52,10 +51,14 @@ const (
 
 // WebhookReconciler reconciles webhook ConfigMap and manages certificates
 type WebhookReconciler struct {
-	Client       client.Client // Hosting cluster client
-	TargetClient client.Client // Target cluster client
-	Config       *config.Config
-	Scheme       *runtime.Scheme
+	Client                client.Client // Hosting cluster client
+	TargetClient          client.Client // Target cluster client
+	WebhookConfigName     string
+	Namespace             string
+	CertSecretName        string
+	CertValidity          time.Duration
+	CertRotationThreshold float64
+	Scheme                *runtime.Scheme
 }
 
 // Reconcile handles ConfigMap changes and certificate rotation
@@ -104,8 +107,8 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// Re-fetch the secret after generation
 		secret = &corev1.Secret{}
 		secretKey := types.NamespacedName{
-			Name:      r.Config.CertSecretName,
-			Namespace: r.getNamespace(r.Config.Namespace),
+			Name:      r.CertSecretName,
+			Namespace: r.getNamespace(r.Namespace),
 		}
 		if err := r.Client.Get(ctx, secretKey, secret); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to get generated secret: %w", err)
@@ -131,14 +134,14 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Fallback to sync period if we can't calculate rotation time
-	return ctrl.Result{RequeueAfter: r.Config.SyncPeriod}, nil
+	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
 // checkCertificates checks if certificates exist and are valid
 func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []certificates.ServiceReference) (*corev1.Secret, bool, error) {
 	secretKey := types.NamespacedName{
-		Name:      r.Config.CertSecretName,
-		Namespace: r.getNamespace(r.Config.Namespace),
+		Name:      r.CertSecretName,
+		Namespace: r.getNamespace(r.Namespace),
 	}
 
 	secret := &corev1.Secret{}
@@ -200,7 +203,7 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 	remainingPercent := float64(remainingValidity) / float64(totalValidity)
 
 	// Rotate if below threshold
-	if remainingPercent < r.Config.CertRotationThreshold {
+	if remainingPercent < r.CertRotationThreshold {
 		return true, nil
 	}
 
@@ -273,7 +276,7 @@ func (r *WebhookReconciler) calculateNextRotation(secret *corev1.Secret) time.Du
 	totalValidity := cert.NotAfter.Sub(cert.NotBefore)
 
 	// Time when rotation should happen: NotBefore + (totalValidity * threshold)
-	rotationTime := cert.NotBefore.Add(time.Duration(float64(totalValidity) * r.Config.CertRotationThreshold))
+	rotationTime := cert.NotBefore.Add(time.Duration(float64(totalValidity) * r.CertRotationThreshold))
 
 	// Calculate duration until rotation time
 	untilRotation := rotationTime.Sub(now)
@@ -289,7 +292,7 @@ func (r *WebhookReconciler) calculateNextRotation(secret *corev1.Secret) time.Du
 
 // generateAndStoreCertificates generates certificates and stores them in a Secret
 func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, services []certificates.ServiceReference) error {
-	validity := r.Config.CertValidity
+	validity := r.CertValidity
 
 	// Generate CA
 	caCert, caKey, err := certificates.GenerateCA(validity)
@@ -306,8 +309,8 @@ func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, se
 	// Create or update Secret
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      r.Config.CertSecretName,
-			Namespace: r.getNamespace(r.Config.Namespace),
+			Name:      r.CertSecretName,
+			Namespace: r.getNamespace(r.Namespace),
 			// Remove force-rotation annotation if present
 			Annotations: map[string]string{},
 		},
@@ -409,7 +412,7 @@ func (r *WebhookReconciler) getNamespace(namespace string) string {
 func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Only watch the specific webhook ConfigMap
 	configMapPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
-		return r.Config.WebhookConfigName == object.GetName() && r.getNamespace(r.Config.Namespace) == object.GetNamespace()
+		return r.WebhookConfigName == object.GetName() && r.getNamespace(r.Namespace) == object.GetNamespace()
 	})
 
 	// Map Secret events to ConfigMap reconcile requests
@@ -417,16 +420,16 @@ func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// IMPORTANT: Filter inside the mapper since WithEventFilter doesn't apply to secondary watches
 	secretToConfigMapMapper := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
 		// Only map events for the specific certificate Secret
-		if obj.GetName() != r.Config.CertSecretName ||
-			obj.GetNamespace() != r.getNamespace(r.Config.Namespace) {
+		if obj.GetName() != r.CertSecretName ||
+			obj.GetNamespace() != r.getNamespace(r.Namespace) {
 			return nil
 		}
 
 		return []ctrl.Request{
 			{
 				NamespacedName: types.NamespacedName{
-					Name:      r.Config.WebhookConfigName,
-					Namespace: r.getNamespace(r.Config.Namespace),
+					Name:      r.WebhookConfigName,
+					Namespace: r.getNamespace(r.Namespace),
 				},
 			},
 		}

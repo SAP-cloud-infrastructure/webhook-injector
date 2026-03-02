@@ -31,14 +31,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-
-	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/config"
 )
 
 // CertificateReloader watches the certificate Secret and writes certs to disk
 type CertificateReloader struct {
-	Client client.Client
-	Config *config.Config
+	Client         client.Client
+	Namespace      string
+	CertSecretName string
+	CertDir        string
 }
 
 // Reconcile reads certificates from Secret and writes to disk
@@ -80,7 +80,7 @@ func (r *CertificateReloader) Reconcile(ctx context.Context, req ctrl.Request) (
 // writeCertFile writes certificate data to disk atomically (temp file + rename)
 // Optimization: Only writes if content has changed to avoid unnecessary webhook server reloads
 func (r *CertificateReloader) writeCertFile(fileName string, data []byte) error {
-	targetPath := filepath.Join(r.Config.CertDir, fileName)
+	targetPath := filepath.Join(r.CertDir, fileName)
 
 	// Check if file exists and compare content
 	existingData, err := os.ReadFile(targetPath)
@@ -119,7 +119,7 @@ func (r *CertificateReloader) writeCertFile(fileName string, data []byte) error 
 func (r *CertificateReloader) SetupWithManager(mgr ctrl.Manager) error {
 	// Only watch the specific certificate Secret
 	secretPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
-		return object.GetName() == r.Config.CertSecretName &&
+		return object.GetName() == r.CertSecretName &&
 			object.GetNamespace() == r.getNamespace()
 	})
 
@@ -134,8 +134,8 @@ func (r *CertificateReloader) SetupWithManager(mgr ctrl.Manager) error {
 
 // getNamespace returns the configured namespace or pod namespace
 func (r *CertificateReloader) getNamespace() string {
-	if r.Config.Namespace != "" {
-		return r.Config.Namespace
+	if r.Namespace != "" {
+		return r.Namespace
 	}
 	// Try to read from pod
 	if ns, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {

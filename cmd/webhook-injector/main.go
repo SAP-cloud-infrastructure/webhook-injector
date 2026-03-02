@@ -21,6 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,13 +36,27 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/config"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers"
 )
 
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
+)
+
+var (
+	webhookConfigName     = flag.String("webhook-config-name", "", "ConfigMap name containing webhook definitions (required)")
+	namespace             = flag.String("namespace", "", "Namespace for all resources (auto-detects from pod if not set)")
+	certSecretName        = flag.String("cert-secret-name", "webhook-injector-certs", "Secret name for storing certificates")
+	certDir               = flag.String("cert-dir", "/tmp/webhook-certs", "Directory to write certificate files")
+	certValidity          = flag.Duration("cert-validity", 720*time.Hour, "Certificate validity duration")
+	certRotationThreshold = flag.Float64("cert-rotation-threshold", 0.8, "Certificate rotation threshold (0-1)")
+	targetKubeconfig      = flag.String("target-kubeconfig", "", "Path to target cluster kubeconfig")
+	enableLeaderElection  = flag.Bool("enable-leader-election", true, "Enable leader election for HA")
+	leaderElectionID      = flag.String("leader-election-id", "webhook-injector-leader", "Leader election lease name")
+	syncPeriod            = flag.Duration("sync-period", 5*time.Minute, "Controller reconciliation sync period")
+	metricsAddr           = flag.String("metrics-addr", ":8080", "Metrics server bind address")
+	healthAddr            = flag.String("health-addr", ":8081", "Health probe server bind address")
 )
 
 func init() {
@@ -62,34 +77,41 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// Load configuration
-	cfg, err := config.LoadFromEnv()
-	if err != nil {
-		setupLog.Error(err, "failed to load configuration")
+	// Validate required flags
+	if *webhookConfigName == "" {
+		setupLog.Error(nil, "webhook-config-name is required")
+		flag.Usage()
 		os.Exit(1)
 	}
-	if err := cfg.Validate(); err != nil {
-		setupLog.Error(err, "Invalid configuration")
+
+	// Auto-detect namespace if not provided
+	if *namespace == "" {
+		*namespace = detectNamespace()
+	}
+
+	// Validate cert validity
+	if *certValidity < time.Minute {
+		setupLog.Error(nil, "cert-validity too short, minimum 1m")
 		os.Exit(1)
 	}
 
 	setupLog.Info("Starting webhook-injector",
-		"namespace", cfg.Namespace,
-		"config-name", cfg.WebhookConfigName,
-		"cert-secret", cfg.CertSecretName,
-		"leader-election", cfg.EnableLeaderElection,
+		"namespace", *namespace,
+		"webhook-config-name", *webhookConfigName,
+		"cert-secret-name", *certSecretName,
+		"enable-leader-election", *enableLeaderElection,
 	)
 
 	// Create manager for hosting cluster
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
-			BindAddress: cfg.MetricsAddr,
+			BindAddress: *metricsAddr,
 		},
-		HealthProbeBindAddress:  cfg.HealthAddr,
-		LeaderElection:          cfg.EnableLeaderElection,
-		LeaderElectionID:        cfg.LeaderElectionID,
-		LeaderElectionNamespace: cfg.LeaderElectionNamespace,
+		HealthProbeBindAddress:  *healthAddr,
+		LeaderElection:          *enableLeaderElection,
+		LeaderElectionID:        *leaderElectionID,
+		LeaderElectionNamespace: *namespace,
 		// Cache configuration: Restrict manager to watch only the pod's namespace.
 		// This prevents cluster-wide RBAC requirements - the ServiceAccount only needs
 		// namespace-scoped permissions for ConfigMaps and Secrets. Without this, the
@@ -97,8 +119,9 @@ func main() {
 		// ("cannot list resource at the cluster scope").
 		Cache: cache.Options{
 			DefaultNamespaces: map[string]cache.Config{
-				cfg.Namespace: {},
+				*namespace: {},
 			},
+			SyncPeriod: syncPeriod,
 		},
 	})
 	if err != nil {
@@ -107,7 +130,7 @@ func main() {
 	}
 
 	// Get target cluster client
-	targetClient, err := getTargetClient(cfg)
+	targetClient, err := getTargetClient()
 	if err != nil {
 		setupLog.Error(err, "Unable to create target cluster client")
 		os.Exit(1)
@@ -144,8 +167,10 @@ func main() {
 
 	// Set up certificate reloader (runs on ALL replicas via WithOptions)
 	certReloader := &controllers.CertificateReloader{
-		Client: mgr.GetClient(),
-		Config: cfg,
+		Client:         mgr.GetClient(),
+		Namespace:      *namespace,
+		CertSecretName: *certSecretName,
+		CertDir:        *certDir,
 	}
 	if err := certReloader.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Unable to create CertificateReloader controller")
@@ -156,10 +181,14 @@ func main() {
 	// Set up webhook reconciler (generates certificates and applies webhooks)
 	// Runs on leader ONLY via default leader election behavior to prevent conflicts
 	webhookReconciler := &controllers.WebhookReconciler{
-		Client:       mgr.GetClient(),
-		TargetClient: targetClient,
-		Config:       cfg,
-		Scheme:       mgr.GetScheme(),
+		Client:                mgr.GetClient(),
+		TargetClient:          targetClient,
+		WebhookConfigName:     *webhookConfigName,
+		Namespace:             *namespace,
+		CertSecretName:        *certSecretName,
+		CertValidity:          *certValidity,
+		CertRotationThreshold: *certRotationThreshold,
+		Scheme:                mgr.GetScheme(),
 	}
 	if err := webhookReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Unable to create WebhookReconciler controller")
@@ -184,18 +213,27 @@ func main() {
 	}
 }
 
+func detectNamespace() string {
+	const serviceAccountFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	data, err := os.ReadFile(serviceAccountFile)
+	if err == nil && len(data) > 0 {
+		return string(data)
+	}
+	return "default"
+}
+
 // getTargetClient creates a client for the target cluster
-func getTargetClient(cfg *config.Config) (client.Client, error) {
+func getTargetClient() (client.Client, error) {
 	var targetConfig *rest.Config
 	var err error
 
-	if cfg.Kubeconfig != "" {
+	if *targetKubeconfig != "" {
 		// Load from explicit kubeconfig
-		targetConfig, err = clientcmd.BuildConfigFromFlags("", cfg.Kubeconfig)
+		targetConfig, err = clientcmd.BuildConfigFromFlags("", *targetKubeconfig)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load kubeconfig from %s: %w", cfg.Kubeconfig, err)
+			return nil, fmt.Errorf("failed to load kubeconfig from %s: %w", *targetKubeconfig, err)
 		}
-		setupLog.Info("Using explicit kubeconfig for target cluster", "path", cfg.Kubeconfig)
+		setupLog.Info("Using explicit kubeconfig for target cluster", "path", *targetKubeconfig)
 	} else {
 		// Use in-cluster config
 		targetConfig, err = rest.InClusterConfig()

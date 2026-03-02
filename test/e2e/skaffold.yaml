@@ -28,7 +28,6 @@ build:
             - ../../pkg/controllers
             - ../../pkg/certificates
             - ../../pkg/webhooks
-            - ../../pkg/config
             - ../../cmd/webhook-injector
     - image: test-webhook-server
       ko:

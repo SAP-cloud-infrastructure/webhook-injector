@@ -34,7 +34,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
-	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/config"
 )
 
 func TestWebhookReconciler_ReconcileConfigMap(t *testing.T) {
@@ -76,19 +75,15 @@ webhooks:
 		WithObjects(configMap).
 		Build()
 
-	cfg := &config.Config{
-		WebhookConfigName: "webhook-config",
-		Namespace:         "default",
-		CertSecretName:    "test-certs",
-		CertValidity:      30 * 24 * time.Hour,
-		CertDir:           t.TempDir(),
-	}
-
 	reconciler := &WebhookReconciler{
-		Client:       fakeClient,
-		TargetClient: fakeClient, // Same for test
-		Config:       cfg,
-		Scheme:       s,
+		Client:                fakeClient,
+		TargetClient:          fakeClient, // Same for test
+		WebhookConfigName:     "webhook-config",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.8,
+		Scheme:                s,
 	}
 
 	req := reconcile.Request{
@@ -186,19 +181,15 @@ webhooks:
 		WithScheme(s).
 		Build()
 
-	cfg := &config.Config{
-		WebhookConfigName: "webhook-config",
-		Namespace:         "default",
-		CertSecretName:    "test-certs",
-		CertValidity:      30 * 24 * time.Hour,
-		CertDir:           t.TempDir(),
-	}
-
 	reconciler := &WebhookReconciler{
-		Client:       hostingClient,
-		TargetClient: targetClient,
-		Config:       cfg,
-		Scheme:       s,
+		Client:                hostingClient,
+		TargetClient:          targetClient,
+		WebhookConfigName:     "webhook-config",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.8,
+		Scheme:                s,
 	}
 
 	req := reconcile.Request{
@@ -241,12 +232,6 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) 
 	// For 80% threshold on 30 day validity: rotate when < 24 days remain
 	// Generate cert with 25 days validity, then simulate it was created 20 days ago
 	// So remaining = 5 days out of 25 day total = 20% remaining < 80% threshold
-	cfg := &config.Config{
-		CertSecretName:        "test-certs",
-		Namespace:             "default",
-		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.8, // Rotate at 80% of validity
-	}
 
 	// Generate a certificate with short validity (6 hours)
 	// This simulates an old certificate that's about to expire
@@ -283,9 +268,13 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) 
 		Build()
 
 	reconciler := &WebhookReconciler{
-		Client: fakeClient,
-		Config: cfg,
-		Scheme: s,
+		Client:                fakeClient,
+		WebhookConfigName:     "webhook-config",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.8,
+		Scheme:                s,
 	}
 
 	// Sleep briefly to let some time pass, reducing remaining validity below threshold
@@ -335,13 +324,6 @@ func TestWebhookReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) 
 		t.Fatalf("Failed to add to scheme: %v", err)
 	}
 
-	cfg := &config.Config{
-		CertSecretName:        "test-certs",
-		Namespace:             "default",
-		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.8,
-	}
-
 	// Generate a fresh certificate (30 days validity, well above 80% threshold)
 	validity := 30 * 24 * time.Hour
 	caCert, caKey, err := certificates.GenerateCA(validity)
@@ -376,9 +358,13 @@ func TestWebhookReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) 
 		Build()
 
 	reconciler := &WebhookReconciler{
-		Client: fakeClient,
-		Config: cfg,
-		Scheme: s,
+		Client:                fakeClient,
+		WebhookConfigName:     "webhook-config",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.8,
+		Scheme:                s,
 	}
 
 	// Check certificates - should NOT need rotation
@@ -396,13 +382,6 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testin
 	s := runtime.NewScheme()
 	if err := corev1.AddToScheme(s); err != nil {
 		t.Fatalf("Failed to add to scheme: %v", err)
-	}
-
-	cfg := &config.Config{
-		CertSecretName:        "test-certs",
-		Namespace:             "default",
-		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.8,
 	}
 
 	// Generate certificate with one service
@@ -439,9 +418,13 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testin
 		Build()
 
 	reconciler := &WebhookReconciler{
-		Client: fakeClient,
-		Config: cfg,
-		Scheme: s,
+		Client:                fakeClient,
+		WebhookConfigName:     "webhook-config",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.8,
+		Scheme:                s,
 	}
 
 	// Check with NEW services (different from what's in cert)
@@ -465,13 +448,6 @@ func TestWebhookReconciler_CheckCertificates_ForceRotation_Annotation(t *testing
 	s := runtime.NewScheme()
 	if err := corev1.AddToScheme(s); err != nil {
 		t.Fatalf("Failed to add to scheme: %v", err)
-	}
-
-	cfg := &config.Config{
-		CertSecretName:        "test-certs",
-		Namespace:             "default",
-		CertValidity:          720 * time.Hour,
-		CertRotationThreshold: 0.8,
 	}
 
 	// Generate a fresh certificate (should not need rotation based on time)
@@ -512,9 +488,13 @@ func TestWebhookReconciler_CheckCertificates_ForceRotation_Annotation(t *testing
 		Build()
 
 	reconciler := &WebhookReconciler{
-		Client: fakeClient,
-		Config: cfg,
-		Scheme: s,
+		Client:                fakeClient,
+		WebhookConfigName:     "webhook-config",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          720 * time.Hour,
+		CertRotationThreshold: 0.8,
+		Scheme:                s,
 	}
 
 	// Check certificates - should need rotation due to annotation
@@ -581,19 +561,15 @@ webhooks:
 		WithObjects(secret, configMap).
 		Build()
 
-	cfg := &config.Config{
-		WebhookConfigName: "webhook-config",
-		Namespace:         "default",
-		CertSecretName:    "test-certs",
-		CertValidity:      720 * time.Hour,
-		CertDir:           t.TempDir(),
-	}
-
 	reconciler := &WebhookReconciler{
-		Client:       fakeClient,
-		TargetClient: fakeClient,
-		Config:       cfg,
-		Scheme:       s,
+		Client:                fakeClient,
+		TargetClient:          fakeClient,
+		WebhookConfigName:     "webhook-config",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          720 * time.Hour,
+		CertRotationThreshold: 0.8,
+		Scheme:                s,
 	}
 
 	// Reconcile - should trigger rotation due to annotation
@@ -683,12 +659,8 @@ func TestWebhookReconciler_CalculateNextRotation(t *testing.T) {
 				},
 			}
 
-			cfg := &config.Config{
-				CertRotationThreshold: tt.rotationThreshold,
-			}
-
 			reconciler := &WebhookReconciler{
-				Config: cfg,
+				CertRotationThreshold: tt.rotationThreshold,
 			}
 
 			// Calculate next rotation
@@ -742,12 +714,8 @@ func TestWebhookReconciler_CalculateNextRotation_InvalidCert(t *testing.T) {
 		},
 	}
 
-	cfg := &config.Config{
-		CertRotationThreshold: 0.8,
-	}
-
 	reconciler := &WebhookReconciler{
-		Config: cfg,
+		CertRotationThreshold: 0.8,
 	}
 
 	for _, tt := range tests {
@@ -787,12 +755,8 @@ func TestWebhookReconciler_CalculateNextRotation_AlreadyPastThreshold(t *testing
 		},
 	}
 
-	cfg := &config.Config{
-		CertRotationThreshold: 0.8,
-	}
-
 	reconciler := &WebhookReconciler{
-		Config: cfg,
+		CertRotationThreshold: 0.8,
 	}
 
 	nextRotation := reconciler.calculateNextRotation(secret)
@@ -879,21 +843,15 @@ webhooks:
 		WithObjects(secret, configMap).
 		Build()
 
-	cfg := &config.Config{
+	reconciler := &WebhookReconciler{
+		Client:                fakeClient,
+		TargetClient:          fakeClient,
 		WebhookConfigName:     "webhook-config",
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          certValidity,
 		CertRotationThreshold: threshold,
-		SyncPeriod:            5 * time.Minute, // Should NOT use this
-		CertDir:               t.TempDir(),
-	}
-
-	reconciler := &WebhookReconciler{
-		Client:       fakeClient,
-		TargetClient: fakeClient,
-		Config:       cfg,
-		Scheme:       s,
+		Scheme:                s,
 	}
 
 	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
@@ -906,7 +864,7 @@ webhooks:
 		t.Fatalf("Reconcile failed: %v", err)
 	}
 
-	// Verify RequeueAfter is based on certificate rotation time, not SYNC_PERIOD
+	// Verify RequeueAfter is based on certificate rotation time, not a fixed sync period
 	tolerance := 2 * time.Second
 	diff := result.RequeueAfter - expectedRequeue
 	if diff < 0 {
@@ -916,11 +874,6 @@ webhooks:
 	if diff > tolerance {
 		t.Errorf("Expected RequeueAfter ~%v (calculated from cert), got %v (diff: %v)",
 			expectedRequeue, result.RequeueAfter, diff)
-	}
-
-	if result.RequeueAfter > cfg.SyncPeriod-10*time.Second {
-		t.Errorf("RequeueAfter (%v) should be much less than SyncPeriod (%v) for short-lived cert",
-			result.RequeueAfter, cfg.SyncPeriod)
 	}
 
 	t.Logf("RequeueAfter: %v (expected: ~%v)", result.RequeueAfter, expectedRequeue)

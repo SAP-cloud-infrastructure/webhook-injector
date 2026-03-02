@@ -211,27 +211,44 @@ Certificates are automatically rotated when:
 
 ## Configuration
 
-All configuration via environment variables:
+All configuration via command-line flags:
 
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `WEBHOOK_CONFIG_NAME` | ConfigMap name containing webhook definitions | - | Yes |
-| `NAMESPACE` | Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from pod's serviceaccount if not set | `default` | No |
-| `CERT_SECRET_NAME` | Secret name for storing certificates | `webhook-injector-certs` | No |
-| `CERT_DIR` | Directory to write certificates | `/tmp/webhook-certs` | No |
-| `CERT_VALIDITY` | Certificate validity as duration (e.g., "720h", "30d", "1y") | `720h` (30 days) | No |
-| `CERT_ROTATION_THRESHOLD` | Rotation threshold as decimal (0-1) | `0.8` | No |
-| `TARGET_KUBECONFIG` | Path to target cluster kubeconfig | In-cluster config | No |
-| `ENABLE_LEADER_ELECTION` | Enable leader election | `true` | No |
-| `LEADER_ELECTION_ID` | Leader election lease name | `webhook-injector-leader` | No |
-| `SYNC_PERIOD` | Reconciliation sync period | `5m` | No |
-| `METRICS_ADDR` | Metrics bind address | `:8080` | No |
-| `HEALTH_ADDR` | Health probe bind address | `:8081` | No |
-| `LOG_LEVEL` | Logging level (debug/info/error) | `info` | No |
+| Flag | Description | Default | Required |
+|------|-------------|---------|----------|
+| `--webhook-config-name` | ConfigMap name containing webhook definitions | - | Yes |
+| `--namespace` | Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from pod's serviceaccount if not set | `default` | No |
+| `--cert-secret-name` | Secret name for storing certificates | `webhook-injector-certs` | No |
+| `--cert-dir` | Directory to write certificates | `/tmp/webhook-certs` | No |
+| `--cert-validity` | Certificate validity as duration (e.g., "720h", "30d", "1y") | `720h` (30 days) | No |
+| `--cert-rotation-threshold` | Rotation threshold as decimal (0-1) | `0.8` | No |
+| `--target-kubeconfig` | Path to target cluster kubeconfig | In-cluster config | No |
+| `--enable-leader-election` | Enable leader election | `true` | No |
+| `--leader-election-id` | Leader election lease name | `webhook-injector-leader` | No |
+| `--sync-period` | Reconciliation sync period | `5m` | No |
+| `--metrics-addr` | Metrics bind address | `:8080` | No |
+| `--health-addr` | Health probe bind address | `:8081` | No |
+| `--log-level` | Logging level (debug/info/error) | `info` | No |
+
+**Usage:**
+```bash
+webhook-injector --webhook-config-name=my-config --namespace=default
+```
+
+Or in Kubernetes deployment:
+```yaml
+args:
+  - --webhook-config-name=webhook-config
+  - --namespace=$(POD_NAMESPACE)
+env:
+  - name: POD_NAMESPACE
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.namespace
+```
 
 ## Certificate Output
 
-Files written to `CERT_DIR`:
+Files written to `--cert-dir`:
 - `ca.crt`: CA certificate (PEM)
 - `tls.crt`: Server certificate with dynamic SANs (PEM)
 - `tls.key`: Server private key (PEM)

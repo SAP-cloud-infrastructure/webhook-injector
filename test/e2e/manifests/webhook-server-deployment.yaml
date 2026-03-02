@@ -61,20 +61,13 @@ spec:
 
         - name: webhook-injector
           image: webhook-injector  # Replaced by ko
-          env:
-            - name: WEBHOOK_CONFIG_NAME
-              value: webhook-config
-            - name: NAMESPACE
-              value: default
-            - name: CERT_VALIDITY
-              #value: "60s"  # Short validity for testing
-              value: "1h"  # Short validity for testing
-            - name: CERT_ROTATION_THRESHOLD
-              value: "0.5"
-            - name: TARGET_KUBECONFIG
-              value: /etc/target-kubeconfig/kubeconfig
-            - name: ENABLE_LEADER_ELECTION
-              value: "true"
+          args:
+            - --webhook-config-name=webhook-config
+            - --namespace=default
+            - --cert-validity=1h
+            - --cert-rotation-threshold=0.5
+            - --target-kubeconfig=/etc/target-kubeconfig/kubeconfig
+            - --enable-leader-election=true
           volumeMounts:
             - name: webhook-certs
               mountPath: /tmp/webhook-certs

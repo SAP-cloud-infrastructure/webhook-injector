@@ -180,21 +180,21 @@ test/e2e/                       E2E integration tests with kind clusters
 
 ## Configuration
 
-All configuration via environment variables (no flags). See `pkg/config/config.go` for:
-- `WEBHOOK_CONFIG_NAME` (required) - ConfigMap with webhook definitions
-- `NAMESPACE` - Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from pod's serviceaccount if not set, defaults to "default"
-- `CERT_SECRET_NAME` - Where to store certificates
-- `CERT_DIR` - Where to write certificate files
-- `CERT_VALIDITY` - Certificate lifetime as duration (e.g., "720h", "30d", "1y")
-- `CERT_ROTATION_THRESHOLD` - When to rotate (0-1)
-- `TARGET_KUBECONFIG` - Path to target cluster kubeconfig (optional, defaults to in-cluster)
-- `ENABLE_LEADER_ELECTION` - Enable HA with multiple replicas
-- `SYNC_PERIOD` - Reconciliation interval
+All configuration via command-line flags. Run `webhook-injector --help` for full list:
+- `--webhook-config-name` (required) - ConfigMap with webhook definitions
+- `--namespace` - Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from pod's serviceaccount if not set, defaults to "default"
+- `--cert-secret-name` - Where to store certificates
+- `--cert-dir` - Where to write certificate files
+- `--cert-validity` - Certificate lifetime as duration (e.g., "720h", "30d", "1y")
+- `--cert-rotation-threshold` - When to rotate (0-1)
+- `--target-kubeconfig` - Path to target cluster kubeconfig (optional, defaults to in-cluster)
+- `--enable-leader-election` - Enable HA with multiple replicas
+- `--sync-period` - Reconciliation interval
 
 ## Remote Cluster Support
 
 The target cluster client is created in `main.go`:
-- If `TARGET_KUBECONFIG` env var set: Use explicit kubeconfig file
+- If `--target-kubeconfig` flag set: Use explicit kubeconfig file
 - Otherwise: Use in-cluster config (hosting cluster = target cluster)
 
-**Important**: Use `TARGET_KUBECONFIG` not `KUBECONFIG` to avoid interfering with the manager's hosting cluster connection (which uses standard client-go config loading that checks KUBECONFIG).
+**Important**: Use `--target-kubeconfig` not `KUBECONFIG` to avoid interfering with the manager's hosting cluster connection (which uses standard client-go config loading that checks KUBECONFIG).

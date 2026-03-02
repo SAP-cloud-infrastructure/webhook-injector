@@ -29,8 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/config"
 )
 
 func TestCertificateReloader(t *testing.T) {
@@ -60,15 +58,11 @@ func TestCertificateReloader(t *testing.T) {
 		WithObjects(secret).
 		Build()
 
-	cfg := &config.Config{
-		CertSecretName: "test-certs",
-		Namespace:      "default",
-		CertDir:        tmpDir,
-	}
-
 	reloader := &CertificateReloader{
-		Client: client,
-		Config: cfg,
+		Client:         client,
+		Namespace:      "default",
+		CertSecretName: "test-certs",
+		CertDir:        tmpDir,
 	}
 
 	// Reconcile
@@ -152,15 +146,11 @@ func TestCertificateReloader_SkipsUnchangedCertificates(t *testing.T) {
 		WithObjects(secret).
 		Build()
 
-	cfg := &config.Config{
-		CertSecretName: "test-certs",
-		Namespace:      "default",
-		CertDir:        tmpDir,
-	}
-
 	reloader := &CertificateReloader{
-		Client: client,
-		Config: cfg,
+		Client:         client,
+		Namespace:      "default",
+		CertSecretName: "test-certs",
+		CertDir:        tmpDir,
 	}
 
 	// Sleep briefly to ensure mtime would differ if file was rewritten
@@ -248,15 +238,11 @@ func TestCertificateReloader_UpdatesChangedCertificates(t *testing.T) {
 		WithObjects(secret).
 		Build()
 
-	cfg := &config.Config{
-		CertSecretName: "test-certs",
-		Namespace:      "default",
-		CertDir:        tmpDir,
-	}
-
 	reloader := &CertificateReloader{
-		Client: client,
-		Config: cfg,
+		Client:         client,
+		Namespace:      "default",
+		CertSecretName: "test-certs",
+		CertDir:        tmpDir,
 	}
 
 	// Reconcile
@@ -341,15 +327,11 @@ func TestCertificateReloader_UpdatesOnlyChangedFiles(t *testing.T) {
 		WithObjects(secret).
 		Build()
 
-	cfg := &config.Config{
-		CertSecretName: "test-certs",
-		Namespace:      "default",
-		CertDir:        tmpDir,
-	}
-
 	reloader := &CertificateReloader{
-		Client: client,
-		Config: cfg,
+		Client:         client,
+		Namespace:      "default",
+		CertSecretName: "test-certs",
+		CertDir:        tmpDir,
 	}
 
 	// Reconcile
