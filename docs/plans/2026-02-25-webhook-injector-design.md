@@ -805,7 +805,7 @@ spec:
 
 ### Technology Stack
 
-- **Language:** Go 1.22+
+- **Language:** Go 1.26+
 - **Framework:** controller-runtime v0.17+
 - **Certificate Generation:** Go `crypto/x509` (may leverage Gardener utilities if applicable)
 - **YAML Parsing:** `sigs.k8s.io/yaml` with support for multi-document streams

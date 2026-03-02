@@ -6,7 +6,7 @@
 
 **Architecture:** Simplify configuration by replacing WebhookConfigNamespace, CertSecretNamespace, and LeaderElectionNamespace with a single Namespace field. Move namespace resolution from main.go's getPodNamespace() into config.LoadFromEnv() so it happens once at startup. Resolution order: NAMESPACE env var → serviceaccount file → "default".
 
-**Tech Stack:** Go 1.23, Kubernetes client-go, controller-runtime
+**Tech Stack:** Go 1.26, Kubernetes client-go, controller-runtime
 
 ---
 

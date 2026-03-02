@@ -6,7 +6,7 @@
 
 **Architecture:** Delete pkg/config package. Add flag definitions to main.go. Update controllers to receive individual fields instead of Config struct. Change deployment manifests from env vars to args.
 
-**Tech Stack:** Go 1.23, stdlib flag package, Kubernetes
+**Tech Stack:** Go 1.26, stdlib flag package, Kubernetes
 
 ---
 

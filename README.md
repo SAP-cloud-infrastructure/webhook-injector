@@ -1,55 +1,22 @@
 # webhook-injector
 
-A Kubernetes controller that runs as a sidecar to webhook servers, managing the complete lifecycle of webhook configurations and TLS certificates for remote or local clusters.
+A Kubernetes controller that runs as a sidecar to webhook servers, managing webhook configurations and TLS certificates for remote or local clusters.
 
 ## Features
 
-- **Automatic Certificate Management**: Generates and rotates self-signed certificates
-- **Smart Certificate Rotation**: Time-based (80% of validity) and config-based (SAN changes)
+- **Automatic Certificate Management**: Generates and rotates self-signed certificates with dynamic SANs
+- **Smart Rotation**: Time-based (80% validity threshold), config-based (SAN changes), or manual (annotation)
 - **Remote Cluster Support**: Manage webhooks in clusters where the webhook server doesn't run
-- **URL and Service Support**: Webhooks can reference services (in-cluster) or URLs (remote)
 - **Generic Solution**: Works with any webhook server (any language/framework)
-- **Dynamic SANs**: Generates certificates with SANs extracted from webhook service references or URLs
-- **Leader Election**: Supports high-availability deployments with multiple replicas
-- **Certificate Reloading**: All replicas stay synchronized with latest certificates
-- **Performance Optimized**: Skips writing certificates when content unchanged to prevent unnecessary webhook server reloads
+- **High Availability**: Leader election with multi-replica support, zero-downtime rotation
 
 ## Architecture
 
-webhook-injector runs as a sidecar with two internal controllers:
+webhook-injector runs as a sidecar with two controllers:
 
-### 1. WebhookReconciler (runs on leader only)
-   - **What it does**: Manages webhook lifecycle and certificate generation
-   - **Watches**:
-     - Webhook ConfigMap for configuration changes
-     - Certificate Secret for force-rotation annotation
-   - **Generates**: Self-signed certificates with dynamic SANs from service/URL references
-   - **Rotates**: Certificates when approaching expiry, when SANs change, or when force-rotation annotation is set
-   - **Stores**: Certificates in Secret in hosting cluster
-   - **Injects**: CA bundle into webhook configurations
-   - **Applies**: Webhook configurations to target cluster
-   - **Why leader-only**: Prevents multiple replicas from generating conflicting certificates
+**WebhookReconciler** (leader only): Manages webhook lifecycle and certificate generation. Watches ConfigMap and Secret, generates self-signed certificates with dynamic SANs, injects CA bundle, and applies webhook configurations to target cluster.
 
-### 2. CertificateReloader (runs on all replicas)
-   - **What it does**: Syncs certificates from Secret to local filesystem
-   - **Watches**: Certificate Secret in hosting cluster
-   - **Writes**: Certificates to shared emptyDir volume (`/tmp/webhook-certs`)
-   - **Optimizes**: Skips writes if certificate content unchanged
-   - **Keeps**: All replicas synchronized with latest certificates
-   - **Why all replicas**: Each webhook server pod needs certificates on its filesystem
-
-### Leader Election Details
-
-Uses controller-runtime's leader election with explicit configuration via `WithOptions`:
-- **WebhookReconciler**: Uses default behavior (no WithOptions) → requires leader election
-- **CertificateReloader**: Uses `WithOptions(controller.Options{NeedLeaderElection: ptr.To(false)})` → runs on all replicas
-
-Example with 3 replicas:
-```
-Replica 1 (Leader):    WebhookReconciler ✓  CertificateReloader ✓
-Replica 2 (Follower):  WebhookReconciler ✗  CertificateReloader ✓
-Replica 3 (Follower):  WebhookReconciler ✗  CertificateReloader ✓
-```
+**CertificateReloader** (all replicas): Syncs certificates from Secret to local filesystem (`/tmp/webhook-certs`). Optimizes by skipping writes when content unchanged. Ensures all replicas stay synchronized.
 
 ### Remote Cluster Architecture
 
@@ -72,7 +39,7 @@ Replica 3 (Follower):  WebhookReconciler ✗  CertificateReloader ✓
 │  │           │                │ └─────────────────────────────┘  │  │  │
 │  │           │                │         ▲           │            │  │  │
 │  │           │                └─────────┼───────────┼────────────┘  │  │
-│  │           │  .                       │           │               │  │
+│  │           │                          │           │               │  │
 │  └───────────┼──────────────────────────┼───────────┼───────────────┘  │
 │              │                          │           │                  │
 │              │                      watches      updates               │
@@ -113,7 +80,7 @@ Replica 3 (Follower):  WebhookReconciler ✗  CertificateReloader ✓
 
 ### Prerequisites
 
-- Go 1.22+
+- Go 1.26+
 - Kubernetes cluster (hosting cluster)
 - kubectl configured
 - (Optional) Target cluster kubeconfig if managing remote cluster
@@ -126,7 +93,7 @@ make build
 
 ### Sidecar Deployment
 
-Add webhook-injector as a sidecar to your webhook server deployment:
+Add webhook-injector as a sidecar container with shared emptyDir volume:
 
 ```yaml
 apiVersion: apps/v1
@@ -138,34 +105,32 @@ spec:
   template:
     spec:
       containers:
-        # Your webhook server
         - name: webhook-server
           image: my-webhook:latest
-          ports:
-            - containerPort: 9443
           volumeMounts:
             - name: webhook-certs
               mountPath: /tmp/webhook-certs
               readOnly: true
-
-        # webhook-injector sidecar
         - name: webhook-injector
           image: webhook-injector:latest
+          args:
+            - --webhook-config-name=webhook-config
+            - --namespace=$(POD_NAMESPACE)
           env:
-            - name: WEBHOOK_CONFIG_NAME
-              value: webhook-config
-            - name: CERT_DIR
-              value: /tmp/webhook-certs
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           volumeMounts:
             - name: webhook-certs
               mountPath: /tmp/webhook-certs
-
       volumes:
         - name: webhook-certs
           emptyDir: {}
 ```
 
-**Webhook ConfigMap format:**
+Create a ConfigMap with webhook definitions (standard Kubernetes webhook YAML):
+
 ```yaml
 apiVersion: v1
 kind: ConfigMap
@@ -173,7 +138,6 @@ metadata:
   name: webhook-config
 data:
   webhooks.yaml: |
-    ---
     apiVersion: admissionregistration.k8s.io/v1
     kind: MutatingWebhookConfiguration
     metadata:
@@ -181,208 +145,85 @@ data:
     webhooks:
       - name: mutate.example.com
         clientConfig:
-          service:  # or url: "https://..." for remote clusters
+          service:              # or url: for remote clusters
             name: webhook-service
             namespace: default
             path: /mutate
-            port: 9443
-          caBundle: ""  # Injected automatically
-        rules: [...]
-        admissionReviewVersions: ["v1"]
-        sideEffects: None
+          caBundle: ""          # Injected automatically
+        # ... standard webhook config
 ```
 
-## Certificate Rotation
+## Certificate Management
 
-Certificates are automatically rotated when:
+**Rotation triggers:**
+1. Time-based: When remaining validity < threshold × total (default: 80% of 30 days)
+2. Config-based: When webhook service references or URLs change (new SANs required)
+3. Manual: Annotate Secret with `webhook-injector.sap.com/force-rotation: "true"`
 
-1. **Time-based rotation**: When remaining validity < `CERT_ROTATION_THRESHOLD` × total validity
-   - Default: Rotates at 80% of validity (24 days into a 30-day certificate)
+**Certificate output** (`/tmp/webhook-certs`):
+- `tls.crt`: Self-signed certificate with SANs from service/URL references
+- `tls.key`: Private key
 
-2. **Config-based rotation**: When webhook service references or URLs change
-   - Adding new webhook with different service → new SANs → rotation triggered
-   - Changing service name/namespace → SANs change → rotation triggered
-   - Changing URL hostname → SAN change → rotation triggered
-
-3. **Manual rotation**: Add annotation to certificate Secret to force immediate rotation
-   - Add `webhook-injector.sap.com/force-rotation: "true"` to Secret annotations
-   - WebhookReconciler watches for this annotation and triggers rotation
-   - Annotation is automatically removed after rotation completes
+The same certificate serves as both server cert and CA bundle. Controller-runtime webhook servers (v0.17+) automatically hot-reload certificates via fsnotify.
 
 ## Configuration
 
-All configuration via command-line flags:
+Configure via command-line flags. Only `--webhook-config-name` is required; namespace auto-detects from flag → NAMESPACE env var → serviceaccount file.
 
-| Flag | Description | Default | Required |
-|------|-------------|---------|----------|
-| `--webhook-config-name` | ConfigMap name containing webhook definitions | - | Yes |
-| `--namespace` | Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from NAMESPACE env var or pod's serviceaccount if not set | - | No (auto-detected) |
-| `--cert-secret-name` | Secret name for storing certificates | `webhook-injector-certs` | No |
-| `--cert-dir` | Directory to write certificates | `/tmp/webhook-certs` | No |
-| `--cert-validity` | Certificate validity as duration (e.g., "720h", "30d", "1y") | `720h` (30 days) | No |
-| `--cert-rotation-threshold` | Rotation threshold as decimal (0-1) | `0.8` | No |
-| `--target-kubeconfig` | Path to target cluster kubeconfig | In-cluster config | No |
-| `--enable-leader-election` | Enable leader election | `true` | No |
-| `--leader-election-id` | Leader election lease name | `webhook-injector-leader` | No |
-| `--sync-period` | Reconciliation sync period | `5m` | No |
-| `--metrics-addr` | Metrics bind address | `:8080` | No |
-| `--health-addr` | Health probe bind address | `:8081` | No |
-| `--log-level` | Logging level (debug/info/error) | `info` | No |
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--webhook-config-name` | ConfigMap containing webhook definitions | *required* |
+| `--namespace` | Namespace for ConfigMap/Secret/Lease | auto-detect |
+| `--cert-secret-name` | Secret for certificates | `webhook-injector-certs` |
+| `--cert-dir` | Certificate output directory | `/tmp/webhook-certs` |
+| `--cert-validity` | Certificate lifetime (e.g., "720h", "30d") | `720h` |
+| `--cert-rotation-threshold` | Rotation threshold (0-1) | `0.8` |
+| `--target-kubeconfig` | Target cluster kubeconfig path | in-cluster |
+| `--enable-leader-election` | Enable HA mode | `true` |
+| `--leader-election-id` | Lease name | `webhook-injector-leader` |
+| `--sync-period` | Reconciliation interval | `5m` |
+| `--metrics-addr` | Metrics bind address | `:8080` |
+| `--health-addr` | Health probe address | `:8081` |
+| `--log-level` | Log level (debug/info/error) | `info` |
 
-**Usage:**
+**Example:**
 ```bash
-webhook-injector --webhook-config-name=my-config --namespace=default
+webhook-injector --webhook-config-name=my-config
 ```
-
-Or in Kubernetes deployment:
-```yaml
-args:
-  - --webhook-config-name=webhook-config
-  - --namespace=$(POD_NAMESPACE)
-env:
-  - name: POD_NAMESPACE
-    valueFrom:
-      fieldRef:
-        fieldPath: metadata.namespace
-```
-
-**Namespace auto-detection:**
-The `--namespace` flag supports flexible configuration with the following priority order:
-1. Explicit `--namespace` flag value
-2. `NAMESPACE` environment variable
-3. Pod's serviceaccount namespace file (`/var/run/secrets/kubernetes.io/serviceaccount/namespace`)
-4. **Fail if none of the above are available**
-
-This ensures the namespace is always explicitly configured or auto-detected from the runtime environment. The program will exit with an error if namespace cannot be determined.
-
-## Certificate Output
-
-Files written to `--cert-dir`:
-- `tls.crt`: Self-signed certificate with dynamic SANs (PEM)
-- `tls.key`: Private key (PEM)
-
-Note: The same certificate is used as both the server certificate and CA bundle for validation.
-
-**Certificate SANs include:**
-- For service-based webhooks: `<service>.<namespace>.svc` and `<service>.<namespace>.svc.cluster.local`
-- For URL-based webhooks: hostname extracted from URL (e.g., `webhook.example.com`)
-
-**Performance optimization:** Files are only written when content changes, preventing unnecessary webhook server reloads.
-
-## Webhook Server Certificate Reloading
-
-For controller-runtime based webhook servers (v0.17+), certificate reloading is **automatic**. Simply configure the webhook server with the certificate directory:
-
-```go
-import (
-    ctrl "sigs.k8s.io/controller-runtime"
-    "sigs.k8s.io/controller-runtime/pkg/webhook"
-)
-
-func main() {
-    mgr, _ := ctrl.NewManager(cfg, ctrl.Options{
-        WebhookServer: webhook.NewServer(webhook.Options{
-            Port:     9443,
-            CertDir:  "/tmp/webhook-certs",
-            CertName: "tls.crt",
-            KeyName:  "tls.key",
-        }),
-    })
-
-    // Register webhooks...
-    mgr.GetWebhookServer().Register("/mutate", &webhook.Admission{...})
-
-    mgr.Start(ctx)
-}
-```
-
-**That's it!** The webhook server automatically:
-- Creates an internal `certwatcher` to monitor certificate files using fsnotify
-- Hot-reloads certificates when `tls.crt` or `tls.key` change
-- Provides zero-downtime certificate rotation
-- No manual setup or code required
 
 ## Testing
 
-### Unit Tests
-
 ```bash
+# Unit tests
 gmake test
-```
 
-### E2E Integration Tests
-
-End-to-end tests use two kind clusters to validate multi-cluster, multi-replica behavior:
-
-**Prerequisites:**
-- [kind](https://kind.sigs.k8s.io/) >= 0.20.0 - `brew install kind`
-- [kubectl](https://kubernetes.io/docs/tasks/tools/) >= 1.28 - `brew install kubectl`
-- [skaffold](https://skaffold.dev/) >= 2.10.0 - `brew install skaffold`
-- [docker](https://www.docker.com/) - Docker Desktop or Docker Engine running
-
-**Automated E2E test:**
-```bash
+# E2E integration tests (creates kind clusters, tests multi-cluster setup)
 gmake test-e2e
+
+# Manual E2E workflow
+gmake e2e-setup      # Create hosting + target kind clusters
+gmake e2e-dev        # Skaffold dev mode with hot reload
+gmake e2e-teardown   # Cleanup
 ```
 
-**Manual development workflow:**
-```bash
-gmake e2e-setup      # Create kind clusters (hosting + target)
-gmake e2e-dev        # Build images with ko, deploy with Skaffold (hot reload)
-
-# Test webhook manually
-kubectl --context kind-target create configmap test-1 --from-literal=key=value
-
-# Watch logs
-kubectl --context kind-hosting logs -l app=webhook-server -f
-
-# Cleanup
-gmake e2e-teardown
-```
-
-**What's tested:**
-- **Multi-cluster architecture**: Hosting cluster (webhook server runs) and target cluster (webhooks enforced)
-- **Cross-cluster networking**: Target API server calls webhook in hosting cluster via NodePort + host.docker.internal
-- **High availability**: 3 replicas with leader election - leader generates certs, all replicas reload certs
-- **Load balancing**: Kubernetes Service distributes webhook requests across all 3 replicas
-- **Zero-downtime rotation**: Webhook requests continue succeeding during certificate regeneration and reload
-- **Certificate hot reload**: All replicas independently detect cert changes and reload without restart
-- **Leader election verification**: Only leader generates certificates, but all replicas serve webhook requests
-
-**Test infrastructure:**
-- Uses [ko](https://ko.build/) via Skaffold for fast Go binary builds without Dockerfiles
-- Two kind clusters: `kind-hosting` (2 nodes) and `kind-target` (1 node)
-- NodePort 30443 with kind extraPortMappings for cross-cluster access
-- Test webhook validates ConfigMap creations in target cluster
-- Metrics endpoint tracks request counts and certificate serial numbers per replica
+E2E tests validate multi-cluster architecture, HA with 3 replicas, leader election, load balancing, and zero-downtime certificate rotation under continuous load. See [test/e2e/README.md](test/e2e/README.md) for details.
 
 ## Development
 
-### Linting
-
 ```bash
-make fmt
-make vet
-```
+make build           # Build binary
+make check           # Run all checks (MUST pass before commit)
+make static-check    # Linters only
+golangci-lint run --fix  # Auto-fix lint issues
 
-### Build Docker Image
-
-```bash
+# Docker
 make docker-build
+
+# Deployment
+kubectl apply -k config/  # Deploy from config/ manifests
 ```
 
-## Deployment
-
-See `config/` directory for Kubernetes manifests:
-- `rbac.yaml` - ServiceAccount, Role, ClusterRole, RoleBindings
-- `deployment.yaml` - Deployment with sidecar pattern, ConfigMap example, Service
-- `pdb.yaml` - PodDisruptionBudget for HA
-- `kustomization.yaml` - Kustomize configuration
-
-Deploy with:
-```bash
-kubectl apply -k config/
-```
+**Note:** Use `gmake` on macOS (built-in make is too old). All Go files must have Apache-2.0 license headers (auto-added by addlicense).
 
 ## License
 

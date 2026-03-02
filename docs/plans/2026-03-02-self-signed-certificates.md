@@ -6,7 +6,7 @@
 
 **Architecture:** Delete GenerateCA function, convert GenerateServerCert into GenerateSelfSignedCert that self-signs instead of using a CA. Update Secret structure to 2 files (tls.crt, tls.key). Use tls.crt as both server certificate and CA bundle.
 
-**Tech Stack:** Go 1.23, crypto/x509, Kubernetes controller-runtime
+**Tech Stack:** Go 1.26, crypto/x509, Kubernetes controller-runtime
 
 ---
 
