@@ -216,7 +216,7 @@ All configuration via command-line flags:
 | Flag | Description | Default | Required |
 |------|-------------|---------|----------|
 | `--webhook-config-name` | ConfigMap name containing webhook definitions | - | Yes |
-| `--namespace` | Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from pod's serviceaccount if not set | `default` | No |
+| `--namespace` | Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from NAMESPACE env var or pod's serviceaccount if not set | - | No (auto-detected) |
 | `--cert-secret-name` | Secret name for storing certificates | `webhook-injector-certs` | No |
 | `--cert-dir` | Directory to write certificates | `/tmp/webhook-certs` | No |
 | `--cert-validity` | Certificate validity as duration (e.g., "720h", "30d", "1y") | `720h` (30 days) | No |
@@ -245,6 +245,15 @@ env:
       fieldRef:
         fieldPath: metadata.namespace
 ```
+
+**Namespace auto-detection:**
+The `--namespace` flag supports flexible configuration with the following priority order:
+1. Explicit `--namespace` flag value
+2. `NAMESPACE` environment variable
+3. Pod's serviceaccount namespace file (`/var/run/secrets/kubernetes.io/serviceaccount/namespace`)
+4. **Fail if none of the above are available**
+
+This ensures the namespace is always explicitly configured or auto-detected from the runtime environment. The program will exit with an error if namespace cannot be determined.
 
 ## Certificate Output
 
