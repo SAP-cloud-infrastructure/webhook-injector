@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-webhook-injector is a Kubernetes controller that runs as a **sidecar** to webhook servers, managing the complete lifecycle of webhook configurations and TLS certificates. The key innovation is enabling webhook servers to serve webhooks for remote clusters (clusters they don't run in) while providing a generic solution that works with any webhook server framework.
+webhook-injector is a Kubernetes controller that runs as a **sidecar** to webhook servers, managing webhook configurations and TLS certificates. The key innovation is enabling webhook servers to serve webhooks for remote clusters (clusters they don't run in) while providing a language-agnostic solution that works with any webhook server that can watch and reload certificate files.
+
+**Webhook Server Requirement**: The webhook server must watch certificate files (`tls.crt`, `tls.key`) and reload them when changed. Controller-runtime webhook servers (v0.17+) provide this automatically via an internal `certwatcher`. Other frameworks need custom implementation using inotify/fsnotify or periodic polling.
 
 ## Build System
 
@@ -88,7 +90,8 @@ The application contains two independent controllers with different leader elect
 **Sidecar pattern:**
 - webhook-injector runs as sidecar container alongside webhook server
 - Shares emptyDir volume for certificate files
-- Works with any webhook server (any language/framework) that can watch files
+- Works with any webhook server that can watch certificate files and reload on changes
+- Controller-runtime v0.17+ webhook servers handle this automatically via fsnotify
 
 **ConfigMap-driven:**
 - Users provide full `MutatingWebhookConfiguration` or `ValidatingWebhookConfiguration` YAML in a ConfigMap
@@ -139,7 +142,7 @@ test/e2e/                       E2E integration tests with kind clusters
 **Storage flow:**
 1. WebhookReconciler generates self-signed cert → stores in Secret (hosting cluster)
 2. CertificateReloader watches Secret → writes to `/tmp/webhook-certs/`
-3. Webhook server watches filesystem → automatically reloads (if using controller-runtime v0.17+)
+3. Webhook server watches filesystem → reloads certificates (controller-runtime v0.17+ does this automatically)
 
 ## Important Implementation Details
 
