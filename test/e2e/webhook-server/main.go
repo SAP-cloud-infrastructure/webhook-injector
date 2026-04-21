@@ -1,19 +1,6 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company
+// SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
+//
 // SPDX-License-Identifier: Apache-2.0
-
-// Copyright 2026 SAP SE or an SAP affiliate company
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 package main
 
@@ -50,13 +37,13 @@ var (
 func init() {
 	// We don't actually need to register schemes since we're just validating ConfigMaps
 	// but controller-runtime requires a scheme
-	_ = corev1.AddToScheme(scheme)
-	_ = admissionv1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)      //nolint:errcheck
+	_ = admissionv1.AddToScheme(scheme) //nolint:errcheck
 }
 
 // ConfigMapValidator validates ConfigMap admissions (always allows)
 type ConfigMapValidator struct {
-	decoder *admission.Decoder
+	_ *admission.Decoder
 }
 
 func (v *ConfigMapValidator) Handle(ctx context.Context, req admission.Request) admission.Response {
@@ -80,12 +67,6 @@ func (v *ConfigMapValidator) Handle(ctx context.Context, req admission.Request) 
 	return admission.Allowed("")
 }
 
-// InjectDecoder injects the decoder (required by admission.Handler interface)
-func (v *ConfigMapValidator) InjectDecoder(d *admission.Decoder) error {
-	v.decoder = d
-	return nil
-}
-
 func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8082", "The address the probe endpoint binds to.")
 	flag.StringVar(&certDir, "cert-dir", "/tmp/webhook-certs", "Directory containing TLS certificates.")
@@ -100,6 +81,7 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// Initialize random generator for jitter (modern Go 1.20+ approach)
+	//nolint:gosec // G404 is ignored because this isn't for security
 	randGen = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	certFile := certDir + "/tls.crt"
