@@ -55,6 +55,9 @@ e2e-teardown: FORCE
 	@printf "\e[1;36m>> Tearing down E2E environment\e[0m\n"
 	cd test/e2e && ./teardown.sh
 
+install-skaffold: FORCE
+	@if ! hash skaffold 2>/dev/null; then printf "\e[1;36m>> Installing skaffold (this may take a while)...\e[0m\n"; curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64 && sudo install skaffold /usr/local/bin/; fi
+
 install-goimports: FORCE
 	@if ! hash goimports 2>/dev/null; then printf "\e[1;36m>> Installing goimports (this may take a while)...\e[0m\n"; go install golang.org/x/tools/cmd/goimports@latest; fi
 

@@ -33,6 +33,8 @@ jobs:
         with:
           check-latest: true
           go-version: 1.26.2
+      - name: Run prepare make target
+        run: make install-skaffold
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
