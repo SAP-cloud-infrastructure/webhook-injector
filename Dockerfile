@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 SAP SE or an SAP affiliate company
 # SPDX-License-Identifier: Apache-2.0
 
-FROM keppel.eu-de-1.cloud.sap/ccloud-dockerhub-mirror/library/golang:1.26.2-alpine3.23 AS builder
+FROM golang:1.26.2-alpine3.23 AS builder
 
 RUN apk add --no-cache --no-progress ca-certificates gcc git make musl-dev
 
@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # To only build the tests run: docker build . --target test
 # We can't do `FROM builder AS test` here, as then make prepare-static-check would not be cached during interactive use when developing
 # and caching all the tools, especially golangci-lint, takes a few minutes.
-FROM keppel.eu-de-1.cloud.sap/ccloud-dockerhub-mirror/library/golang:1.26.2-alpine3.23 AS test
+FROM golang:1.26.2-alpine3.23 AS test
 
 COPY Makefile /src/Makefile
 
@@ -46,7 +46,7 @@ RUN cd /src \
 
 ################################################################################
 
-FROM keppel.eu-de-1.cloud.sap/ccloud-dockerhub-mirror/library/alpine:3.23
+FROM alpine:3.23
 
 RUN addgroup -g 4200 appgroup \
   && adduser -h /home/appuser -s /sbin/nologin -G appgroup -D -u 4200 appuser
@@ -64,8 +64,8 @@ RUN set -x \
   && webhook-injector --version 2>/dev/null
 
 ARG BININFO_BUILD_DATE BININFO_COMMIT_HASH BININFO_VERSION
-LABEL source_repository="https://github.wdf.sap.corp/sap-cloud-infrastructure/webhook-injector" \
-  org.opencontainers.image.url="https://github.wdf.sap.corp/sap-cloud-infrastructure/webhook-injector" \
+LABEL source_repository="https://github.com/SAP-cloud-infrastructure/webhook-injector" \
+  org.opencontainers.image.url="https://github.com/SAP-cloud-infrastructure/webhook-injector" \
   org.opencontainers.image.created=${BININFO_BUILD_DATE} \
   org.opencontainers.image.revision=${BININFO_COMMIT_HASH} \
   org.opencontainers.image.version=${BININFO_VERSION}

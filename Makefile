@@ -175,7 +175,7 @@ check-dependency-licenses: FORCE install-go-licence-detector
 	@go list -m -mod=readonly -json all | go-licence-detector -includeIndirect -rules .license-scan-rules.json -overrides .license-scan-overrides.jsonl
 
 goimports: FORCE install-goimports
-	@printf "\e[1;36m>> goimports -w -local https://github.wdf.sap.corp/sap-cloud-infrastructure/webhook-injector\e[0m\n"
+	@printf "\e[1;36m>> goimports -w -local https://github.com/SAP-cloud-infrastructure/webhook-injector\e[0m\n"
 	@goimports -w -local github.com/sap-cloud-infrastructure/webhook-injector $(patsubst $(shell awk '$$1 == "module" {print $$2}' go.mod)%,.%/*.go,$(shell go list ./...))
 
 clean: FORCE

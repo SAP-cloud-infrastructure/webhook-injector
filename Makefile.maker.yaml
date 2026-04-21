@@ -1,5 +1,5 @@
 metadata:
-  url: https://github.wdf.sap.corp/sap-cloud-infrastructure/webhook-injector
+  url: https://github.com/SAP-cloud-infrastructure/webhook-injector
 
 binaries:
   # we want to scikube to be the release binary
