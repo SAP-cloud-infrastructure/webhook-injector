@@ -29,12 +29,20 @@ SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
 path = [
-  "internal/webhook/add.go",
-  "internal/webhook/config/config.go",
-  "internal/webhook/shootadmission/add.go",
-  "internal/webhook/token/add.go",
-  "test/integration/webhook/token/token_suite_test.go",
-  "test/integration/webhook/token/token_test.go",
+  ".github/**",
+  ".gitignore",
+  ".dockerignore",
+  ".golangci.yml",
+  ".license-scan-overrides.jsonl",
+  ".license-scan-rules.json",
+  "Makefile",
+  "PROJECT",
+  "go.mod",
+  "go.sum",
+  "config/**",
+  "dist/**",
+  "docs/**",
+  "hack/**",
 ]
 SPDX-FileCopyrightText = "SAP SE or an SAP affiliate company and Gardener contributors"
 SPDX-License-Identifier = "Apache-2.0"
