@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Remove Config Package - Use stdlib Flags Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.

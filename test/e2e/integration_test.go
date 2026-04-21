@@ -1,19 +1,6 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company
+// SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
+//
 // SPDX-License-Identifier: Apache-2.0
-
-// Copyright 2026 SAP SE or an SAP affiliate company
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 package e2e
 
@@ -64,7 +51,7 @@ func logWithTimestamp(t *testing.T, format string, args ...any) {
 	t.Logf("[%s] "+format, append([]any{timestamp}, args...)...)
 }
 
-func runCommand(t *testing.T, command string) error {
+func runCommand(_ *testing.T, command string) error {
 	cmd := exec.Command("sh", "-c", command)
 	cmd.Dir = "."
 	cmd.Stdout = os.Stdout
@@ -100,7 +87,7 @@ func getKubernetesClient(t *testing.T, contextName string) *kubernetes.Clientset
 	return clientset
 }
 
-func waitForDeploymentReady(t *testing.T, client *kubernetes.Clientset, name string, replicas int, timeout time.Duration) {
+func waitForDeploymentReady(t *testing.T, client *kubernetes.Clientset, name string, replicas int32, timeout time.Duration) {
 	ctx := context.Background()
 	deadline := time.After(timeout)
 	ticker := time.NewTicker(5 * time.Second)
@@ -116,8 +103,7 @@ func waitForDeploymentReady(t *testing.T, client *kubernetes.Clientset, name str
 				logWithTimestamp(t, "Waiting for deployment %s... (%v)", name, err)
 				continue
 			}
-
-			if deployment.Status.ReadyReplicas == int32(replicas) {
+			if deployment.Status.ReadyReplicas == replicas {
 				logWithTimestamp(t, "Deployment %s has %d/%d ready replicas", name, replicas, replicas)
 				return
 			}
@@ -236,7 +222,7 @@ func TestWebhookLoadAndRotation(t *testing.T) {
 
 		t.Cleanup(func() {
 			logWithTimestamp(t, "Tearing down clusters...")
-			runCommand(t, "./teardown.sh") // Ignore errors during cleanup
+			runCommand(t, "./teardown.sh") //nolint:errcheck // Ignore errors during cleanup
 		})
 	} else {
 		logWithTimestamp(t, "Reusing existing clusters (skipping setup/teardown)")
@@ -286,7 +272,7 @@ func TestWebhookLoadAndRotation(t *testing.T) {
 		cmName := fmt.Sprintf("load-test-cm-%d", i)
 
 		// Delete if exists (ignore errors)
-		_ = targetClient.CoreV1().ConfigMaps("default").Delete(ctx, cmName, metav1.DeleteOptions{})
+		_ = targetClient.CoreV1().ConfigMaps("default").Delete(ctx, cmName, metav1.DeleteOptions{}) //nolint:errcheck
 
 		cm := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{

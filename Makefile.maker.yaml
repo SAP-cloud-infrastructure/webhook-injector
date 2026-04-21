@@ -22,7 +22,18 @@ githubWorkflow:
     defaultBranch: main
   ci:
     enabled: true
-    ignorePaths: []
+    ignorePaths:
+      - "**.md" # all Markdown files
+  pushContainerToGhcr:
+    enabled: true
+    platforms: "linux/amd64"
+    tagStrategy:
+      - edge
+      - latest
+      - semver
+      - sha
+  license:
+    enabled: true
 
 golang:
   enableVendoring: false
@@ -40,12 +51,20 @@ reuse:
   - SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and Gardener contributors
     SPDX-License-Identifier: Apache-2.0
     paths:
-    - internal/webhook/add.go
-    - internal/webhook/config/config.go
-    - internal/webhook/shootadmission/add.go
-    - internal/webhook/token/add.go
-    - test/integration/webhook/token/token_suite_test.go
-    - test/integration/webhook/token/token_test.go
+    - .github/**
+    - .gitignore
+    - .dockerignore
+    - .golangci.yml
+    - .license-scan-overrides.jsonl
+    - .license-scan-rules.json
+    - Makefile
+    - PROJECT
+    - go.mod
+    - go.sum
+    - config/**
+    - dist/**
+    - docs/**
+    - hack/**
 
 shellCheck:
   ignorePaths:

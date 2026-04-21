@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 SAP SE or an SAP affiliate company
 # SPDX-License-Identifier: Apache-2.0
 
-FROM keppel.eu-de-1.cloud.sap/ccloud-dockerhub-mirror/library/golang:1.26.0-alpine3.23 AS builder
+FROM keppel.eu-de-1.cloud.sap/ccloud-dockerhub-mirror/library/golang:1.26.2-alpine3.23 AS builder
 
 RUN apk add --no-cache --no-progress ca-certificates gcc git make musl-dev
 
@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # To only build the tests run: docker build . --target test
 # We can't do `FROM builder AS test` here, as then make prepare-static-check would not be cached during interactive use when developing
 # and caching all the tools, especially golangci-lint, takes a few minutes.
-FROM keppel.eu-de-1.cloud.sap/ccloud-dockerhub-mirror/library/golang:1.26.0-alpine3.23 AS test
+FROM keppel.eu-de-1.cloud.sap/ccloud-dockerhub-mirror/library/golang:1.26.2-alpine3.23 AS test
 
 COPY Makefile /src/Makefile
 
@@ -54,7 +54,7 @@ RUN addgroup -g 4200 appgroup \
 # upgrade all installed packages to fix potential CVEs in advance
 # also remove apk package manager to hopefully remove dependency on OpenSSL 🤞
 RUN apk upgrade --no-cache --no-progress \
-  && apk del --no-cache --no-progress apk-tools alpine-keys alpine-release musl-utils
+  && apk del --no-cache --no-progress apk-tools musl-utils
 
 COPY --from=builder /etc/ssl/certs/ /etc/ssl/certs/
 COPY --from=builder /etc/ssl/cert.pem /etc/ssl/cert.pem

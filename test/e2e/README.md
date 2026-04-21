@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # E2E Integration Tests
 
 End-to-end tests using two kind clusters to validate webhook-injector's

@@ -31,7 +31,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           check-latest: true
-          go-version: 1.26.0
+          go-version: 1.26.2
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
@@ -44,8 +44,6 @@ jobs:
         uses: crate-ci/typos@v1
         env:
           CLICOLOR: "1"
-      - name: Delete typos binary
-        run: rm typos
       - name: Check if source code files have license header
         run: make check-addlicense
       - name: REUSE Compliance Check
