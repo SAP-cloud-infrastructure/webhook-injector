@@ -1004,7 +1004,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 
 ## Notes
 
-- The test uses ConfigMap UPDATEs (not CREATEs) to avoid etcd bloat
+- The test uses ConfigMap UPDATE (not CREATE) to avoid etcd bloat
 - Each client has a dedicated ConfigMap to avoid update conflicts
 - Certificate rotations are triggered via annotation on the Secret
 - The ForceRotationAnnotation constant is imported from pkg/controllers

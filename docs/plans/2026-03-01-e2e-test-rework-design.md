@@ -76,7 +76,7 @@ go test -v -timeout 5m -test.reuse-clusters=true
    - Verify webhook is working (single UPDATE succeeds)
 
 3. **Concurrent load + rotation**
-   - Start N goroutines (one per concurrency level) doing ConfigMap UPDATEs
+   - Start N goroutines (one per concurrency level) doing ConfigMap UPDATE
    - Start rotation goroutine triggering cert rotations at configured interval
    - All failures collected in buffered channel
    - Run for configured duration via `context.WithTimeout()`
@@ -225,7 +225,7 @@ test/e2e/*.test
 
 **Load generation approach:**
 - Each client goroutine owns a dedicated ConfigMap: `load-test-cm-{clientID}`
-- Continuously UPDATEs its ConfigMap (no update conflicts)
+- Continuously UPDATE its ConfigMap (no update conflicts)
 - Avoids etcd bloat (UPDATE vs CREATE)
 
 **Client goroutine:**
