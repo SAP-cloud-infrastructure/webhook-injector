@@ -24,7 +24,7 @@ permissions:
 jobs:
   build:
     name: Build
-    runs-on: [self-hosted]
+    runs-on: ubuntu-latest
     env:
       NODE_EXTRA_CA_CERTS: /etc/ssl/certs/ca-certificates.crt
     steps:
@@ -41,7 +41,7 @@ jobs:
     name: Test
     needs:
       - build
-    runs-on: [self-hosted]
+    runs-on: ubuntu-latest
     env:
       NODE_EXTRA_CA_CERTS: /etc/ssl/certs/ca-certificates.crt
     steps:

@@ -22,6 +22,8 @@ githubWorkflow:
     defaultBranch: main
   ci:
     enabled: true
+    runOn:
+      - ubuntu-latest
     ignorePaths:
       - "**.md" # all Markdown files
   pushContainerToGhcr:
