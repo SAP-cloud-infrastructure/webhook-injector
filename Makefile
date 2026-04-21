@@ -55,6 +55,9 @@ e2e-teardown: FORCE
 	@printf "\e[1;36m>> Tearing down E2E environment\e[0m\n"
 	cd test/e2e && ./teardown.sh
 
+install-skaffold: FORCE
+	@if ! hash skaffold 2>/dev/null; then printf "\e[1;36m>> Installing skaffold (this may take a while)...\e[0m\n"; curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64 && sudo install skaffold /usr/local/bin/; rm skaffold; fi
+
 install-goimports: FORCE
 	@if ! hash goimports 2>/dev/null; then printf "\e[1;36m>> Installing goimports (this may take a while)...\e[0m\n"; go install golang.org/x/tools/cmd/goimports@latest; fi
 
@@ -175,7 +178,7 @@ check-dependency-licenses: FORCE install-go-licence-detector
 	@go list -m -mod=readonly -json all | go-licence-detector -includeIndirect -rules .license-scan-rules.json -overrides .license-scan-overrides.jsonl
 
 goimports: FORCE install-goimports
-	@printf "\e[1;36m>> goimports -w -local https://github.wdf.sap.corp/sap-cloud-infrastructure/webhook-injector\e[0m\n"
+	@printf "\e[1;36m>> goimports -w -local https://github.com/SAP-cloud-infrastructure/webhook-injector\e[0m\n"
 	@goimports -w -local github.com/sap-cloud-infrastructure/webhook-injector $(patsubst $(shell awk '$$1 == "module" {print $$2}' go.mod)%,.%/*.go,$(shell go list ./...))
 
 clean: FORCE

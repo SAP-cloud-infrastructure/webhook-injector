@@ -21,9 +21,7 @@ permissions:
 jobs:
   checks:
     name: Checks
-    runs-on: [self-hosted]
-    env:
-      NODE_EXTRA_CA_CERTS: /etc/ssl/certs/ca-certificates.crt
+    runs-on: ubuntu-latest
     steps:
       - name: Check out code
         uses: actions/checkout@v6
@@ -32,10 +30,14 @@ jobs:
         with:
           check-latest: true
           go-version: 1.26.2
+      - name: Run prepare make target
+        run: make install-skaffold
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+      - name: Delete pre-installed shellcheck
+        run: sudo rm -f "$(which shellcheck)"
       - name: Run shellcheck
         run: make run-shellcheck
       - name: Dependency Licenses Review

@@ -57,12 +57,6 @@
     },
     {
       "matchPackageNames": [
-        "actions/upload-artifact"
-      ],
-      "allowedVersions": "v2"
-    },
-    {
-      "matchPackageNames": [
         "/^k8s.io\\//"
       ],
       "allowedVersions": "0.33.x"
@@ -70,7 +64,7 @@
   ],
   "prHourlyLimit": 0,
   "schedule": [
-    "on Friday"
+    "before 8am on Friday"
   ],
   "semanticCommits": "disabled"
 }

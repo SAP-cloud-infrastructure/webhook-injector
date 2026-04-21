@@ -18,8 +18,7 @@ permissions:
 jobs:
   build-and-push-image:
     name: Push container to ghcr.io
-    env:
-      NODE_EXTRA_CA_CERTS: /etc/ssl/certs/ca-certificates.crt
+    runs-on: ubuntu-latest
     steps:
       - name: Check out code
         uses: actions/checkout@v6
