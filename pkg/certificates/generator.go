@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"time"
 )
 
@@ -22,12 +23,17 @@ func GenerateSelfSignedCert(services []ServiceReference, validity time.Duration)
 		return nil, nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
 
-	// Build DNS SANs from service references
+	// Build DNS SANs and IP SANs from service references
 	dnsNames := make([]string, 0, len(services)*2)
+	ipAddresses := make([]net.IP, 0)
 	for _, svc := range services {
 		if svc.Hostname != "" {
-			// URL-based webhook - use hostname directly
-			dnsNames = append(dnsNames, svc.Hostname)
+			// URL-based webhook - check if it's an IP address or a DNS hostname
+			if ip := net.ParseIP(svc.Hostname); ip != nil {
+				ipAddresses = append(ipAddresses, ip)
+			} else {
+				dnsNames = append(dnsNames, svc.Hostname)
+			}
 		} else if svc.Name != "" && svc.Namespace != "" {
 			// Service-based webhook - generate Kubernetes service DNS names
 			dnsNames = append(dnsNames,
@@ -50,6 +56,7 @@ func GenerateSelfSignedCert(services []ServiceReference, validity time.Duration)
 			CommonName: "webhook-injector",
 		},
 		DNSNames:              dnsNames,
+		IPAddresses:           ipAddresses,
 		NotBefore:             now,
 		NotAfter:              now.Add(validity),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

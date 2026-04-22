@@ -6,6 +6,7 @@ package certificates
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"net"
 	"slices"
 	"testing"
 	"time"
@@ -173,6 +174,45 @@ func TestGenerateSelfSignedCert_WithHostnames(t *testing.T) {
 	// Verify we have exactly 2 SANs (no extra service DNS names)
 	if len(cert.DNSNames) != 2 {
 		t.Errorf("Expected 2 SANs, got %d: %v", len(cert.DNSNames), cert.DNSNames)
+	}
+}
+
+func TestGenerateSelfSignedCert_WithIPAddress(t *testing.T) {
+	// Simulate a NodePort-based webhook URL like https://172.18.0.3:30443/validate
+	services := []ServiceReference{
+		{Hostname: "172.18.0.3"},
+	}
+
+	certPEM, _, err := GenerateSelfSignedCert(services, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Failed to generate certificate: %v", err)
+	}
+
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("Failed to decode certificate")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("Failed to parse certificate: %v", err)
+	}
+
+	// IP must be in IPAddresses, not DNSNames
+	if len(cert.DNSNames) != 0 {
+		t.Errorf("Expected no DNS SANs for IP-only cert, got: %v", cert.DNSNames)
+	}
+
+	expectedIP := net.ParseIP("172.18.0.3")
+	found := false
+	for _, ip := range cert.IPAddresses {
+		if ip.Equal(expectedIP) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Expected IP SAN 172.18.0.3 not found in certificate. Found: %v", cert.IPAddresses)
 	}
 }
 
