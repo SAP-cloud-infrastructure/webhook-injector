@@ -79,14 +79,24 @@ kubectl --context kind-hosting create secret generic target-kubeconfig \
 rm "$TARGET_KUBECONFIG"
 
 echo "==> Discovering webhook endpoint address..."
-# Get hosting control plane IP address for webhook URL
-# The target cluster needs to reach the webhook service in hosting cluster
-# Use host.docker.internal or actual Docker bridge IP
+# Get hosting control plane IP address for webhook URL.
+# The target cluster's API server runs as a Docker container, so it must reach
+# the NodePort (30443) on the hosting control-plane container via Docker networking.
+# Use host.docker.internal or actual hosting-control-plane container IP.
 WEBHOOK_HOST="host.docker.internal"
 
-# For Linux, host.docker.internal doesn't work, use docker bridge IP
+# For Linux, host.docker.internal doesn't work. Use the hosting control-plane
+# container IP — reachable from all containers on the same Docker network.
+# NOTE: the hosting-control-plane container only exists after cluster creation above.
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    WEBHOOK_HOST=$(docker network inspect kind | jq -r '.[0].IPAM.Config[0].Gateway')
+    WEBHOOK_HOST=$(docker inspect hosting-control-plane \
+        --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+    if [[ -z "$WEBHOOK_HOST" || "$WEBHOOK_HOST" == "null" ]]; then
+        echo "ERROR: Could not determine IP of hosting-control-plane container."
+        echo "       'docker inspect hosting-control-plane' output:"
+        docker inspect hosting-control-plane || true
+        exit 1
+    fi
 fi
 
 export WEBHOOK_ENDPOINT="https://${WEBHOOK_HOST}:30443"
