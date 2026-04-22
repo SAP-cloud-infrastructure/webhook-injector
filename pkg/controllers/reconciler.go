@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -194,24 +195,38 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 	}
 
 	// Check if SANs match current service references
-	expectedSANs := buildExpectedSANs(services)
-	currentSANs := make(map[string]bool)
+	expectedDNS, expectedIPs := buildExpectedSANs(services)
+	currentDNS := make(map[string]bool)
 	for _, dnsName := range cert.DNSNames {
-		currentSANs[dnsName] = true
+		currentDNS[dnsName] = true
+	}
+	currentIPs := make(map[string]bool)
+	for _, ip := range cert.IPAddresses {
+		currentIPs[ip.String()] = true
 	}
 
-	// Check if all expected SANs are present
-	for san := range expectedSANs {
-		if !currentSANs[san] {
-			// Missing expected SAN, needs rotation
+	// Check if all expected DNS SANs are present
+	for san := range expectedDNS {
+		if !currentDNS[san] {
+			return true, nil
+		}
+	}
+	// Check for extra DNS SANs
+	for san := range currentDNS {
+		if !expectedDNS[san] {
 			return true, nil
 		}
 	}
 
-	// Check if there are extra SANs (not strictly necessary, but good for cleanup)
-	for san := range currentSANs {
-		if !expectedSANs[san] {
-			// Extra SAN present, needs rotation
+	// Check if all expected IP SANs are present
+	for ip := range expectedIPs {
+		if !currentIPs[ip] {
+			return true, nil
+		}
+	}
+	// Check for extra IP SANs
+	for ip := range currentIPs {
+		if !expectedIPs[ip] {
 			return true, nil
 		}
 	}
@@ -219,20 +234,23 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 	return false, nil
 }
 
-// buildExpectedSANs builds the expected set of SANs from service references
-func buildExpectedSANs(services []certificates.ServiceReference) map[string]bool {
-	sans := make(map[string]bool)
+// buildExpectedSANs builds the expected sets of DNS SANs and IP SANs from service references
+func buildExpectedSANs(services []certificates.ServiceReference) (dns, ips map[string]bool) {
+	dns = make(map[string]bool)
+	ips = make(map[string]bool)
 	for _, svc := range services {
 		if svc.Hostname != "" {
-			// URL-based webhook - use hostname directly
-			sans[svc.Hostname] = true
+			if ip := net.ParseIP(svc.Hostname); ip != nil {
+				ips[ip.String()] = true
+			} else {
+				dns[svc.Hostname] = true
+			}
 		} else if svc.Name != "" && svc.Namespace != "" {
-			// Service-based webhook - add both short and FQDN forms
-			sans[fmt.Sprintf("%s.%s.svc", svc.Name, svc.Namespace)] = true
-			sans[fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)] = true
+			dns[fmt.Sprintf("%s.%s.svc", svc.Name, svc.Namespace)] = true
+			dns[fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)] = true
 		}
 	}
-	return sans
+	return dns, ips
 }
 
 // calculateNextRotation calculates when the next certificate rotation check should occur

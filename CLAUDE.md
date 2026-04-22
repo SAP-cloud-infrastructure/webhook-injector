@@ -143,7 +143,7 @@ test/e2e/                       E2E integration tests with kind clusters
 
 **Certificate SANs:**
 - Service-based webhooks: `<service>.<namespace>.svc`, `<service>.<namespace>.svc.cluster.local`
-- URL-based webhooks: hostname extracted from URL (e.g., `webhook.example.com`)
+- URL-based webhooks: hostname or IP extracted from URL — DNS names go into DNS SANs (e.g., `webhook.example.com`), IP addresses go into IP SANs (e.g., `172.18.0.3` for NodePort-based remote clusters)
 
 **Storage flow:**
 1. WebhookReconciler generates self-signed cert → stores in Secret (hosting cluster)

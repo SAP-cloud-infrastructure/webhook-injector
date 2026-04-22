@@ -44,6 +44,7 @@ var (
 	syncPeriod            time.Duration
 	metricsAddr           string
 	healthAddr            string
+	showVersion           bool
 )
 
 func init() {
@@ -60,6 +61,7 @@ func init() {
 	flag.DurationVar(&syncPeriod, "sync-period", 5*time.Minute, "Controller reconciliation sync period")
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "Metrics server bind address")
 	flag.StringVar(&healthAddr, "health-addr", ":8081", "Health probe server bind address")
+	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	// Initialize scheme
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -78,6 +80,11 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	if showVersion {
+		fmt.Println("webhook-injector")
+		return
+	}
 
 	// Validate required flags
 	if webhookConfigName == "" {
