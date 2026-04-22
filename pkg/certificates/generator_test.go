@@ -43,9 +43,9 @@ func TestGenerateSelfSignedCert(t *testing.T) {
 			cert.Issuer.CommonName, cert.Subject.CommonName)
 	}
 
-	// Verify IsCA is false
-	if cert.IsCA {
-		t.Error("Certificate should not be a CA")
+	// Verify IsCA is true (required for self-signed cert to validate itself as caBundle)
+	if !cert.IsCA {
+		t.Error("Certificate should be a CA to allow self-validation as caBundle")
 	}
 
 	// Verify subject CN

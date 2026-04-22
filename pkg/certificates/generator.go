@@ -59,10 +59,10 @@ func GenerateSelfSignedCert(services []ServiceReference, validity time.Duration)
 		IPAddresses:           ipAddresses,
 		NotBefore:             now,
 		NotAfter:              now.Add(validity),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		IsCA:                  false,
+		IsCA:                  true,
 	}
 
 	// Self-sign the certificate (template is both cert and parent)
