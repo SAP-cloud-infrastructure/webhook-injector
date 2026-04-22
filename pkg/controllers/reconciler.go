@@ -235,7 +235,7 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 }
 
 // buildExpectedSANs builds the expected sets of DNS SANs and IP SANs from service references
-func buildExpectedSANs(services []certificates.ServiceReference) (dns map[string]bool, ips map[string]bool) {
+func buildExpectedSANs(services []certificates.ServiceReference) (dns, ips map[string]bool) {
 	dns = make(map[string]bool)
 	ips = make(map[string]bool)
 	for _, svc := range services {
