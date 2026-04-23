@@ -67,7 +67,7 @@ func (v *ConfigMapValidator) Handle(ctx context.Context, req admission.Request) 
 }
 
 func main() {
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8082", "The address the probe endpoint binds to.")
+	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8084", "The address the probe endpoint binds to.")
 	flag.StringVar(&certDir, "cert-dir", "/tmp/webhook-certs", "Directory containing TLS certificates.")
 	flag.DurationVar(&webhookDelay, "webhook-delay", 100*time.Millisecond, "Average webhook processing delay with ±20% jitter")
 

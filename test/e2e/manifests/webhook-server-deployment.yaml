@@ -35,12 +35,12 @@ spec:
           ports:
             - containerPort: 9443
               name: webhook
-            - containerPort: 8082
+            - containerPort: 8084
               name: health
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8082
+              port: 8084
               scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 5
