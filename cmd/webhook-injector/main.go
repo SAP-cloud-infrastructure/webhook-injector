@@ -59,8 +59,8 @@ func init() {
 	flag.BoolVar(&enableLeaderElection, "enable-leader-election", true, "Enable leader election for HA")
 	flag.StringVar(&leaderElectionID, "leader-election-id", "webhook-injector-leader", "Leader election lease name")
 	flag.DurationVar(&syncPeriod, "sync-period", 5*time.Minute, "Controller reconciliation sync period")
-	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "Metrics server bind address")
-	flag.StringVar(&healthAddr, "health-addr", ":8081", "Health probe server bind address")
+	flag.StringVar(&metricsAddr, "metrics-addr", ":8082", "Metrics server bind address")
+	flag.StringVar(&healthAddr, "health-addr", ":8083", "Health probe server bind address")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	// Initialize scheme

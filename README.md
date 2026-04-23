@@ -191,8 +191,8 @@ Configure via command-line flags. Only `--webhook-config-name` is required; name
 | `--enable-leader-election` | Enable HA mode | `true` |
 | `--leader-election-id` | Lease name | `webhook-injector-leader` |
 | `--sync-period` | Reconciliation interval | `5m` |
-| `--metrics-addr` | Metrics bind address | `:8080` |
-| `--health-addr` | Health probe address | `:8081` |
+| `--metrics-addr` | Metrics bind address | `:8082` |
+| `--health-addr` | Health probe address | `:8083` |
 | `--log-level` | Log level (debug/info/error) | `info` |
 
 **Example:**
