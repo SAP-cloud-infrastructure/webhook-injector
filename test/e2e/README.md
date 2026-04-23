@@ -25,37 +25,29 @@ cd test/e2e
 go test -v -timeout 5m
 ```
 
-This creates clusters, deploys, runs the test, and tears down automatically.
+This creates kind clusters, builds and deploys with skaffold, runs the test,
+and tears down the clusters automatically when done.
 
-### Run Test (Reuse Clusters)
+### Reuse Clusters for Development
 
-For faster iteration during development:
+For faster iteration, create clusters once and rerun tests without the
+setup/teardown overhead:
 
 ```bash
-# First run - create clusters
 cd test/e2e
-go test -v -timeout 5m
 
-# Subsequent runs - reuse clusters (much faster)
+# Create clusters and deploy (once)
+./setup.sh
+skaffold run
+
+# Run tests repeatedly — clusters stay up between runs
 go test -v -timeout 5m -test.reuse-clusters=true
 go test -v -timeout 3m -test.runtime=1m -test.concurrency=10 -test.reuse-clusters=true
 
-# Manual cleanup when done
-./teardown.sh
-```
+# Use skaffold dev for hot-reload during development
+skaffold dev
 
-### Manual Development Workflow
-
-```bash
-# Setup clusters and deploy
-./setup.sh
-skaffold dev  # Or: skaffold run for one-time deploy
-
-# In another terminal, run tests with various configs
-go test -v -timeout 5m -test.reuse-clusters=true
-go test -v -timeout 10m -test.runtime=5m -test.concurrency=20 -test.rotation-interval=1m -test.reuse-clusters=true
-
-# Cleanup
+# Cleanup when done
 ./teardown.sh
 ```
 
