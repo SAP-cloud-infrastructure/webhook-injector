@@ -87,7 +87,7 @@ webhook-injector runs as a sidecar with two controllers:
 ### Prerequisites
 
 - Go 1.26+
-- Kubernetes cluster (hosting cluster)
+- Kubernetes 1.29+ (for native sidecar support)
 - kubectl configured
 - (Optional) Target cluster kubeconfig if managing remote cluster
 - **Webhook server requirement**: Must watch certificate files and reload on changes (controller-runtime v0.17+ does this automatically)
@@ -100,7 +100,7 @@ make build
 
 ### Sidecar Deployment
 
-Add webhook-injector as a sidecar container with shared emptyDir volume:
+webhook-injector is deployed as a [native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) (Kubernetes 1.29+). Native sidecars are init containers with `restartPolicy: Always` — they start before and terminate after the main containers, which guarantees certificates are written to disk before the webhook server starts.
 
 ```yaml
 apiVersion: apps/v1
@@ -111,6 +111,22 @@ spec:
   replicas: 3
   template:
     spec:
+      initContainers:
+        - name: webhook-injector
+          image: webhook-injector:latest
+          restartPolicy: Always
+          args:
+            - --webhook-config-name=webhook-config
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: 8083
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/webhook-certs
       containers:
         - name: webhook-server
           image: my-webhook:latest
@@ -118,17 +134,12 @@ spec:
             - name: webhook-certs
               mountPath: /tmp/webhook-certs
               readOnly: true
-        - name: webhook-injector
-          image: webhook-injector:latest
-          args:
-            - --webhook-config-name=webhook-config
-          volumeMounts:
-            - name: webhook-certs
-              mountPath: /tmp/webhook-certs
       volumes:
         - name: webhook-certs
           emptyDir: {}
 ```
+
+> **Kubernetes < 1.29:** If you need to support older clusters, place `webhook-injector` in `containers` instead of `initContainers` and remove the `restartPolicy` field. The tradeoff is that the webhook server may start before certificates are available, so its `initialDelaySeconds` must account for certificate generation time.
 
 Create a ConfigMap with webhook definitions (standard Kubernetes webhook YAML):
 
