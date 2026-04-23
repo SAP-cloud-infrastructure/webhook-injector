@@ -59,8 +59,8 @@ func init() {
 	flag.BoolVar(&enableLeaderElection, "enable-leader-election", true, "Enable leader election for HA")
 	flag.StringVar(&leaderElectionID, "leader-election-id", "webhook-injector-leader", "Leader election lease name")
 	flag.DurationVar(&syncPeriod, "sync-period", 5*time.Minute, "Controller reconciliation sync period")
-	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "Metrics server bind address")
-	flag.StringVar(&healthAddr, "health-addr", ":8081", "Health probe server bind address")
+	flag.StringVar(&metricsAddr, "metrics-addr", ":8082", "Metrics server bind address")
+	flag.StringVar(&healthAddr, "health-addr", ":8083", "Health probe server bind address")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	// Initialize scheme
@@ -228,8 +228,13 @@ func main() {
 }
 
 func detectNamespace() (string, error) {
-	// Priority order: NAMESPACE env var → serviceaccount file → fail
+	// Priority order: NAMESPACE env var → POD_NAMESPACE env var (downward API) → serviceaccount file → fail
 	if ns := os.Getenv("NAMESPACE"); ns != "" {
+		return ns, nil
+	}
+
+	// POD_NAMESPACE is injected via the downward API fieldRef: metadata.namespace
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
 		return ns, nil
 	}
 
@@ -239,7 +244,7 @@ func detectNamespace() (string, error) {
 		return string(data), nil
 	}
 
-	return "", errors.New("namespace not specified via --namespace flag, NAMESPACE env var not set, and serviceaccount namespace file not found")
+	return "", errors.New("namespace not specified via --namespace flag, NAMESPACE or POD_NAMESPACE env var not set, and serviceaccount namespace file not found")
 }
 
 // getTargetClient creates a client for the target cluster

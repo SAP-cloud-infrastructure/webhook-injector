@@ -122,7 +122,6 @@ spec:
           image: webhook-injector:latest
           args:
             - --webhook-config-name=webhook-config
-            - --namespace=$(POD_NAMESPACE)
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -177,7 +176,7 @@ The same certificate serves as both server cert and CA bundle. Your webhook serv
 
 ## Configuration
 
-Configure via command-line flags. Only `--webhook-config-name` is required; namespace auto-detects from flag → NAMESPACE env var → serviceaccount file.
+Configure via command-line flags. Only `--webhook-config-name` is required; namespace auto-detects from flag → `NAMESPACE` env var → `POD_NAMESPACE` env var (downward API `fieldRef: metadata.namespace`) → serviceaccount file.
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -191,8 +190,8 @@ Configure via command-line flags. Only `--webhook-config-name` is required; name
 | `--enable-leader-election` | Enable HA mode | `true` |
 | `--leader-election-id` | Lease name | `webhook-injector-leader` |
 | `--sync-period` | Reconciliation interval | `5m` |
-| `--metrics-addr` | Metrics bind address | `:8080` |
-| `--health-addr` | Health probe address | `:8081` |
+| `--metrics-addr` | Metrics bind address | `:8082` |
+| `--health-addr` | Health probe address | `:8083` |
 | `--log-level` | Log level (debug/info/error) | `info` |
 
 **Example:**
