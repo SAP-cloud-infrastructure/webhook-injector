@@ -7,7 +7,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
@@ -215,7 +217,7 @@ func main() {
 		setupLog.Error(err, "Unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", certReadyCheck(certDir)); err != nil {
 		setupLog.Error(err, "Unable to set up ready check")
 		os.Exit(1)
 	}
@@ -224,6 +226,17 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Problem running manager")
 		os.Exit(1)
+	}
+}
+
+func certReadyCheck(dir string) healthz.Checker {
+	return func(_ *http.Request) error {
+		for _, name := range []string{"tls.crt", "tls.key"} {
+			if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+				return fmt.Errorf("certificate file %s not ready: %w", name, err)
+			}
+		}
+		return nil
 	}
 }
 
