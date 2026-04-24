@@ -29,6 +29,30 @@ spec:
                   matchLabels:
                     app: webhook-server
                 topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: webhook-injector
+          image: webhook-injector  # Replaced by ko
+          restartPolicy: Always
+          args:
+            - --webhook-config-name=webhook-config
+            - --namespace=default
+            - --cert-validity=1h
+            - --cert-rotation-threshold=0.5
+            - --target-kubeconfig=/etc/target-kubeconfig/kubeconfig
+            - --enable-leader-election=true
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: 8083
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/webhook-certs
+            - name: target-kubeconfig
+              mountPath: /etc/target-kubeconfig
+              readOnly: true
       containers:
         - name: webhook-server
           image: test-webhook-server  # Replaced by ko
@@ -48,22 +72,6 @@ spec:
           volumeMounts:
             - name: webhook-certs
               mountPath: /tmp/webhook-certs
-              readOnly: true
-
-        - name: webhook-injector
-          image: webhook-injector  # Replaced by ko
-          args:
-            - --webhook-config-name=webhook-config
-            - --namespace=default
-            - --cert-validity=1h
-            - --cert-rotation-threshold=0.5
-            - --target-kubeconfig=/etc/target-kubeconfig/kubeconfig
-            - --enable-leader-election=true
-          volumeMounts:
-            - name: webhook-certs
-              mountPath: /tmp/webhook-certs
-            - name: target-kubeconfig
-              mountPath: /etc/target-kubeconfig
               readOnly: true
 
       volumes:

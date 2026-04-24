@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-webhook-injector is a Kubernetes controller that runs as a **sidecar** to webhook servers, managing webhook configurations and TLS certificates. The key innovation is enabling webhook servers to serve webhooks for remote clusters (clusters they don't run in) while providing a language-agnostic solution that works with any webhook server that can watch and reload certificate files.
+webhook-injector is a Kubernetes controller that runs as a **native sidecar** (Kubernetes 1.29+) to webhook servers, managing webhook configurations and TLS certificates. The key innovation is enabling webhook servers to serve webhooks for remote clusters (clusters they don't run in) while providing a language-agnostic solution that works with any webhook server that can watch and reload certificate files.
 
 **Webhook Server Requirement**: The webhook server must watch certificate files (`tls.crt`, `tls.key`) and reload them when changed. Controller-runtime webhook servers (v0.17+) provide this automatically via an internal `certwatcher`. Other frameworks need custom implementation using inotify/fsnotify or periodic polling.
 
@@ -93,11 +93,14 @@ The application contains two independent controllers with different leader elect
 - WebhookReconciler must run on leader only to prevent multiple replicas from generating conflicting certificates or racing to update target cluster
 - CertificateReloader must run on all replicas so each webhook server pod gets certificates on its local filesystem
 
-**Sidecar pattern:**
-- webhook-injector runs as sidecar container alongside webhook server
+**Native sidecar pattern (Kubernetes 1.29+):**
+- webhook-injector is deployed as a native sidecar: an init container with `restartPolicy: Always`
+- Starts before the webhook server, ensuring certificates are available at startup
+- Terminates after the webhook server for clean shutdown ordering
 - Shares emptyDir volume for certificate files
 - Works with any webhook server that can watch certificate files and reload on changes
 - Controller-runtime v0.17+ webhook servers handle this automatically via fsnotify
+- For clusters < 1.29, can fall back to a regular sidecar container (no startup ordering guarantee)
 
 **ConfigMap-driven:**
 - Users provide full `MutatingWebhookConfiguration` or `ValidatingWebhookConfiguration` YAML in a ConfigMap

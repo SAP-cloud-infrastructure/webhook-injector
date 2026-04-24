@@ -57,6 +57,49 @@ spec:
                   matchLabels:
                     app: webhook-server
                 topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: webhook-injector
+          image: webhook-injector:v1.0.0
+          restartPolicy: Always
+          args:
+            - --webhook-config-name=webhook-config
+          ports:
+            - name: metrics
+              containerPort: 8082
+            - name: health
+              containerPort: 8083
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: 8083
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8083
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/webhook-certs
       containers:
         - name: webhook-server
           image: my-webhook-server:v1.0.0
@@ -82,7 +125,7 @@ spec:
               path: /healthz
               port: 9443
               scheme: HTTPS
-            initialDelaySeconds: 30
+            initialDelaySeconds: 15
             periodSeconds: 20
             timeoutSeconds: 5
             failureThreshold: 3
@@ -91,51 +134,6 @@ spec:
               path: /readyz
               port: 9443
               scheme: HTTPS
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
-          volumeMounts:
-            - name: webhook-certs
-              mountPath: /tmp/webhook-certs
-              readOnly: true
-
-        - name: webhook-injector
-          image: webhook-injector:v1.0.0
-          args:
-            - --webhook-config-name=webhook-config
-          ports:
-            - name: metrics
-              containerPort: 8082
-            - name: health
-              containerPort: 8083
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            runAsNonRoot: true
-            runAsUser: 65534
-            capabilities:
-              drop:
-                - ALL
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 200m
-              memory: 256Mi
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: 8083
-            initialDelaySeconds: 15
-            periodSeconds: 20
-            timeoutSeconds: 5
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: 8083
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
@@ -143,6 +141,7 @@ spec:
           volumeMounts:
             - name: webhook-certs
               mountPath: /tmp/webhook-certs
+              readOnly: true
       volumes:
         - name: webhook-certs
           emptyDir: {}
