@@ -197,7 +197,7 @@ test/e2e/                       E2E integration tests with kind clusters
 All configuration via command-line flags. Run `webhook-injector --help` for full list:
 - `--webhook-config-name` (required) - ConfigMap with webhook definitions
 - `--namespace` - Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from env vars or pod's serviceaccount if not set
-  - Priority order: explicit flag → `NAMESPACE` env var → `POD_NAMESPACE` env var (downward API `fieldRef: metadata.namespace`) → serviceaccount file → **fail**
+  - Priority order: explicit flag → `NAMESPACE` env var → serviceaccount file → **fail**
   - The program will exit with an error if namespace cannot be determined
 - `--cert-secret-name` - Where to store certificates
 - `--cert-dir` - Where to write certificate files

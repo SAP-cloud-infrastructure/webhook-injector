@@ -122,11 +122,6 @@ spec:
           image: webhook-injector:latest
           args:
             - --webhook-config-name=webhook-config
-          env:
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
           volumeMounts:
             - name: webhook-certs
               mountPath: /tmp/webhook-certs
@@ -176,7 +171,7 @@ The same certificate serves as both server cert and CA bundle. Your webhook serv
 
 ## Configuration
 
-Configure via command-line flags. Only `--webhook-config-name` is required; namespace auto-detects from flag → `NAMESPACE` env var → `POD_NAMESPACE` env var (downward API `fieldRef: metadata.namespace`) → serviceaccount file.
+Configure via command-line flags. Only `--webhook-config-name` is required; namespace auto-detects from flag → `NAMESPACE` env var → serviceaccount file.
 
 | Flag | Description | Default |
 |------|-------------|---------|

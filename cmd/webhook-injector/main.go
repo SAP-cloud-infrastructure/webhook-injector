@@ -228,13 +228,8 @@ func main() {
 }
 
 func detectNamespace() (string, error) {
-	// Priority order: NAMESPACE env var → POD_NAMESPACE env var (downward API) → serviceaccount file → fail
+	// Priority order: NAMESPACE env var → serviceaccount file → fail
 	if ns := os.Getenv("NAMESPACE"); ns != "" {
-		return ns, nil
-	}
-
-	// POD_NAMESPACE is injected via the downward API fieldRef: metadata.namespace
-	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
 		return ns, nil
 	}
 
@@ -244,7 +239,7 @@ func detectNamespace() (string, error) {
 		return string(data), nil
 	}
 
-	return "", errors.New("namespace not specified via --namespace flag, NAMESPACE or POD_NAMESPACE env var not set, and serviceaccount namespace file not found")
+	return "", errors.New("namespace not specified via --namespace flag, NAMESPACE env var not set, and serviceaccount namespace file not found")
 }
 
 // getTargetClient creates a client for the target cluster
