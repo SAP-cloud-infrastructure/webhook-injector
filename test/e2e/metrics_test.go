@@ -35,9 +35,7 @@ func scrapeMetrics(url string) (map[string]*dto.MetricFamily, error) {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 
-	// prometheus/common v0.65+ requires a validation scheme to be set before parsing.
-	model.NameValidationScheme = model.LegacyValidation
-	var parser expfmt.TextParser
+	parser := expfmt.NewTextParser(model.LegacyValidation)
 	families, err := parser.TextToMetricFamilies(nopCloser(body))
 	if err != nil {
 		return nil, fmt.Errorf("parse metrics: %w", err)
