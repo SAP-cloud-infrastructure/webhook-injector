@@ -16,6 +16,8 @@ import (
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"strings"
 )
 
 // scrapeMetrics fetches and parses metrics from the given URL.
@@ -130,6 +132,23 @@ func startPortForward(t *testing.T, resource, localPort, remotePort string) (met
 	}
 }
 
+// leaderPodName returns the name of the pod currently holding the leader election
+// lease. It retries for up to 30s to allow election to complete after startup.
+func leaderPodName(t *testing.T, ctx context.Context, client kubernetes.Interface) string {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		lease, err := client.CoordinationV1().Leases("default").Get(ctx, "webhook-injector-leader", metav1.GetOptions{})
+		if err == nil && lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "" {
+			// HolderIdentity is "<pod-name>_<uuid>" — extract the pod name.
+			return strings.SplitN(*lease.Spec.HolderIdentity, "_", 2)[0]
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatal("Timed out waiting for leader election lease to be held")
+	return ""
+}
+
 // TestMetrics verifies that the webhook-injector Prometheus metrics are
 // correctly populated after deployment and after a forced certificate rotation.
 func TestMetrics(t *testing.T) {
@@ -158,14 +177,10 @@ func TestMetrics(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Pick the first ready pod to port-forward against.
-	pods, err := hostingClient.CoreV1().Pods("default").List(ctx, metav1.ListOptions{
-		LabelSelector: "app=webhook-server",
-	})
-	if err != nil || len(pods.Items) == 0 {
-		t.Fatalf("Failed to list webhook-server pods: %v", err)
-	}
-	podName := pods.Items[0].Name
+	// Port-forward to the leader pod so that rotation metrics (which are only
+	// incremented by the leader's WebhookReconciler) are visible.
+	podName := leaderPodName(t, ctx, hostingClient)
+	logWithTimestamp(t, "Leader pod: %s", podName)
 
 	metricsURL, stopPF := startPortForward(t, "pod/"+podName, "19082", "8082")
 	defer stopPF()
