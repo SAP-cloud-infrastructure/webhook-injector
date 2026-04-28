@@ -27,13 +27,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/webhooks"
 )
+
+// rotationReason identifies why a certificate was rotated.
+type rotationReason string
 
 const (
 	// ForceRotationAnnotation is the annotation key used to trigger certificate rotation.
 	// When set to "true" on the certificate Secret, it forces immediate rotation.
 	ForceRotationAnnotation = "webhook-injector.sap.com/force-rotation"
+
+	rotationReasonInitial     rotationReason = "initial"
+	rotationReasonForced      rotationReason = "force_rotation"
+	rotationReasonExpired     rotationReason = "expired"
+	rotationReasonSANMismatch rotationReason = "san_mismatch"
 )
 
 // WebhookReconciler reconciles webhook ConfigMap and manages certificates
@@ -80,16 +89,17 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Check if certificates need generation/rotation
-	secret, needsGeneration, err := r.checkCertificates(ctx, services)
+	secret, reason, err := r.checkCertificates(ctx, services)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to check certificates: %w", err)
 	}
 
-	if needsGeneration {
-		logger.Info("Generating certificates", "services", len(services))
+	if reason != "" {
+		logger.Info("Generating certificates", "services", len(services), "reason", reason)
 		if err := r.generateAndStoreCertificates(ctx, services); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to generate certificates: %w", err)
 		}
+		metrics.CertificateRotationsTotal.WithLabelValues(string(reason)).Inc()
 
 		// Re-fetch the secret after generation
 		secret = &corev1.Secret{}
@@ -101,6 +111,9 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{}, fmt.Errorf("failed to get generated secret: %w", err)
 		}
 	}
+
+	// Update expiry gauge from current certificate
+	r.updateCertExpiryGauge(secret)
 
 	// Inject CA bundle into webhook configurations (use tls.crt as it's self-signed)
 	caCert := secret.Data["tls.crt"]
@@ -124,8 +137,9 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
-// checkCertificates checks if certificates exist and are valid
-func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []certificates.ServiceReference) (*corev1.Secret, bool, error) {
+// checkCertificates checks if certificates exist and are valid.
+// Returns the rotation reason (empty string means no rotation needed).
+func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []certificates.ServiceReference) (*corev1.Secret, rotationReason, error) {
 	secretKey := types.NamespacedName{
 		Name:      r.CertSecretName,
 		Namespace: r.getNamespace(r.Namespace),
@@ -135,45 +149,46 @@ func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []ce
 	err := r.Client.Get(ctx, secretKey, secret)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, true, nil // Needs generation
+			return nil, rotationReasonInitial, nil
 		}
-		return nil, false, err
+		return nil, "", err
 	}
 
 	// Check for force-rotation annotation
 	if secret.Annotations != nil {
 		if forceRotation, exists := secret.Annotations[ForceRotationAnnotation]; exists && forceRotation == "true" {
-			return secret, true, nil // Force rotation
+			return secret, rotationReasonForced, nil
 		}
 	}
 
 	// Check if certificate needs rotation based on time/SANs
-	needsRotation, err := r.needsCertificateRotation(secret, services)
+	reason, err := r.needsCertificateRotation(secret, services)
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to check certificate rotation: %w", err)
+		return nil, "", fmt.Errorf("failed to check certificate rotation: %w", err)
 	}
 
-	return secret, needsRotation, nil
+	return secret, reason, nil
 }
 
-// needsCertificateRotation checks if certificate needs rotation based on expiry and SANs
-func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, services []certificates.ServiceReference) (bool, error) {
+// needsCertificateRotation checks if certificate needs rotation based on expiry and SANs.
+// Returns the rotation reason or empty string if no rotation needed.
+func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, services []certificates.ServiceReference) (rotationReason, error) {
 	// Get server certificate from secret
 	certPEM, ok := secret.Data["tls.crt"]
 	if !ok {
-		return true, errors.New("tls.crt not found in secret")
+		return rotationReasonExpired, errors.New("tls.crt not found in secret")
 	}
 
 	// Parse PEM block
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		return true, errors.New("failed to decode certificate PEM")
+		return rotationReasonExpired, errors.New("failed to decode certificate PEM")
 	}
 
 	// Parse certificate
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return true, fmt.Errorf("failed to parse certificate: %w", err)
+		return rotationReasonExpired, fmt.Errorf("failed to parse certificate: %w", err)
 	}
 
 	// Check expiry - rotate if past threshold
@@ -182,8 +197,7 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 	remainingValidity := cert.NotAfter.Sub(now)
 
 	if remainingValidity <= 0 {
-		// Certificate expired
-		return true, nil
+		return rotationReasonExpired, nil
 	}
 
 	// Calculate remaining percentage
@@ -191,7 +205,7 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 
 	// Rotate if below threshold
 	if remainingPercent < r.CertRotationThreshold {
-		return true, nil
+		return rotationReasonExpired, nil
 	}
 
 	// Check if SANs match current service references
@@ -208,30 +222,30 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 	// Check if all expected DNS SANs are present
 	for san := range expectedDNS {
 		if !currentDNS[san] {
-			return true, nil
+			return rotationReasonSANMismatch, nil
 		}
 	}
 	// Check for extra DNS SANs
 	for san := range currentDNS {
 		if !expectedDNS[san] {
-			return true, nil
+			return rotationReasonSANMismatch, nil
 		}
 	}
 
 	// Check if all expected IP SANs are present
 	for ip := range expectedIPs {
 		if !currentIPs[ip] {
-			return true, nil
+			return rotationReasonSANMismatch, nil
 		}
 	}
 	// Check for extra IP SANs
 	for ip := range currentIPs {
 		if !expectedIPs[ip] {
-			return true, nil
+			return rotationReasonSANMismatch, nil
 		}
 	}
 
-	return false, nil
+	return "", nil
 }
 
 // buildExpectedSANs builds the expected sets of DNS SANs and IP SANs from service references
@@ -393,6 +407,23 @@ func (r *WebhookReconciler) applyWebhookConfigurations(ctx context.Context, conf
 	}
 
 	return nil
+}
+
+// updateCertExpiryGauge sets the certificate expiry metric from the secret's TLS cert.
+func (r *WebhookReconciler) updateCertExpiryGauge(secret *corev1.Secret) {
+	certPEM, ok := secret.Data["tls.crt"]
+	if !ok {
+		return
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return
+	}
+	metrics.CertificateExpiryTime.Set(float64(cert.NotAfter.Unix()))
 }
 
 // getNamespace returns the namespace, using pod namespace as fallback

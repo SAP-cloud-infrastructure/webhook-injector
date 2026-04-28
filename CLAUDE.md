@@ -124,6 +124,9 @@ pkg/controllers/                Two independent controllers
   reconciler.go                 WebhookReconciler (leader-only, manages certificates and target cluster)
   reloader.go                   CertificateReloader (all replicas, syncs certs to filesystem)
 
+pkg/metrics/                    Prometheus metric definitions
+  metrics.go                    CertificateRotationsTotal, CertificateExpiryTime, CertFilesWrittenTotal
+
 pkg/webhooks/                   Webhook configuration parsing
   parser.go                     ParseWebhookConfigurations(), ExtractServiceReferences()
   injector.go                   InjectCABundle()
