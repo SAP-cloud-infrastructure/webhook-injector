@@ -36,7 +36,8 @@ const (
 	// When set to "true" on the certificate Secret, it forces immediate rotation.
 	ForceRotationAnnotation = "webhook-injector.sap.com/force-rotation"
 
-	rotationReasonExpired = "expired"
+	rotationReasonExpired     = "expired"
+	rotationReasonSANMismatch = "san_mismatch"
 )
 
 // WebhookReconciler reconciles webhook ConfigMap and manages certificates
@@ -165,7 +166,7 @@ func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []ce
 }
 
 // needsCertificateRotation checks if certificate needs rotation based on expiry and SANs.
-// Returns the rotation reason ("expired", "san_mismatch") or empty string if no rotation needed.
+// Returns the rotation reason ("expired", rotationReasonSANMismatch) or empty string if no rotation needed.
 func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, services []certificates.ServiceReference) (string, error) {
 	// Get server certificate from secret
 	certPEM, ok := secret.Data["tls.crt"]
@@ -216,26 +217,26 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 	// Check if all expected DNS SANs are present
 	for san := range expectedDNS {
 		if !currentDNS[san] {
-			return "san_mismatch", nil
+			return rotationReasonSANMismatch, nil
 		}
 	}
 	// Check for extra DNS SANs
 	for san := range currentDNS {
 		if !expectedDNS[san] {
-			return "san_mismatch", nil
+			return rotationReasonSANMismatch, nil
 		}
 	}
 
 	// Check if all expected IP SANs are present
 	for ip := range expectedIPs {
 		if !currentIPs[ip] {
-			return "san_mismatch", nil
+			return rotationReasonSANMismatch, nil
 		}
 	}
 	// Check for extra IP SANs
 	for ip := range currentIPs {
 		if !expectedIPs[ip] {
-			return "san_mismatch", nil
+			return rotationReasonSANMismatch, nil
 		}
 	}
 
