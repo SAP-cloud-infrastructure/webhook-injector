@@ -89,17 +89,17 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Check if certificates need generation/rotation
-	secret, rotationReason, err := r.checkCertificates(ctx, services)
+	secret, reason, err := r.checkCertificates(ctx, services)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to check certificates: %w", err)
 	}
 
-	if rotationReason != "" {
-		logger.Info("Generating certificates", "services", len(services), "reason", rotationReason)
+	if reason != "" {
+		logger.Info("Generating certificates", "services", len(services), "reason", reason)
 		if err := r.generateAndStoreCertificates(ctx, services); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to generate certificates: %w", err)
 		}
-		metrics.CertificateRotationsTotal.WithLabelValues(string(rotationReason)).Inc()
+		metrics.CertificateRotationsTotal.WithLabelValues(string(reason)).Inc()
 
 		// Re-fetch the secret after generation
 		secret = &corev1.Secret{}
@@ -162,12 +162,12 @@ func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []ce
 	}
 
 	// Check if certificate needs rotation based on time/SANs
-	rotationReason, err := r.needsCertificateRotation(secret, services)
+	reason, err := r.needsCertificateRotation(secret, services)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to check certificate rotation: %w", err)
 	}
 
-	return secret, rotationReason, nil
+	return secret, reason, nil
 }
 
 // needsCertificateRotation checks if certificate needs rotation based on expiry and SANs.
