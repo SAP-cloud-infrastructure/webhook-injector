@@ -287,13 +287,13 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) 
 	time.Sleep(900 * time.Millisecond)
 
 	// Now check - should need rotation (10% remaining < 80% threshold)
-	_, needsRotation, err := reconciler.checkCertificates(context.Background(), services)
+	_, rotationReason, err := reconciler.checkCertificates(context.Background(), services)
 	if err != nil {
 		t.Fatalf("checkCertificates failed: %v", err)
 	}
 
-	if !needsRotation {
-		t.Error("Expected needsRotation=true for certificate with <20% validity remaining")
+	if rotationReason == "" {
+		t.Error("Expected rotation reason for certificate with <20% validity remaining")
 	}
 }
 
@@ -341,13 +341,13 @@ func TestWebhookReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) 
 	}
 
 	// Check certificates - should NOT need rotation
-	_, needsRotation, err := reconciler.checkCertificates(context.Background(), services)
+	_, rotationReason, err := reconciler.checkCertificates(context.Background(), services)
 	if err != nil {
 		t.Fatalf("checkCertificates failed: %v", err)
 	}
 
-	if needsRotation {
-		t.Error("Expected needsRotation=false for fresh certificate")
+	if rotationReason != "" {
+		t.Errorf("Expected no rotation for fresh certificate, got reason %q", rotationReason)
 	}
 }
 
@@ -401,13 +401,13 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testin
 	}
 
 	// Should need rotation due to SAN mismatch
-	_, needsRotation, err := reconciler.checkCertificates(context.Background(), newServices)
+	_, rotationReason, err := reconciler.checkCertificates(context.Background(), newServices)
 	if err != nil {
 		t.Fatalf("checkCertificates failed: %v", err)
 	}
 
-	if !needsRotation {
-		t.Error("Expected needsRotation=true when service references change")
+	if rotationReason != "san_mismatch" {
+		t.Errorf("Expected san_mismatch rotation reason, got %q", rotationReason)
 	}
 }
 
@@ -459,13 +459,13 @@ func TestWebhookReconciler_CheckCertificates_ForceRotation_Annotation(t *testing
 	}
 
 	// Check certificates - should need rotation due to annotation
-	_, needsRotation, err := reconciler.checkCertificates(context.Background(), services)
+	_, rotationReason, err := reconciler.checkCertificates(context.Background(), services)
 	if err != nil {
 		t.Fatalf("checkCertificates failed: %v", err)
 	}
 
-	if !needsRotation {
-		t.Error("Expected needsRotation=true when force-rotation annotation is present")
+	if rotationReason != "force_rotation" {
+		t.Errorf("Expected force_rotation reason when annotation is present, got %q", rotationReason)
 	}
 }
 

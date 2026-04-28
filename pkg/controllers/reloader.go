@@ -17,6 +17,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
 )
 
 // CertificateReloader watches the certificate Secret and writes certs to disk
@@ -95,6 +97,7 @@ func (r *CertificateReloader) writeCertFile(fileName string, data []byte) error 
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
+	metrics.CertFilesWrittenTotal.Inc()
 	return nil
 }
 
