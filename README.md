@@ -205,6 +205,18 @@ Configure via command-line flags. Only `--webhook-config-name` is required; name
 webhook-injector --webhook-config-name=my-config
 ```
 
+## Metrics
+
+webhook-injector exposes Prometheus metrics at `<metrics-addr>/metrics` (default `:8082`).
+
+| Metric | Type | Description |
+|---|---|---|
+| `webhook_injector_certificate_rotations_total` | Counter | Certificate rotations by `reason` label: `initial`, `expired`, `san_mismatch`, `force_rotation` |
+| `webhook_injector_certificate_expiry_time_seconds` | Gauge | Unix timestamp when the current TLS certificate expires |
+| `webhook_injector_cert_files_written_total` | Counter | Times certificate files were written to disk by the reloader |
+
+Standard controller-runtime metrics (reconcile latency, queue depth, etc.) are also included.
+
 ## Testing
 
 ```bash
