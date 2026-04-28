@@ -19,7 +19,7 @@ import (
 
 // scrapeMetrics fetches and parses metrics from the given URL.
 func scrapeMetrics(url string) (map[string]*dto.MetricFamily, error) {
-	resp, err := http.Get(url) //nolint:noctx // test helper, no context needed
+	resp, err := http.Get(url) //nolint:noctx,gosec // test helper, URL is constructed from a known local port
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", url, err)
 	}
@@ -45,7 +45,10 @@ func scrapeMetrics(url string) (map[string]*dto.MetricFamily, error) {
 	return families, nil
 }
 
-type byteReader struct{ data []byte; pos int }
+type byteReader struct {
+	data []byte
+	pos  int
+}
 
 func (r *byteReader) Read(p []byte) (int, error) {
 	if r.pos >= len(r.data) {
@@ -116,7 +119,7 @@ func startPortForward(t *testing.T, resource, localPort, remotePort string) (met
 	// Wait until reachable (up to 30s)
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url) //nolint:noctx
+		resp, err := http.Get(url) //nolint:noctx,gosec // poll loop, URL is a known localhost port-forward address
 		if err == nil {
 			resp.Body.Close()
 			break
@@ -125,7 +128,7 @@ func startPortForward(t *testing.T, resource, localPort, remotePort string) (met
 	}
 
 	return url, func() {
-		_ = cmd.Process.Kill()
+		_ = cmd.Process.Kill() //nolint:errcheck // best-effort cleanup of port-forward process
 	}
 }
 
@@ -185,11 +188,12 @@ func TestMetrics(t *testing.T) {
 
 	// Expiry gauge must be set to a future Unix timestamp
 	expiryTime := gaugeValue(baseline, "webhook_injector_certificate_expiry_time_seconds")
-	if expiryTime == 0 {
+	switch {
+	case expiryTime == 0:
 		t.Error("Expected webhook_injector_certificate_expiry_time_seconds to be set")
-	} else if expiryTime < float64(time.Now().Unix()) {
+	case expiryTime < float64(time.Now().Unix()):
 		t.Errorf("Certificate expiry time %.0f is in the past", expiryTime)
-	} else {
+	default:
 		logWithTimestamp(t, "Certificate expires at %s",
 			time.Unix(int64(expiryTime), 0).UTC().Format(time.RFC3339))
 	}

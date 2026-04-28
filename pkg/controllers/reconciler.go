@@ -35,6 +35,8 @@ const (
 	// ForceRotationAnnotation is the annotation key used to trigger certificate rotation.
 	// When set to "true" on the certificate Secret, it forces immediate rotation.
 	ForceRotationAnnotation = "webhook-injector.sap.com/force-rotation"
+
+	rotationReasonExpired = "expired"
 )
 
 // WebhookReconciler reconciles webhook ConfigMap and manages certificates
@@ -168,19 +170,19 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 	// Get server certificate from secret
 	certPEM, ok := secret.Data["tls.crt"]
 	if !ok {
-		return "expired", errors.New("tls.crt not found in secret")
+		return rotationReasonExpired, errors.New("tls.crt not found in secret")
 	}
 
 	// Parse PEM block
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		return "expired", errors.New("failed to decode certificate PEM")
+		return rotationReasonExpired, errors.New("failed to decode certificate PEM")
 	}
 
 	// Parse certificate
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return "expired", fmt.Errorf("failed to parse certificate: %w", err)
+		return rotationReasonExpired, fmt.Errorf("failed to parse certificate: %w", err)
 	}
 
 	// Check expiry - rotate if past threshold
@@ -189,7 +191,7 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 	remainingValidity := cert.NotAfter.Sub(now)
 
 	if remainingValidity <= 0 {
-		return "expired", nil
+		return rotationReasonExpired, nil
 	}
 
 	// Calculate remaining percentage
@@ -197,7 +199,7 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 
 	// Rotate if below threshold
 	if remainingPercent < r.CertRotationThreshold {
-		return "expired", nil
+		return rotationReasonExpired, nil
 	}
 
 	// Check if SANs match current service references
