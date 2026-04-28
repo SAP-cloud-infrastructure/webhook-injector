@@ -31,13 +31,18 @@ import (
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/webhooks"
 )
 
+// rotationReason identifies why a certificate was rotated.
+type rotationReason string
+
 const (
 	// ForceRotationAnnotation is the annotation key used to trigger certificate rotation.
 	// When set to "true" on the certificate Secret, it forces immediate rotation.
 	ForceRotationAnnotation = "webhook-injector.sap.com/force-rotation"
 
-	rotationReasonExpired     = "expired"
-	rotationReasonSANMismatch = "san_mismatch"
+	rotationReasonInitial     rotationReason = "initial"
+	rotationReasonForced      rotationReason = "force_rotation"
+	rotationReasonExpired     rotationReason = "expired"
+	rotationReasonSANMismatch rotationReason = "san_mismatch"
 )
 
 // WebhookReconciler reconciles webhook ConfigMap and manages certificates
@@ -94,7 +99,7 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err := r.generateAndStoreCertificates(ctx, services); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to generate certificates: %w", err)
 		}
-		metrics.CertificateRotationsTotal.WithLabelValues(rotationReason).Inc()
+		metrics.CertificateRotationsTotal.WithLabelValues(string(rotationReason)).Inc()
 
 		// Re-fetch the secret after generation
 		secret = &corev1.Secret{}
@@ -134,7 +139,7 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 // checkCertificates checks if certificates exist and are valid.
 // Returns the rotation reason (empty string means no rotation needed).
-func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []certificates.ServiceReference) (*corev1.Secret, string, error) {
+func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []certificates.ServiceReference) (*corev1.Secret, rotationReason, error) {
 	secretKey := types.NamespacedName{
 		Name:      r.CertSecretName,
 		Namespace: r.getNamespace(r.Namespace),
@@ -144,7 +149,7 @@ func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []ce
 	err := r.Client.Get(ctx, secretKey, secret)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, "initial", nil
+			return nil, rotationReasonInitial, nil
 		}
 		return nil, "", err
 	}
@@ -152,7 +157,7 @@ func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []ce
 	// Check for force-rotation annotation
 	if secret.Annotations != nil {
 		if forceRotation, exists := secret.Annotations[ForceRotationAnnotation]; exists && forceRotation == "true" {
-			return secret, "force_rotation", nil
+			return secret, rotationReasonForced, nil
 		}
 	}
 
@@ -166,8 +171,8 @@ func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []ce
 }
 
 // needsCertificateRotation checks if certificate needs rotation based on expiry and SANs.
-// Returns the rotation reason ("expired", rotationReasonSANMismatch) or empty string if no rotation needed.
-func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, services []certificates.ServiceReference) (string, error) {
+// Returns the rotation reason or empty string if no rotation needed.
+func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, services []certificates.ServiceReference) (rotationReason, error) {
 	// Get server certificate from secret
 	certPEM, ok := secret.Data["tls.crt"]
 	if !ok {
