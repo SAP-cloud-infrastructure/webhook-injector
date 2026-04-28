@@ -151,6 +151,7 @@ func TestGenerateSelfSignedCert_WithHostnames(t *testing.T) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
 		t.Fatal("Failed to decode certificate")
+		return
 	}
 
 	cert, err := x509.ParseCertificate(block.Bytes)
@@ -191,6 +192,7 @@ func TestGenerateSelfSignedCert_WithIPAddress(t *testing.T) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
 		t.Fatal("Failed to decode certificate")
+		return
 	}
 
 	cert, err := x509.ParseCertificate(block.Bytes)
@@ -234,6 +236,7 @@ func TestGenerateSelfSignedCert_MixedServiceAndHostname(t *testing.T) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
 		t.Fatal("Failed to decode certificate")
+		return
 	}
 
 	cert, err := x509.ParseCertificate(block.Bytes)

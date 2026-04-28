@@ -111,6 +111,7 @@ webhooks:
 	certBlock, _ := pem.Decode(secret.Data["tls.crt"])
 	if certBlock == nil {
 		t.Fatal("Failed to decode server certificate")
+		return
 	}
 	cert, err := x509.ParseCertificate(certBlock.Bytes)
 	if err != nil {
