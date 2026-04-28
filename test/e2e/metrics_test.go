@@ -14,6 +14,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -34,11 +35,10 @@ func scrapeMetrics(url string) (map[string]*dto.MetricFamily, error) {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 
+	// prometheus/common v0.65+ requires a validation scheme to be set before parsing.
+	model.NameValidationScheme = model.LegacyValidation
 	var parser expfmt.TextParser
-	families, err := parser.TextToMetricFamilies(
-		// expfmt.TextParser reads from an io.Reader — wrap the bytes
-		nopCloser(body),
-	)
+	families, err := parser.TextToMetricFamilies(nopCloser(body))
 	if err != nil {
 		return nil, fmt.Errorf("parse metrics: %w", err)
 	}
