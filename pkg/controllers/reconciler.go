@@ -43,6 +43,10 @@ const (
 	rotationReasonForced      rotationReason = "force_rotation"
 	rotationReasonExpired     rotationReason = "expired"
 	rotationReasonSANMismatch rotationReason = "san_mismatch"
+
+	tlsCrtKey        = "tls.crt"
+	tlsKeyKey        = "tls.key"
+	defaultNamespace = "default"
 )
 
 // WebhookReconciler reconciles webhook ConfigMap and manages certificates
@@ -116,7 +120,7 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	r.updateCertExpiryGauge(secret)
 
 	// Inject CA bundle into webhook configurations (use tls.crt as it's self-signed)
-	caCert := secret.Data["tls.crt"]
+	caCert := secret.Data[tlsCrtKey]
 	webhooks.InjectCABundle(configs, caCert)
 
 	// Apply webhook configurations to target cluster
@@ -174,7 +178,7 @@ func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []ce
 // Returns the rotation reason or empty string if no rotation needed.
 func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, services []certificates.ServiceReference) (rotationReason, error) {
 	// Get server certificate from secret
-	certPEM, ok := secret.Data["tls.crt"]
+	certPEM, ok := secret.Data[tlsCrtKey]
 	if !ok {
 		return rotationReasonExpired, errors.New("tls.crt not found in secret")
 	}
@@ -272,7 +276,7 @@ func buildExpectedSANs(services []certificates.ServiceReference) (dns, ips map[s
 // Returns the duration until the next check, or 0 if the certificate info can't be parsed.
 func (r *WebhookReconciler) calculateNextRotation(secret *corev1.Secret) time.Duration {
 	// Get server certificate from secret
-	certPEM, ok := secret.Data["tls.crt"]
+	certPEM, ok := secret.Data[tlsCrtKey]
 	if !ok {
 		return 0
 	}
@@ -293,8 +297,8 @@ func (r *WebhookReconciler) calculateNextRotation(secret *corev1.Secret) time.Du
 	now := time.Now()
 	totalValidity := cert.NotAfter.Sub(cert.NotBefore)
 
-	// Time when rotation should happen: NotBefore + (totalValidity * threshold)
-	rotationTime := cert.NotBefore.Add(time.Duration(float64(totalValidity) * r.CertRotationThreshold))
+	// Time when rotation should happen: when remaining validity drops below threshold
+	rotationTime := cert.NotBefore.Add(time.Duration(float64(totalValidity) * (1 - r.CertRotationThreshold)))
 
 	// Calculate duration until rotation time
 	untilRotation := rotationTime.Sub(now)
@@ -328,8 +332,8 @@ func (r *WebhookReconciler) generateAndStoreCertificates(ctx context.Context, se
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"tls.crt": certPEM,
-			"tls.key": keyPEM,
+			tlsCrtKey: certPEM,
+			tlsKeyKey: keyPEM,
 		},
 	}
 
@@ -411,7 +415,7 @@ func (r *WebhookReconciler) applyWebhookConfigurations(ctx context.Context, conf
 
 // updateCertExpiryGauge sets the certificate expiry metric from the secret's TLS cert.
 func (r *WebhookReconciler) updateCertExpiryGauge(secret *corev1.Secret) {
-	certPEM, ok := secret.Data["tls.crt"]
+	certPEM, ok := secret.Data[tlsCrtKey]
 	if !ok {
 		return
 	}
@@ -435,7 +439,7 @@ func (r *WebhookReconciler) getNamespace(namespace string) string {
 	if ns, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
 		return string(ns)
 	}
-	return "default"
+	return defaultNamespace
 }
 
 // SetupWithManager sets up the controller with the Manager

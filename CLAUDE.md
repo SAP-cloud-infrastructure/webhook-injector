@@ -138,7 +138,7 @@ test/e2e/                       E2E integration tests with kind clusters
 
 **Generation triggers:**
 1. ConfigMap changes (new webhook definitions)
-2. Time-based rotation: remaining validity < threshold × total validity (default: 80%)
+2. Time-based rotation: remaining validity < threshold × total validity (default: 20%)
 3. Config-based rotation: Service references or URLs change (new SANs required)
 4. Manual rotation: Force-rotation annotation on Secret (`webhook-injector.sap.com/force-rotation: "true"`)
 
@@ -207,7 +207,7 @@ All configuration via command-line flags. Run `webhook-injector --help` for full
   - The program will exit with an error if namespace cannot be determined
 - `--cert-secret-name` - Where to store certificates
 - `--cert-dir` - Where to write certificate files
-- `--cert-validity` - Certificate lifetime as duration (e.g., "720h", "30d", "1y")
+- `--cert-validity` - Certificate lifetime as duration (e.g., "2160h", "90d", "1y")
 - `--cert-rotation-threshold` - When to rotate (0-1)
 - `--target-kubeconfig` - Path to target cluster kubeconfig (optional, defaults to in-cluster)
 - `--enable-leader-election` - Enable HA with multiple replicas

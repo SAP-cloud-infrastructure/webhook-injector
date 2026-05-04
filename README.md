@@ -11,7 +11,7 @@ A Kubernetes controller that runs as a sidecar to webhook servers, managing webh
 ## Features
 
 - **Automatic Certificate Management**: Generates and rotates self-signed certificates with dynamic SANs
-- **Smart Rotation**: Time-based (80% validity threshold), config-based (SAN changes), or manual (annotation)
+- **Smart Rotation**: Time-based (20% remaining validity threshold), config-based (SAN changes), or manual (annotation)
 - **Remote Cluster Support**: Manage webhooks in clusters where the webhook server doesn't run
 - **Language Agnostic**: Works with any webhook server that can watch certificate files for changes
 - **High Availability**: Leader election with multi-replica support, zero-downtime rotation
@@ -170,7 +170,7 @@ data:
 ## Certificate Management
 
 **Rotation triggers:**
-1. Time-based: When remaining validity < threshold × total (default: 80% of 30 days)
+1. Time-based: When remaining validity < threshold × total (default: 20%, i.e., 18 days of a 90-day cert)
 2. Config-based: When webhook service references or URLs change (new SANs required)
 3. Manual: Annotate Secret with `webhook-injector.sap.com/force-rotation: "true"`
 
@@ -190,8 +190,8 @@ Configure via command-line flags. Only `--webhook-config-name` is required; name
 | `--namespace` | Namespace for ConfigMap/Secret/Lease | auto-detect |
 | `--cert-secret-name` | Secret for certificates | `webhook-injector-certs` |
 | `--cert-dir` | Certificate output directory | `/tmp/webhook-certs` |
-| `--cert-validity` | Certificate lifetime (e.g., "720h", "30d") | `720h` |
-| `--cert-rotation-threshold` | Rotation threshold (0-1) | `0.8` |
+| `--cert-validity` | Certificate lifetime (e.g., "2160h", "90d") | `2160h` |
+| `--cert-rotation-threshold` | Rotation threshold (0-1) | `0.2` |
 | `--target-kubeconfig` | Target cluster kubeconfig path | in-cluster |
 | `--enable-leader-election` | Enable HA mode | `true` |
 | `--leader-election-id` | Lease name | `webhook-injector-leader` |

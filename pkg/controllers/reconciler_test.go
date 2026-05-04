@@ -68,7 +68,7 @@ webhooks:
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.8,
+		CertRotationThreshold: 0.2,
 		Scheme:                s,
 	}
 
@@ -180,7 +180,7 @@ webhooks:
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.8,
+		CertRotationThreshold: 0.2,
 		Scheme:                s,
 	}
 
@@ -259,7 +259,7 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_Expiry(t *testing.T) 
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.8,
+		CertRotationThreshold: 0.2,
 		Scheme:                s,
 	}
 
@@ -337,7 +337,7 @@ func TestWebhookReconciler_CheckCertificates_NoRotation_ValidCert(t *testing.T) 
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.8,
+		CertRotationThreshold: 0.2,
 		Scheme:                s,
 	}
 
@@ -391,7 +391,7 @@ func TestWebhookReconciler_CheckCertificates_NeedsRotation_SANsChanged(t *testin
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.8,
+		CertRotationThreshold: 0.2,
 		Scheme:                s,
 	}
 
@@ -455,7 +455,7 @@ func TestWebhookReconciler_CheckCertificates_ForceRotation_Annotation(t *testing
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          720 * time.Hour,
-		CertRotationThreshold: 0.8,
+		CertRotationThreshold: 0.2,
 		Scheme:                s,
 	}
 
@@ -530,7 +530,7 @@ webhooks:
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          720 * time.Hour,
-		CertRotationThreshold: 0.8,
+		CertRotationThreshold: 0.2,
 		Scheme:                s,
 	}
 
@@ -578,16 +578,16 @@ func TestWebhookReconciler_CalculateNextRotation(t *testing.T) {
 			tolerance:         2 * time.Second,
 		},
 		{
-			name:              "30 day cert with 0.8 threshold",
+			name:              "30 day cert with 0.2 threshold",
 			certValidity:      30 * 24 * time.Hour,
-			rotationThreshold: 0.8,
+			rotationThreshold: 0.2,
 			expectedDuration:  24 * 24 * time.Hour, // 24 days
 			tolerance:         1 * time.Hour,
 		},
 		{
-			name:              "1 hour cert with 0.9 threshold",
+			name:              "1 hour cert with 0.1 threshold",
 			certValidity:      1 * time.Hour,
-			rotationThreshold: 0.9,
+			rotationThreshold: 0.1,
 			expectedDuration:  54 * time.Minute,
 			tolerance:         1 * time.Minute,
 		},
@@ -670,7 +670,7 @@ func TestWebhookReconciler_CalculateNextRotation_InvalidCert(t *testing.T) {
 	}
 
 	reconciler := &WebhookReconciler{
-		CertRotationThreshold: 0.8,
+		CertRotationThreshold: 0.2,
 	}
 
 	for _, tt := range tests {
@@ -695,7 +695,7 @@ func TestWebhookReconciler_CalculateNextRotation_AlreadyPastThreshold(t *testing
 		t.Fatalf("Failed to generate self-signed cert: %v", err)
 	}
 
-	// Wait for cert to be past rotation threshold (0.8 * 1 second = 0.8 seconds)
+	// Wait for cert to be past rotation threshold (remaining < 0.2 * 1 second)
 	time.Sleep(1 * time.Second)
 
 	secret := &corev1.Secret{
@@ -705,7 +705,7 @@ func TestWebhookReconciler_CalculateNextRotation_AlreadyPastThreshold(t *testing
 	}
 
 	reconciler := &WebhookReconciler{
-		CertRotationThreshold: 0.8,
+		CertRotationThreshold: 0.2,
 	}
 
 	nextRotation := reconciler.calculateNextRotation(secret)
@@ -728,7 +728,7 @@ func TestWebhookReconciler_RequeueAfterUsesCalculatedRotation(t *testing.T) {
 	// Generate certificate with known expiry
 	certValidity := 60 * time.Second
 	threshold := 0.5
-	expectedRequeue := time.Duration(float64(certValidity) * threshold)
+	expectedRequeue := time.Duration(float64(certValidity) * (1 - threshold))
 
 	certPEM, keyPEM, err := certificates.GenerateSelfSignedCert(
 		[]certificates.ServiceReference{

@@ -43,7 +43,7 @@ func (r *CertificateReloader) Reconcile(ctx context.Context, req ctrl.Request) (
 	logger.Info("Reloading certificates from Secret", "secret", req.NamespacedName)
 
 	// Validate Secret has required keys
-	requiredKeys := []string{"tls.crt", "tls.key"}
+	requiredKeys := []string{tlsCrtKey, tlsKeyKey}
 	for _, key := range requiredKeys {
 		if _, ok := secret.Data[key]; !ok {
 			return ctrl.Result{}, errors.New("secret missing required keys: tls.crt and tls.key")
@@ -52,8 +52,8 @@ func (r *CertificateReloader) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Write certificates to disk
 	certFiles := map[string]string{
-		"tls.crt": "tls.crt",
-		"tls.key": "tls.key",
+		tlsCrtKey: tlsCrtKey,
+		tlsKeyKey: tlsKeyKey,
 	}
 
 	for secretKey, fileName := range certFiles {
@@ -132,5 +132,5 @@ func (r *CertificateReloader) getNamespace() string {
 	if ns, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
 		return string(ns)
 	}
-	return "default"
+	return defaultNamespace
 }
