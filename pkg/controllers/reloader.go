@@ -52,8 +52,8 @@ func (r *CertificateReloader) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Write certificates to disk
 	certFiles := map[string]string{
-		tlsCrtKey: "tls.crt",
-		tlsKeyKey: "tls.key",
+		tlsCrtKey: tlsCrtKey,
+		tlsKeyKey: tlsKeyKey,
 	}
 
 	for secretKey, fileName := range certFiles {

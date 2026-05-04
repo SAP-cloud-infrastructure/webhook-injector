@@ -44,9 +44,9 @@ const (
 	rotationReasonExpired     rotationReason = "expired"
 	rotationReasonSANMismatch rotationReason = "san_mismatch"
 
-	tlsCrtKey         = "tls.crt"
-	tlsKeyKey         = "tls.key"
-	defaultNamespace  = "default"
+	tlsCrtKey        = "tls.crt"
+	tlsKeyKey        = "tls.key"
+	defaultNamespace = "default"
 )
 
 // WebhookReconciler reconciles webhook ConfigMap and manages certificates
