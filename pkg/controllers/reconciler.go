@@ -293,8 +293,8 @@ func (r *WebhookReconciler) calculateNextRotation(secret *corev1.Secret) time.Du
 	now := time.Now()
 	totalValidity := cert.NotAfter.Sub(cert.NotBefore)
 
-	// Time when rotation should happen: NotBefore + (totalValidity * threshold)
-	rotationTime := cert.NotBefore.Add(time.Duration(float64(totalValidity) * r.CertRotationThreshold))
+	// Time when rotation should happen: when remaining validity drops below threshold
+	rotationTime := cert.NotBefore.Add(time.Duration(float64(totalValidity) * (1 - r.CertRotationThreshold)))
 
 	// Calculate duration until rotation time
 	untilRotation := rotationTime.Sub(now)
