@@ -64,3 +64,45 @@ func TestInjectCABundle(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildURL(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		path string
+		want string
+	}{
+		{"host with port and path", "example.com:9443", "/mutate", "https://example.com:9443/mutate"},
+		{"empty path defaults to slash", "example.com:9443", "", "https://example.com:9443/"},
+		{"ip host", "172.18.0.3:9443", "/validate", "https://172.18.0.3:9443/validate"},
+		{"host without port", "example.com", "/x", "https://example.com/x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := BuildURL(tt.host, tt.path); got != tt.want {
+				t.Errorf("BuildURL(%q, %q) = %q, want %q", tt.host, tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractPathFromURL(t *testing.T) {
+	tests := []struct {
+		name   string
+		rawURL string
+		want   string
+	}{
+		{"empty url", "", "/"},
+		{"path only", "https://h:1/mutate", "/mutate"},
+		{"no path", "https://h:1", "/"},
+		{"with query", "https://h:1/mutate?timeout=5s", "/mutate?timeout=5s"},
+		{"invalid url", "::not-a-url", "/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ExtractPathFromURL(tt.rawURL); got != tt.want {
+				t.Errorf("ExtractPathFromURL(%q) = %q, want %q", tt.rawURL, got, tt.want)
+			}
+		})
+	}
+}

@@ -15,6 +15,7 @@ import (
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -51,9 +52,29 @@ const (
 
 // WebhookReconciler reconciles webhook ConfigMap and manages certificates
 type WebhookReconciler struct {
-	Client                client.Client // Hosting cluster client
-	TargetClient          client.Client // Target cluster client
-	WebhookConfigName     string
+	Client       client.Client // Hosting cluster client
+	TargetClient client.Client // Target cluster client
+
+	// ConfigMap mode: name of the ConfigMap containing webhook YAML.
+	// If empty, the reconciler runs in patch mode using MutatingWebhookNames /
+	// ValidatingWebhookNames / WebhookHost. Exactly one of the two modes must be set.
+	WebhookConfigName string
+
+	// Patch mode: names of pre-existing webhook configurations in the target cluster
+	// whose clientConfig.URL host:port and caBundle should be patched. Path is preserved
+	// from the existing object per webhook entry.
+	MutatingWebhookNames   []string
+	ValidatingWebhookNames []string
+	// WebhookHost is "host" or "host:port" used when rewriting clientConfig.URL.
+	WebhookHost string
+
+	// CRDNames is the list of CustomResourceDefinition names whose conversion
+	// webhook clientConfig should be patched. Allowed in both ConfigMap and patch
+	// mode. CABundle is always set; clientConfig.URL is rewritten only when
+	// WebhookHost is set (path is preserved from the existing URL or Service.Path).
+	// CRDs without a Webhook conversion strategy are logged and skipped.
+	CRDNames []string
+
 	Namespace             string
 	CertSecretName        string
 	CertValidity          time.Duration
@@ -63,6 +84,10 @@ type WebhookReconciler struct {
 
 // Reconcile handles ConfigMap changes and certificate rotation
 func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if r.WebhookConfigName == "" {
+		return r.reconcilePatchMode(ctx)
+	}
+
 	logger := log.FromContext(ctx)
 
 	// Fetch the ConfigMap
@@ -126,6 +151,11 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Apply webhook configurations to target cluster
 	if err := r.applyWebhookConfigurations(ctx, configs); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to apply webhook configurations: %w", err)
+	}
+
+	// Patch CRD conversion webhooks (no-op when CRDNames is empty)
+	if err := r.patchCRDs(ctx, caCert); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to patch CRDs: %w", err)
 	}
 
 	logger.Info("Reconciliation complete")
@@ -413,6 +443,195 @@ func (r *WebhookReconciler) applyWebhookConfigurations(ctx context.Context, conf
 	return nil
 }
 
+// reconcilePatchMode runs the alternative reconcile flow for pre-existing webhook
+// configurations in the target cluster. It generates/rotates certificates whose SANs
+// match WebhookHost, then for each named MutatingWebhookConfiguration / Validating-
+// WebhookConfiguration: rewrites every webhook entry's clientConfig.URL host (preserving
+// path), clears clientConfig.Service, and injects the freshly generated CA bundle.
+// Missing target-cluster configurations are logged and skipped (never created).
+func (r *WebhookReconciler) reconcilePatchMode(ctx context.Context) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	host := hostnameOnly(r.WebhookHost)
+	if host == "" {
+		return ctrl.Result{}, errors.New("webhook host is empty in patch mode")
+	}
+	services := []certificates.ServiceReference{{Hostname: host}}
+
+	logger.Info("Reconciling in patch mode",
+		"webhookHost", r.WebhookHost,
+		"mutating", r.MutatingWebhookNames,
+		"validating", r.ValidatingWebhookNames,
+	)
+
+	secret, reason, err := r.checkCertificates(ctx, services)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to check certificates: %w", err)
+	}
+
+	if reason != "" {
+		logger.Info("Generating certificates", "reason", reason, "host", host)
+		if err := r.generateAndStoreCertificates(ctx, services); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to generate certificates: %w", err)
+		}
+		metrics.CertificateRotationsTotal.WithLabelValues(string(reason)).Inc()
+
+		secret = &corev1.Secret{}
+		secretKey := types.NamespacedName{
+			Name:      r.CertSecretName,
+			Namespace: r.getNamespace(r.Namespace),
+		}
+		if err := r.Client.Get(ctx, secretKey, secret); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to get generated secret: %w", err)
+		}
+	}
+
+	r.updateCertExpiryGauge(secret)
+
+	caCert := secret.Data[tlsCrtKey]
+
+	if err := r.patchExistingWebhookConfigurations(ctx, caCert); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to patch webhook configurations: %w", err)
+	}
+
+	if err := r.patchCRDs(ctx, caCert); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to patch CRDs: %w", err)
+	}
+
+	logger.Info("Patch-mode reconciliation complete")
+
+	nextRotation := r.calculateNextRotation(secret)
+	if nextRotation > 0 {
+		return ctrl.Result{RequeueAfter: nextRotation}, nil
+	}
+	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+// patchExistingWebhookConfigurations fetches each named webhook configuration from the
+// target cluster, rewrites every entry's clientConfig.URL host:port (preserving path)
+// and CA bundle, and updates the object. Missing names are logged and skipped.
+func (r *WebhookReconciler) patchExistingWebhookConfigurations(ctx context.Context, caCert []byte) error {
+	logger := log.FromContext(ctx)
+
+	for _, name := range r.MutatingWebhookNames {
+		mwc := &admissionv1.MutatingWebhookConfiguration{}
+		if err := r.TargetClient.Get(ctx, types.NamespacedName{Name: name}, mwc); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.Info("MutatingWebhookConfiguration not found, skipping", "name", name)
+				continue
+			}
+			return fmt.Errorf("failed to get MutatingWebhookConfiguration %s: %w", name, err)
+		}
+		for i := range mwc.Webhooks {
+			cc := &mwc.Webhooks[i].ClientConfig
+			path := "/"
+			if cc.URL != nil {
+				path = webhooks.ExtractPathFromURL(*cc.URL)
+			}
+			newURL := webhooks.BuildURL(r.WebhookHost, path)
+			cc.URL = &newURL
+			cc.Service = nil
+			cc.CABundle = caCert
+		}
+		if err := r.TargetClient.Update(ctx, mwc); err != nil {
+			return fmt.Errorf("failed to update MutatingWebhookConfiguration %s: %w", name, err)
+		}
+		logger.Info("Patched MutatingWebhookConfiguration", "name", name)
+	}
+
+	for _, name := range r.ValidatingWebhookNames {
+		vwc := &admissionv1.ValidatingWebhookConfiguration{}
+		if err := r.TargetClient.Get(ctx, types.NamespacedName{Name: name}, vwc); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.Info("ValidatingWebhookConfiguration not found, skipping", "name", name)
+				continue
+			}
+			return fmt.Errorf("failed to get ValidatingWebhookConfiguration %s: %w", name, err)
+		}
+		for i := range vwc.Webhooks {
+			cc := &vwc.Webhooks[i].ClientConfig
+			path := "/"
+			if cc.URL != nil {
+				path = webhooks.ExtractPathFromURL(*cc.URL)
+			}
+			newURL := webhooks.BuildURL(r.WebhookHost, path)
+			cc.URL = &newURL
+			cc.Service = nil
+			cc.CABundle = caCert
+		}
+		if err := r.TargetClient.Update(ctx, vwc); err != nil {
+			return fmt.Errorf("failed to update ValidatingWebhookConfiguration %s: %w", name, err)
+		}
+		logger.Info("Patched ValidatingWebhookConfiguration", "name", name)
+	}
+
+	return nil
+}
+
+// patchCRDs fetches each named CustomResourceDefinition from the target cluster and
+// updates its conversion-webhook clientConfig: CABundle is always set; clientConfig.URL
+// is rewritten to use r.WebhookHost (preserving path) when WebhookHost is set, with
+// clientConfig.Service cleared. CRDs that are missing, lack a Webhook conversion
+// strategy, or have no clientConfig are logged and skipped. No-op when CRDNames is empty.
+func (r *WebhookReconciler) patchCRDs(ctx context.Context, caCert []byte) error {
+	if len(r.CRDNames) == 0 {
+		return nil
+	}
+	logger := log.FromContext(ctx)
+
+	for _, name := range r.CRDNames {
+		crd := &apiextensionsv1.CustomResourceDefinition{}
+		if err := r.TargetClient.Get(ctx, types.NamespacedName{Name: name}, crd); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.Info("CustomResourceDefinition not found, skipping", "name", name)
+				continue
+			}
+			return fmt.Errorf("failed to get CustomResourceDefinition %s: %w", name, err)
+		}
+
+		conv := crd.Spec.Conversion
+		if conv == nil || conv.Strategy != apiextensionsv1.WebhookConverter || conv.Webhook == nil || conv.Webhook.ClientConfig == nil {
+			logger.Info("CRD has no Webhook conversion strategy, skipping", "name", name)
+			continue
+		}
+
+		cc := conv.Webhook.ClientConfig
+		cc.CABundle = caCert
+
+		if r.WebhookHost != "" {
+			path := "/"
+			switch {
+			case cc.URL != nil && *cc.URL != "":
+				path = webhooks.ExtractPathFromURL(*cc.URL)
+			case cc.Service != nil && cc.Service.Path != nil && *cc.Service.Path != "":
+				path = *cc.Service.Path
+			}
+			newURL := webhooks.BuildURL(r.WebhookHost, path)
+			cc.URL = &newURL
+			cc.Service = nil
+		}
+
+		if err := r.TargetClient.Update(ctx, crd); err != nil {
+			return fmt.Errorf("failed to update CustomResourceDefinition %s: %w", name, err)
+		}
+		logger.Info("Patched CustomResourceDefinition conversion webhook", "name", name)
+	}
+
+	return nil
+}
+
+// hostnameOnly returns the host portion of a "host" or "host:port" string.
+// IPv6 literals in brackets are unwrapped.
+func hostnameOnly(hostPort string) string {
+	if hostPort == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(hostPort); err == nil {
+		return h
+	}
+	return hostPort
+}
+
 // updateCertExpiryGauge sets the certificate expiry metric from the secret's TLS cert.
 func (r *WebhookReconciler) updateCertExpiryGauge(secret *corev1.Secret) {
 	certPEM, ok := secret.Data[tlsCrtKey]
@@ -444,6 +663,10 @@ func (r *WebhookReconciler) getNamespace(namespace string) string {
 
 // SetupWithManager sets up the controller with the Manager
 func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.WebhookConfigName == "" {
+		return r.setupPatchMode(mgr)
+	}
+
 	// Only watch the specific webhook ConfigMap
 	configMapPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
 		return r.WebhookConfigName == object.GetName() && r.getNamespace(r.Namespace) == object.GetNamespace()
@@ -473,5 +696,23 @@ func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&corev1.ConfigMap{}, builder.WithPredicates(configMapPredicate)).
 		// Watch the certificate Secret for annotation-based rotation triggers
 		Watches(&corev1.Secret{}, secretToConfigMapMapper).
+		Complete(r)
+}
+
+// setupPatchMode wires the controller for patch mode: there is no primary ConfigMap,
+// so we anchor reconciles on the certificate Secret (filtered to CertSecretName).
+// Periodic sync handles drift in the named target-cluster webhook configurations.
+// The reconcile request key is ignored in patch mode — Reconcile branches on
+// r.WebhookConfigName being empty.
+func (r *WebhookReconciler) setupPatchMode(mgr ctrl.Manager) error {
+	ns := r.getNamespace(r.Namespace)
+
+	secretPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
+		return object.GetName() == r.CertSecretName && object.GetNamespace() == ns
+	})
+
+	return ctrl.NewControllerManagedBy(mgr).
+		Named("webhook-patch-mode").
+		For(&corev1.Secret{}, builder.WithPredicates(secretPredicate)).
 		Complete(r)
 }

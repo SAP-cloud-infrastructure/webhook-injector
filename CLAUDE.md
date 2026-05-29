@@ -66,13 +66,15 @@ The application contains two independent controllers with different leader elect
 
 1. **WebhookReconciler** (runs on **leader only**)
    - Location: `pkg/controllers/reconciler.go`
-   - Watches:
-     - ConfigMap containing webhook definitions (in hosting cluster)
-     - Certificate Secret for force-rotation annotation (in hosting cluster)
+   - Watches (depend on mode — see Configuration):
+     - ConfigMap mode: webhook-definitions ConfigMap + certificate Secret (hosting cluster)
+     - Patch mode: certificate Secret (hosting cluster) — no ConfigMap. Periodic sync handles drift in target-cluster webhook configurations.
    - Generates/rotates self-signed certificates with dynamic SANs
    - Stores certificates in Secret (in hosting cluster)
    - Injects CA bundle into webhook configurations
-   - Applies webhook configurations to **target cluster** (may be remote)
+   - ConfigMap mode: applies webhook configurations to target cluster (creates if missing)
+   - Patch mode: patches `clientConfig.URL` (host:port) and CA bundle on pre-existing webhook configurations in the target cluster (skips missing names)
+   - Both modes additionally patch `caBundle` (and optionally URL host:port) on CRD conversion webhooks listed via `--crd-names` (skips missing CRDs and CRDs without a `Webhook` conversion strategy)
    - Leader election: DEFAULT behavior (requires leader)
 
 2. **CertificateReloader** (runs on **all replicas**)
@@ -200,8 +202,30 @@ test/e2e/                       E2E integration tests with kind clusters
 
 ## Configuration
 
-All configuration via command-line flags. Run `webhook-injector --help` for full list:
-- `--webhook-config-name` (required) - ConfigMap with webhook definitions
+All configuration via command-line flags. Run `webhook-injector --help` for full list.
+
+The reconciler runs in **one of two mutually exclusive modes**, selected at startup:
+
+**ConfigMap mode** (apply webhook definitions from a ConfigMap):
+- `--webhook-config-name` - ConfigMap containing full `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` YAML. webhook-injector parses, injects CA bundle, and applies these to the target cluster (creating them if missing).
+
+**Patch mode** (patch pre-existing webhook configurations in the target cluster):
+- `--mutating-webhook-names` - comma-separated `MutatingWebhookConfiguration` names to patch.
+- `--validating-webhook-names` - comma-separated `ValidatingWebhookConfiguration` names to patch.
+- `--webhook-host` - host or `host:port` to set on every patched entry's `clientConfig.URL` (path is preserved per webhook). Required when patch mode is active.
+- The named configurations **must already exist** in the target cluster (created by Helm chart, operator, etc.). Missing names are logged and skipped — webhook-injector never creates configurations in patch mode.
+- For each entry: `clientConfig.URL` host/port is rewritten (path preserved), `clientConfig.Service` is cleared, and `clientConfig.CABundle` is set to the freshly generated certificate.
+
+**CRD conversion webhooks** (works in both modes):
+- `--crd-names` - comma-separated `CustomResourceDefinition` names whose `spec.conversion.webhook.clientConfig` should be patched. CRDs **must already exist**; missing names are logged and skipped. CRDs without a `Webhook` conversion strategy are also skipped.
+- `caBundle` is always set to the freshly generated certificate.
+- `clientConfig.URL` host:port is rewritten (path preserved from the existing URL or `Service.Path`, defaulting to `/`) **only when `--webhook-host` is set** — in ConfigMap mode `--webhook-host` is optional; setting it triggers URL rewriting for the listed CRDs.
+- CRD conversion endpoints do **not** contribute to certificate SANs; SANs are derived only from the ConfigMap's webhook services/URLs (ConfigMap mode) or `--webhook-host` (patch mode).
+- Drift correction relies on the periodic `--sync-period`, since the manager cache does not watch target-cluster CRDs.
+
+Specifying both `--webhook-config-name` and any of `--mutating-webhook-names` / `--validating-webhook-names` is a startup error. `--crd-names` may be combined with either mode.
+
+Common flags:
 - `--namespace` - Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from env vars or pod's serviceaccount if not set
   - Priority order: explicit flag → `NAMESPACE` env var → serviceaccount file → **fail**
   - The program will exit with an error if namespace cannot be determined

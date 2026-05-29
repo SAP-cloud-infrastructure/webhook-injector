@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -34,24 +36,32 @@ var (
 )
 
 var (
-	webhookConfigName     string
-	namespace             string
-	certSecretName        string
-	certDir               string
-	certValidity          time.Duration
-	certRotationThreshold float64
-	targetKubeconfig      string
-	enableLeaderElection  bool
-	leaderElectionID      string
-	syncPeriod            time.Duration
-	metricsAddr           string
-	healthAddr            string
-	showVersion           bool
+	webhookConfigName      string
+	mutatingWebhookNames   string
+	validatingWebhookNames string
+	crdNames               string
+	webhookHost            string
+	namespace              string
+	certSecretName         string
+	certDir                string
+	certValidity           time.Duration
+	certRotationThreshold  float64
+	targetKubeconfig       string
+	enableLeaderElection   bool
+	leaderElectionID       string
+	syncPeriod             time.Duration
+	metricsAddr            string
+	healthAddr             string
+	showVersion            bool
 )
 
 func init() {
 	// Initialize flag variables
-	flag.StringVar(&webhookConfigName, "webhook-config-name", "", "ConfigMap name containing webhook definitions (required)")
+	flag.StringVar(&webhookConfigName, "webhook-config-name", "", "ConfigMap name containing webhook definitions (ConfigMap mode). Mutually exclusive with --mutating-webhook-names / --validating-webhook-names.")
+	flag.StringVar(&mutatingWebhookNames, "mutating-webhook-names", "", "Comma-separated MutatingWebhookConfiguration names to patch (patch mode). Requires --webhook-host.")
+	flag.StringVar(&validatingWebhookNames, "validating-webhook-names", "", "Comma-separated ValidatingWebhookConfiguration names to patch (patch mode). Requires --webhook-host.")
+	flag.StringVar(&crdNames, "crd-names", "", "Comma-separated CustomResourceDefinition names whose conversion-webhook clientConfig should be patched. Allowed in both modes; CABundle is always set, URL host:port is rewritten only if --webhook-host is set.")
+	flag.StringVar(&webhookHost, "webhook-host", "", "host or host:port to set on clientConfig.URL of every patched webhook entry (patch mode). Path is preserved per-webhook.")
 	flag.StringVar(&namespace, "namespace", "", "Namespace for all resources (auto-detects from pod if not set)")
 	flag.StringVar(&certSecretName, "cert-secret-name", "webhook-injector-certs", "Secret name for storing certificates")
 	flag.StringVar(&certDir, "cert-dir", "/tmp/webhook-certs", "Directory to write certificate files")
@@ -72,6 +82,9 @@ func init() {
 	if err := admissionv1.AddToScheme(scheme); err != nil {
 		panic(err)
 	}
+	if err := apiextensionsv1.AddToScheme(scheme); err != nil {
+		panic(err)
+	}
 }
 
 func main() {
@@ -88,10 +101,28 @@ func main() {
 		return
 	}
 
-	// Validate required flags
-	if webhookConfigName == "" {
-		setupLog.Error(nil, "webhook-config-name is required")
+	// Validate mode selection. ConfigMap mode and patch mode are mutually exclusive
+	// for admission webhooks. CRD patching is allowed in either mode.
+	mutatingNames := splitAndTrim(mutatingWebhookNames)
+	validatingNames := splitAndTrim(validatingWebhookNames)
+	crdNamesList := splitAndTrim(crdNames)
+	configMapModeActive := webhookConfigName != ""
+	admissionPatchActive := len(mutatingNames) > 0 || len(validatingNames) > 0
+	// Patch mode is selected when ConfigMap mode is not active and any patching
+	// (admission or CRD) is requested.
+	patchModeActive := !configMapModeActive && (admissionPatchActive || len(crdNamesList) > 0)
+
+	if configMapModeActive && admissionPatchActive {
+		setupLog.Error(nil, "--webhook-config-name is mutually exclusive with --mutating-webhook-names / --validating-webhook-names")
+		os.Exit(1)
+	}
+	if !configMapModeActive && !patchModeActive {
+		setupLog.Error(nil, "either --webhook-config-name or --mutating-webhook-names / --validating-webhook-names / --crd-names must be set")
 		flag.Usage()
+		os.Exit(1)
+	}
+	if patchModeActive && webhookHost == "" {
+		setupLog.Error(nil, "--webhook-host is required in patch mode")
 		os.Exit(1)
 	}
 
@@ -113,7 +144,12 @@ func main() {
 
 	setupLog.Info("Starting webhook-injector",
 		"namespace", namespace,
+		"mode", modeLabel(configMapModeActive),
 		"webhook-config-name", webhookConfigName,
+		"mutating-webhook-names", mutatingNames,
+		"validating-webhook-names", validatingNames,
+		"crd-names", crdNamesList,
+		"webhook-host", webhookHost,
 		"cert-secret-name", certSecretName,
 		"enable-leader-election", enableLeaderElection,
 	)
@@ -197,14 +233,18 @@ func main() {
 	// Set up webhook reconciler (generates certificates and applies webhooks)
 	// Runs on leader ONLY via default leader election behavior to prevent conflicts
 	webhookReconciler := &controllers.WebhookReconciler{
-		Client:                mgr.GetClient(),
-		TargetClient:          targetClient,
-		WebhookConfigName:     webhookConfigName,
-		Namespace:             namespace,
-		CertSecretName:        certSecretName,
-		CertValidity:          certValidity,
-		CertRotationThreshold: certRotationThreshold,
-		Scheme:                mgr.GetScheme(),
+		Client:                 mgr.GetClient(),
+		TargetClient:           targetClient,
+		WebhookConfigName:      webhookConfigName,
+		MutatingWebhookNames:   mutatingNames,
+		ValidatingWebhookNames: validatingNames,
+		WebhookHost:            webhookHost,
+		CRDNames:               crdNamesList,
+		Namespace:              namespace,
+		CertSecretName:         certSecretName,
+		CertValidity:           certValidity,
+		CertRotationThreshold:  certRotationThreshold,
+		Scheme:                 mgr.GetScheme(),
 	}
 	if err := webhookReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Unable to create WebhookReconciler controller")
@@ -238,6 +278,29 @@ func certReadyCheck(dir string) healthz.Checker {
 		}
 		return nil
 	}
+}
+
+// splitAndTrim splits a comma-separated list and drops empty entries.
+func splitAndTrim(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func modeLabel(configMapMode bool) string {
+	if configMapMode {
+		return "configmap"
+	}
+	return "patch"
 }
 
 func detectNamespace() (string, error) {
