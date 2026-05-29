@@ -72,7 +72,7 @@ The application contains two independent controllers with different leader elect
    - Generates/rotates self-signed certificates with dynamic SANs
    - Stores certificates in Secret (in hosting cluster)
    - Injects CA bundle into webhook configurations
-   - ConfigMap mode: applies webhook configurations to target cluster (creates if missing)
+   - ConfigMap mode: applies webhook configurations to target cluster (creates if missing). When `--webhook-label` is also supplied, additionally refreshes `caBundle` on labeled CRDs (labeled admission webhooks are intentionally ignored — ConfigMap mode owns admission-webhook creation).
    - Patch mode: patches CA bundle on MutatingWebhookConfigurations, ValidatingWebhookConfigurations, and CustomResourceDefinitions in the target cluster whose labels match `--webhook-label` (existing `clientConfig.URL` / `clientConfig.Service` is left untouched; CRDs without a `Webhook` conversion strategy are skipped)
    - Leader election: DEFAULT behavior (requires leader)
 
@@ -203,10 +203,11 @@ test/e2e/                       E2E integration tests with kind clusters
 
 All configuration via command-line flags. Run `webhook-injector --help` for full list.
 
-The reconciler runs in **one of two mutually exclusive modes**, selected at startup:
+The reconciler selects its mode at startup based on which of `--webhook-config-name` and `--webhook-label` are set:
 
 **ConfigMap mode** (apply webhook definitions from a ConfigMap):
 - `--webhook-config-name` - ConfigMap containing full `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` YAML. webhook-injector parses, injects CA bundle, and applies these to the target cluster (creating them if missing).
+- `--webhook-label` *(optional)* - when set together with `--webhook-config-name`, webhook-injector additionally refreshes `caBundle` on `CustomResourceDefinition` resources in the target cluster carrying this label. Labeled `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` resources are intentionally ignored, since ConfigMap mode already owns admission-webhook creation.
 
 **Patch mode** (patch pre-existing webhook configurations in the target cluster):
 - `--webhook-label` - **required in patch mode**; label selector in `key=value` form (e.g., `webhook-injector/name=cert-manager`). webhook-injector lists `MutatingWebhookConfiguration`, `ValidatingWebhookConfiguration`, and `CustomResourceDefinition` resources in the target cluster carrying this label and refreshes their `caBundle`.
@@ -215,7 +216,7 @@ The reconciler runs in **one of two mutually exclusive modes**, selected at star
 - For each entry: only `clientConfig.CABundle` is updated. `clientConfig.URL` and `clientConfig.Service` are left untouched.
 - Drift correction relies on the periodic `--sync-period`, since the manager cache does not watch target-cluster resources.
 
-Specifying both `--webhook-config-name` and `--webhook-label` is a startup error. `--cert-sans` is optional in ConfigMap mode (entries are merged with SANs derived from the ConfigMap) and required in patch mode.
+When both `--webhook-config-name` and `--webhook-label` are set, webhook-injector runs ConfigMap mode and additionally refreshes `caBundle` on labeled CRDs (labeled admission webhooks are ignored). `--cert-sans` is optional in ConfigMap mode (entries are merged with SANs derived from the ConfigMap) and required in patch mode.
 
 Common flags:
 - `--namespace` - Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from env vars or pod's serviceaccount if not set

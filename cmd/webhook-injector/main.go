@@ -97,16 +97,14 @@ func main() {
 		return
 	}
 
-	// Validate mode selection. ConfigMap mode and patch mode are mutually exclusive.
+	// Validate mode selection. ConfigMap mode and patch mode are mutually exclusive,
+	// but ConfigMap mode may also accept --webhook-label to additionally refresh
+	// caBundle on labeled CRDs (labeled admission webhooks are ignored in that case).
 	labelKey, labelValue, labelOK := parseLabel(webhookLabel)
 	certSANsList := splitAndTrim(certSANs)
 	configMapModeActive := webhookConfigName != ""
 	patchModeActive := !configMapModeActive && labelOK
 
-	if configMapModeActive && webhookLabel != "" {
-		setupLog.Error(nil, "--webhook-config-name is mutually exclusive with --webhook-label")
-		os.Exit(1)
-	}
 	if webhookLabel != "" && !labelOK {
 		setupLog.Error(nil, fmt.Sprintf("--webhook-label must be in key=value form, got %q", webhookLabel))
 		os.Exit(1)

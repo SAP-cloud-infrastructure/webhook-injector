@@ -1162,6 +1162,100 @@ webhooks:
 	}
 }
 
+func TestWebhookReconciler_ConfigMapMode_IgnoresLabeledAdmissionWebhooks(t *testing.T) {
+	s := patchModeScheme(t)
+
+	originalCA := []byte("original-ca-bundle")
+	labels := map[string]string{"webhook-injector/name": "test"}
+
+	labeledMWC := &admissionv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "labeled-mwc", Labels: labels},
+		Webhooks: []admissionv1.MutatingWebhook{{
+			Name: "labeled.example.com",
+			ClientConfig: admissionv1.WebhookClientConfig{
+				CABundle: originalCA,
+			},
+		}},
+	}
+	labeledVWC := &admissionv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "labeled-vwc", Labels: labels},
+		Webhooks: []admissionv1.ValidatingWebhook{{
+			Name: "labeled-validating.example.com",
+			ClientConfig: admissionv1.WebhookClientConfig{
+				CABundle: originalCA,
+			},
+		}},
+	}
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: configmap-mwc
+webhooks:
+  - name: configmap.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+      caBundle: ""
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+`,
+		},
+	}
+
+	hostingClient := fake.NewClientBuilder().WithScheme(s).WithObjects(configMap).Build()
+	targetClient := fake.NewClientBuilder().WithScheme(s).WithObjects(labeledMWC, labeledVWC).Build()
+
+	reconciler := &WebhookReconciler{
+		Client:                hostingClient,
+		TargetClient:          targetClient,
+		WebhookConfigName:     "webhook-config",
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.2,
+		Scheme:                s,
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	gotMWC := &admissionv1.MutatingWebhookConfiguration{}
+	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "labeled-mwc"}, gotMWC); err != nil {
+		t.Fatalf("Get labeled MWC failed: %v", err)
+	}
+	if string(gotMWC.Webhooks[0].ClientConfig.CABundle) != string(originalCA) {
+		t.Errorf("Expected labeled MWC CABundle untouched in ConfigMap mode, got %q", string(gotMWC.Webhooks[0].ClientConfig.CABundle))
+	}
+
+	gotVWC := &admissionv1.ValidatingWebhookConfiguration{}
+	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "labeled-vwc"}, gotVWC); err != nil {
+		t.Fatalf("Get labeled VWC failed: %v", err)
+	}
+	if string(gotVWC.Webhooks[0].ClientConfig.CABundle) != string(originalCA) {
+		t.Errorf("Expected labeled VWC CABundle untouched in ConfigMap mode, got %q", string(gotVWC.Webhooks[0].ClientConfig.CABundle))
+	}
+
+	// The ConfigMap-defined webhook is still applied.
+	gotConfigMapMWC := &admissionv1.MutatingWebhookConfiguration{}
+	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "configmap-mwc"}, gotConfigMapMWC); err != nil {
+		t.Fatalf("Expected ConfigMap-defined MWC to be created: %v", err)
+	}
+	if len(gotConfigMapMWC.Webhooks[0].ClientConfig.CABundle) == 0 {
+		t.Errorf("Expected ConfigMap-defined MWC to receive a generated CABundle, got empty")
+	}
+}
+
 func TestWebhookReconciler_PatchCRDs_NoMatchingCRD(t *testing.T) {
 	s := patchModeScheme(t)
 

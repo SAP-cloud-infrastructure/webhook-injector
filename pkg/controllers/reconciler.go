@@ -60,11 +60,17 @@ type WebhookReconciler struct {
 	// WebhookLabelValue. Exactly one of the two modes must be set.
 	WebhookConfigName string
 
-	// Patch mode: label selector used to discover MutatingWebhookConfigurations,
-	// ValidatingWebhookConfigurations, and CustomResourceDefinitions in the target
-	// cluster whose caBundle should be patched. Both fields must be non-empty in
-	// patch mode. clientConfig.URL and clientConfig.Service are left unchanged.
-	// CRDs without a Webhook conversion strategy are logged and skipped.
+	// Label selector used to discover target-cluster resources whose caBundle
+	// should be patched. clientConfig.URL and clientConfig.Service are left
+	// unchanged. CRDs without a Webhook conversion strategy are logged and skipped.
+	//
+	// In patch mode (WebhookConfigName empty), the label applies to
+	// MutatingWebhookConfigurations, ValidatingWebhookConfigurations, and
+	// CustomResourceDefinitions.
+	//
+	// In ConfigMap mode (WebhookConfigName set), the label applies to
+	// CustomResourceDefinitions only — labeled admission webhooks are ignored
+	// because ConfigMap mode owns admission-webhook creation.
 	WebhookLabelKey   string
 	WebhookLabelValue string
 
@@ -516,8 +522,13 @@ func (r *WebhookReconciler) reconcilePatchMode(ctx context.Context) (ctrl.Result
 // ValidatingWebhookConfigurations in the target cluster matching the configured
 // label selector, and rewrites only clientConfig.CABundle on every entry. The
 // existing clientConfig.URL and clientConfig.Service fields are left untouched.
-// No-op when the label selector is unset (ConfigMap mode).
+// No-op when the label selector is unset, or when running in ConfigMap mode
+// (which owns admission-webhook creation; labeled admission configs are
+// intentionally ignored there).
 func (r *WebhookReconciler) patchExistingWebhookConfigurations(ctx context.Context, caCert []byte) error {
+	if r.WebhookConfigName != "" {
+		return nil
+	}
 	if r.WebhookLabelKey == "" || r.WebhookLabelValue == "" {
 		return nil
 	}
