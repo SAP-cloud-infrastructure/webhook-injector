@@ -73,8 +73,7 @@ The application contains two independent controllers with different leader elect
    - Stores certificates in Secret (in hosting cluster)
    - Injects CA bundle into webhook configurations
    - ConfigMap mode: applies webhook configurations to target cluster (creates if missing)
-   - Patch mode: patches `clientConfig.URL` (host:port) and CA bundle on pre-existing webhook configurations in the target cluster (skips missing names)
-   - Both modes additionally patch `caBundle` (and optionally URL host:port) on CRD conversion webhooks listed via `--crd-names` (skips missing CRDs and CRDs without a `Webhook` conversion strategy)
+   - Patch mode: patches CA bundle on MutatingWebhookConfigurations, ValidatingWebhookConfigurations, and CustomResourceDefinitions in the target cluster whose labels match `--webhook-label` (existing `clientConfig.URL` / `clientConfig.Service` is left untouched; CRDs without a `Webhook` conversion strategy are skipped)
    - Leader election: DEFAULT behavior (requires leader)
 
 2. **CertificateReloader** (runs on **all replicas**)
@@ -210,20 +209,13 @@ The reconciler runs in **one of two mutually exclusive modes**, selected at star
 - `--webhook-config-name` - ConfigMap containing full `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` YAML. webhook-injector parses, injects CA bundle, and applies these to the target cluster (creating them if missing).
 
 **Patch mode** (patch pre-existing webhook configurations in the target cluster):
-- `--mutating-webhook-names` - comma-separated `MutatingWebhookConfiguration` names to patch.
-- `--validating-webhook-names` - comma-separated `ValidatingWebhookConfiguration` names to patch.
-- `--webhook-host` - host or `host:port` to set on every patched entry's `clientConfig.URL` (path is preserved per webhook). Required when patch mode is active.
-- The named configurations **must already exist** in the target cluster (created by Helm chart, operator, etc.). Missing names are logged and skipped — webhook-injector never creates configurations in patch mode.
-- For each entry: `clientConfig.URL` host/port is rewritten (path preserved), `clientConfig.Service` is cleared, and `clientConfig.CABundle` is set to the freshly generated certificate.
+- `--webhook-label` - **required in patch mode**; label selector in `key=value` form (e.g., `webhook-injector/name=cert-manager`). webhook-injector lists `MutatingWebhookConfiguration`, `ValidatingWebhookConfiguration`, and `CustomResourceDefinition` resources in the target cluster carrying this label and refreshes their `caBundle`.
+- `--cert-sans` - **required in patch mode**; comma-separated DNS names and/or IP addresses to include as certificate SANs. Each entry is auto-classified (parses as IP → IP SAN; otherwise → DNS SAN). This is the sole SAN source in patch mode.
+- Resources are never created — only existing labeled resources are patched. Resources that match the label but have no `Webhook` conversion strategy (CRDs only) or no `clientConfig` are skipped.
+- For each entry: only `clientConfig.CABundle` is updated. `clientConfig.URL` and `clientConfig.Service` are left untouched.
+- Drift correction relies on the periodic `--sync-period`, since the manager cache does not watch target-cluster resources.
 
-**CRD conversion webhooks** (works in both modes):
-- `--crd-names` - comma-separated `CustomResourceDefinition` names whose `spec.conversion.webhook.clientConfig` should be patched. CRDs **must already exist**; missing names are logged and skipped. CRDs without a `Webhook` conversion strategy are also skipped.
-- `caBundle` is always set to the freshly generated certificate.
-- `clientConfig.URL` host:port is rewritten (path preserved from the existing URL or `Service.Path`, defaulting to `/`) **only when `--webhook-host` is set** — in ConfigMap mode `--webhook-host` is optional; setting it triggers URL rewriting for the listed CRDs.
-- CRD conversion endpoints do **not** contribute to certificate SANs; SANs are derived only from the ConfigMap's webhook services/URLs (ConfigMap mode) or `--webhook-host` (patch mode).
-- Drift correction relies on the periodic `--sync-period`, since the manager cache does not watch target-cluster CRDs.
-
-Specifying both `--webhook-config-name` and any of `--mutating-webhook-names` / `--validating-webhook-names` is a startup error. `--crd-names` may be combined with either mode.
+Specifying both `--webhook-config-name` and `--webhook-label` is a startup error. `--cert-sans` is optional in ConfigMap mode (entries are merged with SANs derived from the ConfigMap) and required in patch mode.
 
 Common flags:
 - `--namespace` - Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from env vars or pod's serviceaccount if not set

@@ -843,7 +843,10 @@ func TestWebhookReconciler_PatchMode_HappyPath(t *testing.T) {
 
 	oldURL := "https://placeholder:1234/mutate"
 	mwc := &admissionv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-mwc"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "my-mwc",
+			Labels: map[string]string{"webhook-injector/name": "test"},
+		},
 		Webhooks: []admissionv1.MutatingWebhook{{
 			Name: "m1.example.com",
 			ClientConfig: admissionv1.WebhookClientConfig{
@@ -853,7 +856,10 @@ func TestWebhookReconciler_PatchMode_HappyPath(t *testing.T) {
 	}
 	oldVURL := "https://placeholder:1234/validate"
 	vwc := &admissionv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-vwc"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "my-vwc",
+			Labels: map[string]string{"webhook-injector/name": "test"},
+		},
 		Webhooks: []admissionv1.ValidatingWebhook{{
 			Name: "v1.example.com",
 			ClientConfig: admissionv1.WebhookClientConfig{
@@ -866,16 +872,16 @@ func TestWebhookReconciler_PatchMode_HappyPath(t *testing.T) {
 	targetClient := fake.NewClientBuilder().WithScheme(s).WithObjects(mwc, vwc).Build()
 
 	reconciler := &WebhookReconciler{
-		Client:                 hostingClient,
-		TargetClient:           targetClient,
-		MutatingWebhookNames:   []string{"my-mwc"},
-		ValidatingWebhookNames: []string{"my-vwc"},
-		WebhookHost:            "webhook.example.com:9443",
-		Namespace:              "default",
-		CertSecretName:         "test-certs",
-		CertValidity:           30 * 24 * time.Hour,
-		CertRotationThreshold:  0.2,
-		Scheme:                 s,
+		Client:                hostingClient,
+		TargetClient:          targetClient,
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"webhook.example.com"},
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.2,
+		Scheme:                s,
 	}
 
 	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
@@ -891,34 +897,31 @@ func TestWebhookReconciler_PatchMode_HappyPath(t *testing.T) {
 		t.Fatal("Expected tls.crt to be populated")
 	}
 
-	// MWC patched
+	// MWC patched: CABundle set, URL/Service untouched
 	gotMWC := &admissionv1.MutatingWebhookConfiguration{}
 	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "my-mwc"}, gotMWC); err != nil {
 		t.Fatalf("Expected my-mwc to exist: %v", err)
 	}
-	if cc := gotMWC.Webhooks[0].ClientConfig; cc.URL == nil || *cc.URL != "https://webhook.example.com:9443/mutate" {
-		t.Errorf("Mutating URL not patched: got %v", cc.URL)
-	}
-	if gotMWC.Webhooks[0].ClientConfig.Service != nil {
-		t.Errorf("Mutating Service should be cleared, got %+v", gotMWC.Webhooks[0].ClientConfig.Service)
+	if cc := gotMWC.Webhooks[0].ClientConfig; cc.URL == nil || *cc.URL != oldURL {
+		t.Errorf("Mutating URL must be unchanged %q, got %v", oldURL, cc.URL)
 	}
 	if len(gotMWC.Webhooks[0].ClientConfig.CABundle) == 0 {
 		t.Errorf("Mutating CABundle should be populated")
 	}
 
-	// VWC patched
+	// VWC patched: CABundle set, URL/Service untouched
 	gotVWC := &admissionv1.ValidatingWebhookConfiguration{}
 	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "my-vwc"}, gotVWC); err != nil {
 		t.Fatalf("Expected my-vwc to exist: %v", err)
 	}
-	if cc := gotVWC.Webhooks[0].ClientConfig; cc.URL == nil || *cc.URL != "https://webhook.example.com:9443/validate" {
-		t.Errorf("Validating URL not patched: got %v", cc.URL)
+	if cc := gotVWC.Webhooks[0].ClientConfig; cc.URL == nil || *cc.URL != oldVURL {
+		t.Errorf("Validating URL must be unchanged %q, got %v", oldVURL, cc.URL)
 	}
 	if len(gotVWC.Webhooks[0].ClientConfig.CABundle) == 0 {
 		t.Errorf("Validating CABundle should be populated")
 	}
 
-	// Certificate has webhook host as DNS SAN
+	// Certificate has cert-sans entry as DNS SAN
 	block, _ := pem.Decode(secret.Data["tls.crt"])
 	if block == nil {
 		t.Fatal("Failed to decode cert PEM")
@@ -932,43 +935,49 @@ func TestWebhookReconciler_PatchMode_HappyPath(t *testing.T) {
 	}
 }
 
-func TestWebhookReconciler_PatchMode_MissingConfig(t *testing.T) {
+func TestWebhookReconciler_PatchMode_NoMatchingConfigs(t *testing.T) {
 	s := patchModeScheme(t)
 
 	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
-	// Target cluster has no webhook configurations
+	// Target cluster has no labeled webhook configurations
 	targetClient := fake.NewClientBuilder().WithScheme(s).Build()
 
 	reconciler := &WebhookReconciler{
-		Client:                 hostingClient,
-		TargetClient:           targetClient,
-		MutatingWebhookNames:   []string{"does-not-exist"},
-		ValidatingWebhookNames: []string{"also-missing"},
-		WebhookHost:            "host:9443",
-		Namespace:              "default",
-		CertSecretName:         "test-certs",
-		CertValidity:           30 * 24 * time.Hour,
-		CertRotationThreshold:  0.2,
-		Scheme:                 s,
+		Client:                hostingClient,
+		TargetClient:          targetClient,
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"host.example.com"},
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.2,
+		Scheme:                s,
 	}
 
 	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
-		t.Fatalf("Reconcile should not error on missing target configs: %v", err)
+		t.Fatalf("Reconcile should not error when no configs match the label: %v", err)
 	}
 
 	// Nothing was created in target cluster
-	gotMWC := &admissionv1.MutatingWebhookConfiguration{}
-	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "does-not-exist"}, gotMWC); err == nil {
-		t.Errorf("Expected does-not-exist to remain absent, got: %+v", gotMWC)
+	mwcList := &admissionv1.MutatingWebhookConfigurationList{}
+	if err := targetClient.List(context.Background(), mwcList); err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(mwcList.Items) != 0 {
+		t.Errorf("Expected zero MutatingWebhookConfigurations, got %d", len(mwcList.Items))
 	}
 }
 
-func TestWebhookReconciler_PatchMode_PreservesPath(t *testing.T) {
+func TestWebhookReconciler_PatchMode_LeavesURLUntouched(t *testing.T) {
 	s := patchModeScheme(t)
 
 	oldURL := "https://old:1234/mutate"
 	mwc := &admissionv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "mwc"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "mwc",
+			Labels: map[string]string{"webhook-injector/name": "test"},
+		},
 		Webhooks: []admissionv1.MutatingWebhook{{
 			Name: "p1.example.com",
 			ClientConfig: admissionv1.WebhookClientConfig{
@@ -983,8 +992,9 @@ func TestWebhookReconciler_PatchMode_PreservesPath(t *testing.T) {
 	reconciler := &WebhookReconciler{
 		Client:                hostingClient,
 		TargetClient:          targetClient,
-		MutatingWebhookNames:  []string{"mwc"},
-		WebhookHost:           "new:9443",
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"new.example.com"},
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          30 * 24 * time.Hour,
@@ -1000,8 +1010,11 @@ func TestWebhookReconciler_PatchMode_PreservesPath(t *testing.T) {
 	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "mwc"}, got); err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
-	if cc := got.Webhooks[0].ClientConfig; cc.URL == nil || *cc.URL != "https://new:9443/mutate" {
-		t.Errorf("Expected URL https://new:9443/mutate, got %v", cc.URL)
+	if cc := got.Webhooks[0].ClientConfig; cc.URL == nil || *cc.URL != oldURL {
+		t.Errorf("URL must be unchanged %q, got %v", oldURL, cc.URL)
+	}
+	if len(got.Webhooks[0].ClientConfig.CABundle) == 0 {
+		t.Errorf("CABundle should be populated")
 	}
 }
 
@@ -1009,10 +1022,15 @@ const testCRDName = "widgets.example.com"
 
 // crdWithWebhookConversion returns a minimal CRD wired up for Webhook conversion.
 // strategy controls .spec.conversion.strategy; clientConfig controls the client
-// config (or nil to leave conversion.webhook.clientConfig unset).
+// config (or nil to leave conversion.webhook.clientConfig unset). The CRD always
+// carries the test label "webhook-injector/name=test" so the label-based
+// reconciler discovers it.
 func crdWithWebhookConversion(strategy apiextensionsv1.ConversionStrategyType, cc *apiextensionsv1.WebhookClientConfig) *apiextensionsv1.CustomResourceDefinition {
 	crd := &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{Name: testCRDName},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   testCRDName,
+			Labels: map[string]string{"webhook-injector/name": "test"},
+		},
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 			Group: "example.com",
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
@@ -1053,8 +1071,9 @@ func TestWebhookReconciler_PatchCRDs_HappyPath_PatchMode(t *testing.T) {
 	reconciler := &WebhookReconciler{
 		Client:                hostingClient,
 		TargetClient:          targetClient,
-		CRDNames:              []string{"widgets.example.com"},
-		WebhookHost:           "new:9443",
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"new.example.com"},
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          30 * 24 * time.Hour,
@@ -1071,11 +1090,8 @@ func TestWebhookReconciler_PatchCRDs_HappyPath_PatchMode(t *testing.T) {
 		t.Fatalf("Get CRD failed: %v", err)
 	}
 	cc := got.Spec.Conversion.Webhook.ClientConfig
-	if cc.URL == nil || *cc.URL != "https://new:9443/convert" {
-		t.Errorf("Expected URL https://new:9443/convert, got %v", cc.URL)
-	}
-	if cc.Service != nil {
-		t.Errorf("Expected Service to be cleared, got %+v", cc.Service)
+	if cc.URL == nil || *cc.URL != oldURL {
+		t.Errorf("Expected URL to be preserved as %q, got %v", oldURL, cc.URL)
 	}
 	if len(cc.CABundle) == 0 {
 		t.Errorf("Expected CABundle to be populated")
@@ -1118,8 +1134,9 @@ webhooks:
 		Client:            hostingClient,
 		TargetClient:      targetClient,
 		WebhookConfigName: "webhook-config",
-		CRDNames:          []string{"widgets.example.com"},
-		// No WebhookHost: CABundle should be patched, URL must be unchanged.
+		WebhookLabelKey:   "webhook-injector/name",
+		WebhookLabelValue: "test",
+		// CRD URL/Service must be preserved; only CABundle is patched.
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          30 * 24 * time.Hour,
@@ -1145,7 +1162,7 @@ webhooks:
 	}
 }
 
-func TestWebhookReconciler_PatchCRDs_MissingCRD(t *testing.T) {
+func TestWebhookReconciler_PatchCRDs_NoMatchingCRD(t *testing.T) {
 	s := patchModeScheme(t)
 
 	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
@@ -1154,8 +1171,9 @@ func TestWebhookReconciler_PatchCRDs_MissingCRD(t *testing.T) {
 	reconciler := &WebhookReconciler{
 		Client:                hostingClient,
 		TargetClient:          targetClient,
-		CRDNames:              []string{"ghost.example.com"},
-		WebhookHost:           "host:9443",
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"host.example.com"},
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          30 * 24 * time.Hour,
@@ -1164,12 +1182,15 @@ func TestWebhookReconciler_PatchCRDs_MissingCRD(t *testing.T) {
 	}
 
 	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
-		t.Fatalf("Reconcile should not error on missing CRD: %v", err)
+		t.Fatalf("Reconcile should not error when no CRDs match the label: %v", err)
 	}
 
-	got := &apiextensionsv1.CustomResourceDefinition{}
-	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "ghost.example.com"}, got); err == nil {
-		t.Errorf("Expected ghost.example.com to remain absent")
+	crdList := &apiextensionsv1.CustomResourceDefinitionList{}
+	if err := targetClient.List(context.Background(), crdList); err != nil {
+		t.Fatalf("List CRDs failed: %v", err)
+	}
+	if len(crdList.Items) != 0 {
+		t.Errorf("Expected zero CRDs, got %d", len(crdList.Items))
 	}
 }
 
@@ -1196,8 +1217,9 @@ func TestWebhookReconciler_PatchCRDs_NonWebhookStrategy(t *testing.T) {
 	reconciler := &WebhookReconciler{
 		Client:                hostingClient,
 		TargetClient:          targetClient,
-		CRDNames:              []string{"widgets.example.com"},
-		WebhookHost:           "new:9443",
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"new.example.com"},
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          30 * 24 * time.Hour,
@@ -1222,17 +1244,18 @@ func TestWebhookReconciler_PatchCRDs_NonWebhookStrategy(t *testing.T) {
 	}
 }
 
-func TestWebhookReconciler_PatchCRDs_ServiceBasedConversion_PreservesPath_InPatchMode(t *testing.T) {
+func TestWebhookReconciler_PatchCRDs_ServiceBasedConversion_CAOnly_InPatchMode(t *testing.T) {
 	s := patchModeScheme(t)
 
 	servicePath := "/convert"
+	originalSvc := &apiextensionsv1.ServiceReference{
+		Name:      "conv-svc",
+		Namespace: "default",
+		Path:      &servicePath,
+	}
 	crd := crdWithWebhookConversion(apiextensionsv1.WebhookConverter,
 		&apiextensionsv1.WebhookClientConfig{
-			Service: &apiextensionsv1.ServiceReference{
-				Name:      "conv-svc",
-				Namespace: "default",
-				Path:      &servicePath,
-			},
+			Service: originalSvc,
 		})
 
 	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
@@ -1241,8 +1264,9 @@ func TestWebhookReconciler_PatchCRDs_ServiceBasedConversion_PreservesPath_InPatc
 	reconciler := &WebhookReconciler{
 		Client:                hostingClient,
 		TargetClient:          targetClient,
-		CRDNames:              []string{"widgets.example.com"},
-		WebhookHost:           "new:9443",
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"new.example.com"},
 		Namespace:             "default",
 		CertSecretName:        "test-certs",
 		CertValidity:          30 * 24 * time.Hour,
@@ -1259,10 +1283,13 @@ func TestWebhookReconciler_PatchCRDs_ServiceBasedConversion_PreservesPath_InPatc
 		t.Fatalf("Get CRD failed: %v", err)
 	}
 	cc := got.Spec.Conversion.Webhook.ClientConfig
-	if cc.URL == nil || *cc.URL != "https://new:9443/convert" {
-		t.Errorf("Expected URL https://new:9443/convert, got %v", cc.URL)
+	if cc.URL != nil {
+		t.Errorf("Expected URL to remain unset, got %v", *cc.URL)
 	}
-	if cc.Service != nil {
-		t.Errorf("Expected Service to be cleared, got %+v", cc.Service)
+	if cc.Service == nil || cc.Service.Name != originalSvc.Name || cc.Service.Namespace != originalSvc.Namespace || cc.Service.Path == nil || *cc.Service.Path != servicePath {
+		t.Errorf("Expected Service to be preserved, got %+v", cc.Service)
+	}
+	if len(cc.CABundle) == 0 {
+		t.Errorf("Expected CABundle to be populated")
 	}
 }

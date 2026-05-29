@@ -56,24 +56,23 @@ type WebhookReconciler struct {
 	TargetClient client.Client // Target cluster client
 
 	// ConfigMap mode: name of the ConfigMap containing webhook YAML.
-	// If empty, the reconciler runs in patch mode using MutatingWebhookNames /
-	// ValidatingWebhookNames / WebhookHost. Exactly one of the two modes must be set.
+	// If empty, the reconciler runs in patch mode using WebhookLabelKey /
+	// WebhookLabelValue. Exactly one of the two modes must be set.
 	WebhookConfigName string
 
-	// Patch mode: names of pre-existing webhook configurations in the target cluster
-	// whose clientConfig.URL host:port and caBundle should be patched. Path is preserved
-	// from the existing object per webhook entry.
-	MutatingWebhookNames   []string
-	ValidatingWebhookNames []string
-	// WebhookHost is "host" or "host:port" used when rewriting clientConfig.URL.
-	WebhookHost string
-
-	// CRDNames is the list of CustomResourceDefinition names whose conversion
-	// webhook clientConfig should be patched. Allowed in both ConfigMap and patch
-	// mode. CABundle is always set; clientConfig.URL is rewritten only when
-	// WebhookHost is set (path is preserved from the existing URL or Service.Path).
+	// Patch mode: label selector used to discover MutatingWebhookConfigurations,
+	// ValidatingWebhookConfigurations, and CustomResourceDefinitions in the target
+	// cluster whose caBundle should be patched. Both fields must be non-empty in
+	// patch mode. clientConfig.URL and clientConfig.Service are left unchanged.
 	// CRDs without a Webhook conversion strategy are logged and skipped.
-	CRDNames []string
+	WebhookLabelKey   string
+	WebhookLabelValue string
+
+	// CertSANs is a list of DNS names and/or IP addresses to include as certificate
+	// SANs. Each entry is auto-classified: parses as net.ParseIP -> IP SAN; otherwise
+	// DNS SAN. Required in patch mode (sole SAN source). In ConfigMap mode, these are
+	// merged with SANs derived from the ConfigMap's webhook services/URLs.
+	CertSANs []string
 
 	Namespace             string
 	CertSecretName        string
@@ -112,6 +111,10 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Extract service references
 	services := webhooks.ExtractServiceReferences(configs)
+	// Append any user-supplied SANs (auto-classified DNS vs IP downstream).
+	for _, san := range r.CertSANs {
+		services = append(services, certificates.ServiceReference{Hostname: san})
+	}
 	if len(services) == 0 {
 		logger.Info("No service references found in webhook configurations")
 		return ctrl.Result{}, nil
@@ -153,7 +156,7 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, fmt.Errorf("failed to apply webhook configurations: %w", err)
 	}
 
-	// Patch CRD conversion webhooks (no-op when CRDNames is empty)
+	// Patch CRD conversion webhooks (no-op when --webhook-label is unset)
 	if err := r.patchCRDs(ctx, caCert); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to patch CRDs: %w", err)
 	}
@@ -445,23 +448,25 @@ func (r *WebhookReconciler) applyWebhookConfigurations(ctx context.Context, conf
 
 // reconcilePatchMode runs the alternative reconcile flow for pre-existing webhook
 // configurations in the target cluster. It generates/rotates certificates whose SANs
-// match WebhookHost, then for each named MutatingWebhookConfiguration / Validating-
-// WebhookConfiguration: rewrites every webhook entry's clientConfig.URL host (preserving
-// path), clears clientConfig.Service, and injects the freshly generated CA bundle.
-// Missing target-cluster configurations are logged and skipped (never created).
+// match CertSANs, then for each named MutatingWebhookConfiguration / Validating-
+// WebhookConfiguration injects the freshly generated CA bundle into every webhook
+// entry's clientConfig.CABundle. Existing clientConfig.URL and clientConfig.Service
+// are left untouched. Missing target-cluster configurations are logged and skipped
+// (never created).
 func (r *WebhookReconciler) reconcilePatchMode(ctx context.Context) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	host := hostnameOnly(r.WebhookHost)
-	if host == "" {
-		return ctrl.Result{}, errors.New("webhook host is empty in patch mode")
+	if len(r.CertSANs) == 0 {
+		return ctrl.Result{}, errors.New("cert-sans is empty in patch mode")
 	}
-	services := []certificates.ServiceReference{{Hostname: host}}
+	services := make([]certificates.ServiceReference, 0, len(r.CertSANs))
+	for _, san := range r.CertSANs {
+		services = append(services, certificates.ServiceReference{Hostname: san})
+	}
 
 	logger.Info("Reconciling in patch mode",
-		"webhookHost", r.WebhookHost,
-		"mutating", r.MutatingWebhookNames,
-		"validating", r.ValidatingWebhookNames,
+		"certSANs", r.CertSANs,
+		"webhookLabel", r.WebhookLabelKey+"="+r.WebhookLabelValue,
 	)
 
 	secret, reason, err := r.checkCertificates(ctx, services)
@@ -470,7 +475,7 @@ func (r *WebhookReconciler) reconcilePatchMode(ctx context.Context) (ctrl.Result
 	}
 
 	if reason != "" {
-		logger.Info("Generating certificates", "reason", reason, "host", host)
+		logger.Info("Generating certificates", "reason", reason, "sans", r.CertSANs)
 		if err := r.generateAndStoreCertificates(ctx, services); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to generate certificates: %w", err)
 		}
@@ -507,129 +512,94 @@ func (r *WebhookReconciler) reconcilePatchMode(ctx context.Context) (ctrl.Result
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
-// patchExistingWebhookConfigurations fetches each named webhook configuration from the
-// target cluster, rewrites every entry's clientConfig.URL host:port (preserving path)
-// and CA bundle, and updates the object. Missing names are logged and skipped.
+// patchExistingWebhookConfigurations lists MutatingWebhookConfigurations and
+// ValidatingWebhookConfigurations in the target cluster matching the configured
+// label selector, and rewrites only clientConfig.CABundle on every entry. The
+// existing clientConfig.URL and clientConfig.Service fields are left untouched.
+// No-op when the label selector is unset (ConfigMap mode).
 func (r *WebhookReconciler) patchExistingWebhookConfigurations(ctx context.Context, caCert []byte) error {
-	logger := log.FromContext(ctx)
-
-	for _, name := range r.MutatingWebhookNames {
-		mwc := &admissionv1.MutatingWebhookConfiguration{}
-		if err := r.TargetClient.Get(ctx, types.NamespacedName{Name: name}, mwc); err != nil {
-			if apierrors.IsNotFound(err) {
-				logger.Info("MutatingWebhookConfiguration not found, skipping", "name", name)
-				continue
-			}
-			return fmt.Errorf("failed to get MutatingWebhookConfiguration %s: %w", name, err)
-		}
-		for i := range mwc.Webhooks {
-			cc := &mwc.Webhooks[i].ClientConfig
-			path := "/"
-			if cc.URL != nil {
-				path = webhooks.ExtractPathFromURL(*cc.URL)
-			}
-			newURL := webhooks.BuildURL(r.WebhookHost, path)
-			cc.URL = &newURL
-			cc.Service = nil
-			cc.CABundle = caCert
-		}
-		if err := r.TargetClient.Update(ctx, mwc); err != nil {
-			return fmt.Errorf("failed to update MutatingWebhookConfiguration %s: %w", name, err)
-		}
-		logger.Info("Patched MutatingWebhookConfiguration", "name", name)
-	}
-
-	for _, name := range r.ValidatingWebhookNames {
-		vwc := &admissionv1.ValidatingWebhookConfiguration{}
-		if err := r.TargetClient.Get(ctx, types.NamespacedName{Name: name}, vwc); err != nil {
-			if apierrors.IsNotFound(err) {
-				logger.Info("ValidatingWebhookConfiguration not found, skipping", "name", name)
-				continue
-			}
-			return fmt.Errorf("failed to get ValidatingWebhookConfiguration %s: %w", name, err)
-		}
-		for i := range vwc.Webhooks {
-			cc := &vwc.Webhooks[i].ClientConfig
-			path := "/"
-			if cc.URL != nil {
-				path = webhooks.ExtractPathFromURL(*cc.URL)
-			}
-			newURL := webhooks.BuildURL(r.WebhookHost, path)
-			cc.URL = &newURL
-			cc.Service = nil
-			cc.CABundle = caCert
-		}
-		if err := r.TargetClient.Update(ctx, vwc); err != nil {
-			return fmt.Errorf("failed to update ValidatingWebhookConfiguration %s: %w", name, err)
-		}
-		logger.Info("Patched ValidatingWebhookConfiguration", "name", name)
-	}
-
-	return nil
-}
-
-// patchCRDs fetches each named CustomResourceDefinition from the target cluster and
-// updates its conversion-webhook clientConfig: CABundle is always set; clientConfig.URL
-// is rewritten to use r.WebhookHost (preserving path) when WebhookHost is set, with
-// clientConfig.Service cleared. CRDs that are missing, lack a Webhook conversion
-// strategy, or have no clientConfig are logged and skipped. No-op when CRDNames is empty.
-func (r *WebhookReconciler) patchCRDs(ctx context.Context, caCert []byte) error {
-	if len(r.CRDNames) == 0 {
+	if r.WebhookLabelKey == "" || r.WebhookLabelValue == "" {
 		return nil
 	}
 	logger := log.FromContext(ctx)
+	selector := client.MatchingLabels{r.WebhookLabelKey: r.WebhookLabelValue}
+	labelStr := r.WebhookLabelKey + "=" + r.WebhookLabelValue
 
-	for _, name := range r.CRDNames {
-		crd := &apiextensionsv1.CustomResourceDefinition{}
-		if err := r.TargetClient.Get(ctx, types.NamespacedName{Name: name}, crd); err != nil {
-			if apierrors.IsNotFound(err) {
-				logger.Info("CustomResourceDefinition not found, skipping", "name", name)
-				continue
-			}
-			return fmt.Errorf("failed to get CustomResourceDefinition %s: %w", name, err)
+	var mwcList admissionv1.MutatingWebhookConfigurationList
+	if err := r.TargetClient.List(ctx, &mwcList, selector); err != nil {
+		return fmt.Errorf("failed to list MutatingWebhookConfigurations: %w", err)
+	}
+	if len(mwcList.Items) == 0 {
+		logger.Info("No MutatingWebhookConfigurations matched label", "label", labelStr)
+	}
+	for i := range mwcList.Items {
+		mwc := &mwcList.Items[i]
+		for j := range mwc.Webhooks {
+			mwc.Webhooks[j].ClientConfig.CABundle = caCert
 		}
-
-		conv := crd.Spec.Conversion
-		if conv == nil || conv.Strategy != apiextensionsv1.WebhookConverter || conv.Webhook == nil || conv.Webhook.ClientConfig == nil {
-			logger.Info("CRD has no Webhook conversion strategy, skipping", "name", name)
-			continue
+		if err := r.TargetClient.Update(ctx, mwc); err != nil {
+			return fmt.Errorf("failed to update MutatingWebhookConfiguration %s: %w", mwc.Name, err)
 		}
+		logger.Info("Patched MutatingWebhookConfiguration", "name", mwc.Name)
+	}
 
-		cc := conv.Webhook.ClientConfig
-		cc.CABundle = caCert
-
-		if r.WebhookHost != "" {
-			path := "/"
-			switch {
-			case cc.URL != nil && *cc.URL != "":
-				path = webhooks.ExtractPathFromURL(*cc.URL)
-			case cc.Service != nil && cc.Service.Path != nil && *cc.Service.Path != "":
-				path = *cc.Service.Path
-			}
-			newURL := webhooks.BuildURL(r.WebhookHost, path)
-			cc.URL = &newURL
-			cc.Service = nil
+	var vwcList admissionv1.ValidatingWebhookConfigurationList
+	if err := r.TargetClient.List(ctx, &vwcList, selector); err != nil {
+		return fmt.Errorf("failed to list ValidatingWebhookConfigurations: %w", err)
+	}
+	if len(vwcList.Items) == 0 {
+		logger.Info("No ValidatingWebhookConfigurations matched label", "label", labelStr)
+	}
+	for i := range vwcList.Items {
+		vwc := &vwcList.Items[i]
+		for j := range vwc.Webhooks {
+			vwc.Webhooks[j].ClientConfig.CABundle = caCert
 		}
-
-		if err := r.TargetClient.Update(ctx, crd); err != nil {
-			return fmt.Errorf("failed to update CustomResourceDefinition %s: %w", name, err)
+		if err := r.TargetClient.Update(ctx, vwc); err != nil {
+			return fmt.Errorf("failed to update ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
 		}
-		logger.Info("Patched CustomResourceDefinition conversion webhook", "name", name)
+		logger.Info("Patched ValidatingWebhookConfiguration", "name", vwc.Name)
 	}
 
 	return nil
 }
 
-// hostnameOnly returns the host portion of a "host" or "host:port" string.
-// IPv6 literals in brackets are unwrapped.
-func hostnameOnly(hostPort string) string {
-	if hostPort == "" {
-		return ""
+// patchCRDs lists CustomResourceDefinitions in the target cluster matching the
+// configured label selector and updates only conversion-webhook
+// clientConfig.CABundle on each match. clientConfig.URL and clientConfig.Service
+// are left untouched. CRDs that lack a Webhook conversion strategy or have no
+// clientConfig are logged and skipped. No-op when the label selector is unset
+// (ConfigMap mode without label-driven CRD patching).
+func (r *WebhookReconciler) patchCRDs(ctx context.Context, caCert []byte) error {
+	if r.WebhookLabelKey == "" || r.WebhookLabelValue == "" {
+		return nil
 	}
-	if h, _, err := net.SplitHostPort(hostPort); err == nil {
-		return h
+	logger := log.FromContext(ctx)
+	selector := client.MatchingLabels{r.WebhookLabelKey: r.WebhookLabelValue}
+	labelStr := r.WebhookLabelKey + "=" + r.WebhookLabelValue
+
+	var crdList apiextensionsv1.CustomResourceDefinitionList
+	if err := r.TargetClient.List(ctx, &crdList, selector); err != nil {
+		return fmt.Errorf("failed to list CustomResourceDefinitions: %w", err)
 	}
-	return hostPort
+	if len(crdList.Items) == 0 {
+		logger.Info("No CustomResourceDefinitions matched label", "label", labelStr)
+	}
+	for i := range crdList.Items {
+		crd := &crdList.Items[i]
+		conv := crd.Spec.Conversion
+		if conv == nil || conv.Strategy != apiextensionsv1.WebhookConverter || conv.Webhook == nil || conv.Webhook.ClientConfig == nil {
+			logger.Info("CRD has no Webhook conversion strategy, skipping", "name", crd.Name)
+			continue
+		}
+		conv.Webhook.ClientConfig.CABundle = caCert
+		if err := r.TargetClient.Update(ctx, crd); err != nil {
+			return fmt.Errorf("failed to update CustomResourceDefinition %s: %w", crd.Name, err)
+		}
+		logger.Info("Patched CustomResourceDefinition conversion webhook", "name", crd.Name)
+	}
+
+	return nil
 }
 
 // updateCertExpiryGauge sets the certificate expiry metric from the secret's TLS cert.
