@@ -74,6 +74,14 @@ type WebhookReconciler struct {
 	WebhookLabelKey   string
 	WebhookLabelValue string
 
+	// ExternalHost, when non-empty, rewrites labeled MWC/VWC/CRD-conversion
+	// clientConfig.Service entries to clientConfig.URL =
+	// "https://<ExternalHost><Service.Path>" (Service.Path nil/empty → "/").
+	// The Service field is then cleared. Entries that already use URL-form
+	// clientConfig are left untouched. Patch mode only; main.go ignores the
+	// flag in ConfigMap mode.
+	ExternalHost string
+
 	// CertSANs is a list of DNS names and/or IP addresses to include as certificate
 	// SANs. Each entry is auto-classified: parses as net.ParseIP -> IP SAN; otherwise
 	// DNS SAN. Required in patch mode (sole SAN source). In ConfigMap mode, these are
@@ -518,10 +526,27 @@ func (r *WebhookReconciler) reconcilePatchMode(ctx context.Context) (ctrl.Result
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
+// buildExternalURL composes the URL that replaces a Service-form clientConfig
+// when --external-host is set. Path semantics: nil pointer or empty string → "/";
+// "/foo" → "/foo"; "foo" → "/foo" (leading slash is added).
+func buildExternalURL(host string, svcPath *string) string {
+	path := "/"
+	if svcPath != nil && *svcPath != "" {
+		path = *svcPath
+		if path[0] != '/' {
+			path = "/" + path
+		}
+	}
+	return "https://" + host + path
+}
+
 // patchExistingWebhookConfigurations lists MutatingWebhookConfigurations and
 // ValidatingWebhookConfigurations in the target cluster matching the configured
 // label selector, and rewrites only clientConfig.CABundle on every entry. The
-// existing clientConfig.URL and clientConfig.Service fields are left untouched.
+// existing clientConfig.URL and clientConfig.Service fields are left untouched,
+// unless ExternalHost is set: in that case Service-form clientConfig is
+// rewritten to URL-form (URL = https://<ExternalHost><Service.Path>) and
+// Service is cleared. URL-form entries are left alone.
 // No-op when the label selector is unset, or when running in ConfigMap mode
 // (which owns admission-webhook creation; labeled admission configs are
 // intentionally ignored there).
@@ -545,11 +570,23 @@ func (r *WebhookReconciler) patchExistingWebhookConfigurations(ctx context.Conte
 	}
 	for i := range mwcList.Items {
 		mwc := &mwcList.Items[i]
+		rewroteURL := ""
 		for j := range mwc.Webhooks {
-			mwc.Webhooks[j].ClientConfig.CABundle = caCert
+			cc := &mwc.Webhooks[j].ClientConfig
+			cc.CABundle = caCert
+			if r.ExternalHost != "" && cc.Service != nil {
+				url := buildExternalURL(r.ExternalHost, cc.Service.Path)
+				cc.URL = &url
+				cc.Service = nil
+				rewroteURL = url
+			}
 		}
 		if err := r.TargetClient.Update(ctx, mwc); err != nil {
 			return fmt.Errorf("failed to update MutatingWebhookConfiguration %s: %w", mwc.Name, err)
+		}
+		if rewroteURL != "" {
+			logger.Info("Rewrote clientConfig.Service to URL via --external-host",
+				"kind", "MutatingWebhookConfiguration", "name", mwc.Name, "url", rewroteURL)
 		}
 		logger.Info("Patched MutatingWebhookConfiguration", "name", mwc.Name)
 	}
@@ -563,11 +600,23 @@ func (r *WebhookReconciler) patchExistingWebhookConfigurations(ctx context.Conte
 	}
 	for i := range vwcList.Items {
 		vwc := &vwcList.Items[i]
+		rewroteURL := ""
 		for j := range vwc.Webhooks {
-			vwc.Webhooks[j].ClientConfig.CABundle = caCert
+			cc := &vwc.Webhooks[j].ClientConfig
+			cc.CABundle = caCert
+			if r.ExternalHost != "" && cc.Service != nil {
+				url := buildExternalURL(r.ExternalHost, cc.Service.Path)
+				cc.URL = &url
+				cc.Service = nil
+				rewroteURL = url
+			}
 		}
 		if err := r.TargetClient.Update(ctx, vwc); err != nil {
 			return fmt.Errorf("failed to update ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
+		}
+		if rewroteURL != "" {
+			logger.Info("Rewrote clientConfig.Service to URL via --external-host",
+				"kind", "ValidatingWebhookConfiguration", "name", vwc.Name, "url", rewroteURL)
 		}
 		logger.Info("Patched ValidatingWebhookConfiguration", "name", vwc.Name)
 	}
@@ -578,9 +627,14 @@ func (r *WebhookReconciler) patchExistingWebhookConfigurations(ctx context.Conte
 // patchCRDs lists CustomResourceDefinitions in the target cluster matching the
 // configured label selector and updates only conversion-webhook
 // clientConfig.CABundle on each match. clientConfig.URL and clientConfig.Service
-// are left untouched. CRDs that lack a Webhook conversion strategy or have no
-// clientConfig are logged and skipped. No-op when the label selector is unset
-// (ConfigMap mode without label-driven CRD patching).
+// are left untouched, unless ExternalHost is set in patch mode: in that case
+// Service-form clientConfig is rewritten to URL-form (URL =
+// https://<ExternalHost><Service.Path>) and Service is cleared. CRDs that lack
+// a Webhook conversion strategy or have no clientConfig are logged and skipped.
+// No-op when the label selector is unset (ConfigMap mode without label-driven
+// CRD patching). ExternalHost rewrites are skipped in ConfigMap mode even when
+// the flag was passed (main.go is responsible for not propagating it there;
+// this is a defense-in-depth check).
 func (r *WebhookReconciler) patchCRDs(ctx context.Context, caCert []byte) error {
 	if r.WebhookLabelKey == "" || r.WebhookLabelValue == "" {
 		return nil
@@ -603,9 +657,21 @@ func (r *WebhookReconciler) patchCRDs(ctx context.Context, caCert []byte) error 
 			logger.Info("CRD has no Webhook conversion strategy, skipping", "name", crd.Name)
 			continue
 		}
-		conv.Webhook.ClientConfig.CABundle = caCert
+		cc := conv.Webhook.ClientConfig
+		cc.CABundle = caCert
+		rewroteURL := ""
+		if r.WebhookConfigName == "" && r.ExternalHost != "" && cc.Service != nil {
+			url := buildExternalURL(r.ExternalHost, cc.Service.Path)
+			cc.URL = &url
+			cc.Service = nil
+			rewroteURL = url
+		}
 		if err := r.TargetClient.Update(ctx, crd); err != nil {
 			return fmt.Errorf("failed to update CustomResourceDefinition %s: %w", crd.Name, err)
+		}
+		if rewroteURL != "" {
+			logger.Info("Rewrote clientConfig.Service to URL via --external-host",
+				"kind", "CustomResourceDefinition", "name", crd.Name, "url", rewroteURL)
 		}
 		logger.Info("Patched CustomResourceDefinition conversion webhook", "name", crd.Name)
 	}

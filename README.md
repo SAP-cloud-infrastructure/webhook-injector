@@ -196,6 +196,7 @@ Configure via command-line flags. Only `--webhook-config-name` is required; name
 | `--enable-leader-election` | Enable HA mode | `true` |
 | `--leader-election-id` | Lease name | `webhook-injector-leader` |
 | `--sync-period` | Reconciliation interval | `5m` |
+| `--external-host` | Patch-mode only: `host:port` to substitute into labeled MWC/VWC/CRD `clientConfig` (Service form is rewritten to `https://<host>:<port><Service.Path>`; URL-form entries are left untouched) | unset |
 | `--metrics-addr` | Metrics bind address | `:8082` |
 | `--health-addr` | Health probe address | `:8083` |
 | `--log-level` | Log level (debug/info/error) | `info` |
@@ -204,6 +205,17 @@ Configure via command-line flags. Only `--webhook-config-name` is required; name
 ```bash
 webhook-injector --webhook-config-name=my-config
 ```
+
+**Patch mode with external endpoint** (webhook server is reached at an external `host:port` from the target cluster — e.g., NodePort or LoadBalancer):
+
+```bash
+webhook-injector \
+  --webhook-label=webhook-injector/name=cert-manager \
+  --cert-sans=webhook.example.com \
+  --external-host=webhook.example.com:9443
+```
+
+`--external-host` rewrites every labeled `MutatingWebhookConfiguration`, `ValidatingWebhookConfiguration`, and `CustomResourceDefinition` conversion-webhook entry whose `clientConfig.Service` is set: the Service is replaced with `clientConfig.URL = https://<external-host><Service.Path>` (Service.Path nil/empty → `/`). Entries that already use URL-form `clientConfig` are left untouched. `caBundle` is patched as usual. The flag does not affect SAN generation — `--cert-sans` is still the sole SAN source in patch mode.
 
 ## Metrics
 

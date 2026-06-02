@@ -1387,3 +1387,353 @@ func TestWebhookReconciler_PatchCRDs_ServiceBasedConversion_CAOnly_InPatchMode(t
 		t.Errorf("Expected CABundle to be populated")
 	}
 }
+
+// labeledMWCWithService builds a labeled MutatingWebhookConfiguration whose
+// single webhook entry uses Service-form clientConfig with the given path.
+// Used by --external-host rewrite tests below.
+func labeledMWCWithService(name, svcName, svcNS string, path *string) *admissionv1.MutatingWebhookConfiguration {
+	return &admissionv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{"webhook-injector/name": "test"},
+		},
+		Webhooks: []admissionv1.MutatingWebhook{{
+			Name: "m1.example.com",
+			ClientConfig: admissionv1.WebhookClientConfig{
+				Service: &admissionv1.ServiceReference{
+					Name:      svcName,
+					Namespace: svcNS,
+					Path:      path,
+				},
+			},
+		}},
+	}
+}
+
+func TestWebhookReconciler_PatchMode_ExternalHost_RewritesServiceToURL(t *testing.T) {
+	s := patchModeScheme(t)
+
+	servicePath := "/mutate"
+	mwc := labeledMWCWithService("ext-mwc", "svc", "ns", &servicePath)
+
+	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
+	targetClient := fake.NewClientBuilder().WithScheme(s).WithObjects(mwc).Build()
+
+	reconciler := &WebhookReconciler{
+		Client:                hostingClient,
+		TargetClient:          targetClient,
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"webhook.example.com"},
+		ExternalHost:          "webhook.example.com:9443",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.2,
+		Scheme:                s,
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	got := &admissionv1.MutatingWebhookConfiguration{}
+	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "ext-mwc"}, got); err != nil {
+		t.Fatalf("Get MWC failed: %v", err)
+	}
+	cc := got.Webhooks[0].ClientConfig
+	if cc.Service != nil {
+		t.Errorf("Expected Service to be cleared, got %+v", cc.Service)
+	}
+	wantURL := "https://webhook.example.com:9443/mutate"
+	if cc.URL == nil || *cc.URL != wantURL {
+		t.Errorf("Expected URL=%q, got %v", wantURL, cc.URL)
+	}
+	if len(cc.CABundle) == 0 {
+		t.Errorf("Expected CABundle to be populated")
+	}
+}
+
+func TestWebhookReconciler_PatchMode_ExternalHost_NilServicePath_DefaultsToSlash(t *testing.T) {
+	s := patchModeScheme(t)
+
+	mwc := labeledMWCWithService("nil-path-mwc", "svc", "ns", nil)
+
+	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
+	targetClient := fake.NewClientBuilder().WithScheme(s).WithObjects(mwc).Build()
+
+	reconciler := &WebhookReconciler{
+		Client:                hostingClient,
+		TargetClient:          targetClient,
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"webhook.example.com"},
+		ExternalHost:          "webhook.example.com:9443",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.2,
+		Scheme:                s,
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	got := &admissionv1.MutatingWebhookConfiguration{}
+	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "nil-path-mwc"}, got); err != nil {
+		t.Fatalf("Get MWC failed: %v", err)
+	}
+	wantURL := "https://webhook.example.com:9443/"
+	if cc := got.Webhooks[0].ClientConfig; cc.URL == nil || *cc.URL != wantURL {
+		t.Errorf("Expected URL=%q, got %v", wantURL, cc.URL)
+	}
+}
+
+func TestWebhookReconciler_PatchMode_ExternalHost_EmptyServicePath_DefaultsToSlash(t *testing.T) {
+	s := patchModeScheme(t)
+
+	emptyPath := ""
+	mwc := labeledMWCWithService("empty-path-mwc", "svc", "ns", &emptyPath)
+
+	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
+	targetClient := fake.NewClientBuilder().WithScheme(s).WithObjects(mwc).Build()
+
+	reconciler := &WebhookReconciler{
+		Client:                hostingClient,
+		TargetClient:          targetClient,
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"webhook.example.com"},
+		ExternalHost:          "webhook.example.com:9443",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.2,
+		Scheme:                s,
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	got := &admissionv1.MutatingWebhookConfiguration{}
+	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "empty-path-mwc"}, got); err != nil {
+		t.Fatalf("Get MWC failed: %v", err)
+	}
+	wantURL := "https://webhook.example.com:9443/"
+	if cc := got.Webhooks[0].ClientConfig; cc.URL == nil || *cc.URL != wantURL {
+		t.Errorf("Expected URL=%q, got %v", wantURL, cc.URL)
+	}
+}
+
+func TestWebhookReconciler_PatchMode_ExternalHost_LeavesURLEntryUntouched(t *testing.T) {
+	s := patchModeScheme(t)
+
+	preExistingURL := "https://already-url:1234/mutate"
+	mwc := &admissionv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "url-mwc",
+			Labels: map[string]string{"webhook-injector/name": "test"},
+		},
+		Webhooks: []admissionv1.MutatingWebhook{{
+			Name: "m1.example.com",
+			ClientConfig: admissionv1.WebhookClientConfig{
+				URL: &preExistingURL,
+			},
+		}},
+	}
+
+	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
+	targetClient := fake.NewClientBuilder().WithScheme(s).WithObjects(mwc).Build()
+
+	reconciler := &WebhookReconciler{
+		Client:                hostingClient,
+		TargetClient:          targetClient,
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"webhook.example.com"},
+		ExternalHost:          "webhook.example.com:9443",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.2,
+		Scheme:                s,
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	got := &admissionv1.MutatingWebhookConfiguration{}
+	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "url-mwc"}, got); err != nil {
+		t.Fatalf("Get MWC failed: %v", err)
+	}
+	cc := got.Webhooks[0].ClientConfig
+	if cc.URL == nil || *cc.URL != preExistingURL {
+		t.Errorf("Expected URL to be unchanged %q, got %v", preExistingURL, cc.URL)
+	}
+	if cc.Service != nil {
+		t.Errorf("Expected Service to remain nil, got %+v", cc.Service)
+	}
+	if len(cc.CABundle) == 0 {
+		t.Errorf("Expected CABundle to be populated")
+	}
+}
+
+func TestWebhookReconciler_PatchMode_ExternalHost_MixedEntriesInOneMWC(t *testing.T) {
+	s := patchModeScheme(t)
+
+	preExistingURL := "https://already-url:1234/validate"
+	servicePath := "/mutate"
+	mwc := &admissionv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "mixed-mwc",
+			Labels: map[string]string{"webhook-injector/name": "test"},
+		},
+		Webhooks: []admissionv1.MutatingWebhook{
+			{
+				Name: "url.example.com",
+				ClientConfig: admissionv1.WebhookClientConfig{
+					URL: &preExistingURL,
+				},
+			},
+			{
+				Name: "svc.example.com",
+				ClientConfig: admissionv1.WebhookClientConfig{
+					Service: &admissionv1.ServiceReference{
+						Name:      "svc",
+						Namespace: "ns",
+						Path:      &servicePath,
+					},
+				},
+			},
+		},
+	}
+
+	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
+	targetClient := fake.NewClientBuilder().WithScheme(s).WithObjects(mwc).Build()
+
+	reconciler := &WebhookReconciler{
+		Client:                hostingClient,
+		TargetClient:          targetClient,
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"webhook.example.com"},
+		ExternalHost:          "webhook.example.com:9443",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.2,
+		Scheme:                s,
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	got := &admissionv1.MutatingWebhookConfiguration{}
+	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "mixed-mwc"}, got); err != nil {
+		t.Fatalf("Get MWC failed: %v", err)
+	}
+
+	urlEntry := got.Webhooks[0].ClientConfig
+	if urlEntry.URL == nil || *urlEntry.URL != preExistingURL {
+		t.Errorf("URL entry: expected URL unchanged %q, got %v", preExistingURL, urlEntry.URL)
+	}
+	if urlEntry.Service != nil {
+		t.Errorf("URL entry: expected Service nil, got %+v", urlEntry.Service)
+	}
+	if len(urlEntry.CABundle) == 0 {
+		t.Errorf("URL entry: expected CABundle populated")
+	}
+
+	svcEntry := got.Webhooks[1].ClientConfig
+	wantURL := "https://webhook.example.com:9443/mutate"
+	if svcEntry.URL == nil || *svcEntry.URL != wantURL {
+		t.Errorf("Service entry: expected URL %q, got %v", wantURL, svcEntry.URL)
+	}
+	if svcEntry.Service != nil {
+		t.Errorf("Service entry: expected Service cleared, got %+v", svcEntry.Service)
+	}
+	if len(svcEntry.CABundle) == 0 {
+		t.Errorf("Service entry: expected CABundle populated")
+	}
+}
+
+func TestWebhookReconciler_PatchMode_ExternalHost_RewritesCRDConversion(t *testing.T) {
+	s := patchModeScheme(t)
+
+	servicePath := "/convert"
+	crd := crdWithWebhookConversion(apiextensionsv1.WebhookConverter,
+		&apiextensionsv1.WebhookClientConfig{
+			Service: &apiextensionsv1.ServiceReference{
+				Name:      "conv-svc",
+				Namespace: "default",
+				Path:      &servicePath,
+			},
+		})
+
+	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
+	targetClient := fake.NewClientBuilder().WithScheme(s).WithObjects(crd).Build()
+
+	reconciler := &WebhookReconciler{
+		Client:                hostingClient,
+		TargetClient:          targetClient,
+		WebhookLabelKey:       "webhook-injector/name",
+		WebhookLabelValue:     "test",
+		CertSANs:              []string{"webhook.example.com"},
+		ExternalHost:          "webhook.example.com:9443",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.2,
+		Scheme:                s,
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	got := &apiextensionsv1.CustomResourceDefinition{}
+	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: testCRDName}, got); err != nil {
+		t.Fatalf("Get CRD failed: %v", err)
+	}
+	cc := got.Spec.Conversion.Webhook.ClientConfig
+	if cc.Service != nil {
+		t.Errorf("Expected Service to be cleared, got %+v", cc.Service)
+	}
+	wantURL := "https://webhook.example.com:9443/convert"
+	if cc.URL == nil || *cc.URL != wantURL {
+		t.Errorf("Expected URL=%q, got %v", wantURL, cc.URL)
+	}
+	if len(cc.CABundle) == 0 {
+		t.Errorf("Expected CABundle populated")
+	}
+}
+
+func TestBuildExternalURL(t *testing.T) {
+	empty := ""
+	slashed := "/foo"
+	unslashed := "foo"
+	deep := "/a/b/c"
+	cases := []struct {
+		name string
+		host string
+		path *string
+		want string
+	}{
+		{"nil path", "h:1", nil, "https://h:1/"},
+		{"empty path", "h:1", &empty, "https://h:1/"},
+		{"slashed path", "h:1", &slashed, "https://h:1/foo"},
+		{"unslashed path", "h:1", &unslashed, "https://h:1/foo"},
+		{"deep path", "h:1", &deep, "https://h:1/a/b/c"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildExternalURL(tc.host, tc.path); got != tc.want {
+				t.Errorf("buildExternalURL(%q, %v) = %q, want %q", tc.host, tc.path, got, tc.want)
+			}
+		})
+	}
+}

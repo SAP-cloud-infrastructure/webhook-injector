@@ -7,9 +7,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +41,7 @@ var (
 	webhookConfigName     string
 	webhookLabel          string
 	certSANs              string
+	externalHost          string
 	namespace             string
 	certSecretName        string
 	certDir               string
@@ -58,6 +61,7 @@ func init() {
 	flag.StringVar(&webhookConfigName, "webhook-config-name", "", "ConfigMap name containing webhook definitions (ConfigMap mode). Mutually exclusive with --webhook-label.")
 	flag.StringVar(&webhookLabel, "webhook-label", "", "Label selector (key=value) used to discover MutatingWebhookConfigurations, ValidatingWebhookConfigurations, and CustomResourceDefinitions in the target cluster whose caBundle should be patched (patch mode). Required in patch mode.")
 	flag.StringVar(&certSANs, "cert-sans", "", "Comma-separated DNS names and/or IP addresses to include as certificate SANs. Required in patch mode. Optional in ConfigMap mode (in addition to SANs derived from the ConfigMap).")
+	flag.StringVar(&externalHost, "external-host", "", "host:port to substitute into clientConfig of labeled MutatingWebhookConfigurations, ValidatingWebhookConfigurations, and CRD conversion webhooks. Patch mode only. When set, each entry's clientConfig.Service is replaced with clientConfig.URL = \"https://<external-host><Service.Path>\" (path defaults to \"/\"). caBundle handling is unchanged. Ignored in ConfigMap mode.")
 	flag.StringVar(&namespace, "namespace", "", "Namespace for all resources (auto-detects from pod if not set)")
 	flag.StringVar(&certSecretName, "cert-secret-name", "webhook-injector-certs", "Secret name for storing certificates")
 	flag.StringVar(&certDir, "cert-dir", "/tmp/webhook-certs", "Directory to write certificate files")
@@ -119,6 +123,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validate --external-host format. Patch mode only; in ConfigMap mode it's
+	// silently ignored after a warning so users running mixed deployments
+	// don't have to template flags differently per cluster.
+	effectiveExternalHost := ""
+	if externalHost != "" {
+		if err := validateHostPort(externalHost); err != nil {
+			setupLog.Error(err, "invalid --external-host", "value", externalHost)
+			os.Exit(1)
+		}
+		if patchModeActive {
+			effectiveExternalHost = externalHost
+		} else {
+			setupLog.Info("--external-host is ignored in ConfigMap mode", "external-host", externalHost)
+		}
+	}
+
 	// Auto-detect namespace if not provided
 	if namespace == "" {
 		var err error
@@ -141,6 +161,7 @@ func main() {
 		"webhook-config-name", webhookConfigName,
 		"webhook-label", webhookLabel,
 		"cert-sans", certSANsList,
+		"external-host", effectiveExternalHost,
 		"cert-secret-name", certSecretName,
 		"enable-leader-election", enableLeaderElection,
 	)
@@ -230,6 +251,7 @@ func main() {
 		WebhookLabelKey:       labelKey,
 		WebhookLabelValue:     labelValue,
 		CertSANs:              certSANsList,
+		ExternalHost:          effectiveExternalHost,
 		Namespace:             namespace,
 		CertSecretName:        certSecretName,
 		CertValidity:          certValidity,
@@ -310,6 +332,29 @@ func modeLabel(configMapMode bool) string {
 		return "configmap"
 	}
 	return "patch"
+}
+
+// validateHostPort returns an error if s is not a valid host:port string with
+// a non-empty host (DNS or IP) and an integer port in [1, 65535].
+func validateHostPort(s string) error {
+	host, port, err := net.SplitHostPort(s)
+	if err != nil {
+		return fmt.Errorf("must be host:port: %w", err)
+	}
+	if host == "" {
+		return errors.New("host must not be empty")
+	}
+	if port == "" {
+		return errors.New("port must not be empty")
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("port %q is not an integer", port)
+	}
+	if n < 1 || n > 65535 {
+		return fmt.Errorf("port %d out of range [1,65535]", n)
+	}
+	return nil
 }
 
 func detectNamespace() (string, error) {
