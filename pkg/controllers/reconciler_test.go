@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
@@ -1735,5 +1736,56 @@ func TestBuildExternalURL(t *testing.T) {
 				t.Errorf("buildExternalURL(%q, %v) = %q, want %q", tc.host, tc.path, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPatchModeBootstrap_StartFiresOneEvent(t *testing.T) {
+	ch := make(chan event.GenericEvent, 1)
+	b := &patchModeBootstrap{ch: ch, namespace: "ns", secretName: "sec"}
+
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	select {
+	case evt := <-ch:
+		if evt.Object == nil {
+			t.Fatal("Expected non-nil Object on bootstrap event")
+		}
+		if evt.Object.GetName() != "sec" || evt.Object.GetNamespace() != "ns" {
+			t.Errorf("Bootstrap event metadata mismatch: got %s/%s, want ns/sec",
+				evt.Object.GetNamespace(), evt.Object.GetName())
+		}
+	default:
+		t.Fatal("Expected one bootstrap event on the channel after Start, got none")
+	}
+}
+
+func TestPatchModeBootstrap_StartReturnsOnContextCancel(t *testing.T) {
+	// Unbuffered channel with no reader — Start should block on send and then
+	// return ctx.Err() when the context is canceled. This is what manager
+	// shutdown looks like if it happens before any controller worker reads.
+	ch := make(chan event.GenericEvent)
+	b := &patchModeBootstrap{ch: ch, namespace: "ns", secretName: "sec"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- b.Start(ctx) }()
+
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("Expected non-nil error after context cancel")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after context cancel within 1s")
+	}
+}
+
+func TestPatchModeBootstrap_NeedsLeaderElection(t *testing.T) {
+	b := &patchModeBootstrap{}
+	if !b.NeedLeaderElection() {
+		t.Error("patchModeBootstrap must require leader election so only one replica fires the startup event")
 	}
 }

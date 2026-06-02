@@ -23,9 +23,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
@@ -746,9 +749,22 @@ func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// setupPatchMode wires the controller for patch mode: there is no primary ConfigMap,
-// so we anchor reconciles on the certificate Secret (filtered to CertSecretName).
-// Periodic sync handles drift in the named target-cluster webhook configurations.
+// setupPatchMode wires the controller for patch mode. There is no primary
+// ConfigMap and the certificate Secret may not yet exist (fresh install) — so
+// anchoring on For(&Secret{}) alone would never enqueue a Reconcile until
+// something external touched the Secret. To bootstrap, we:
+//   - watch the certificate Secret (filtered to CertSecretName) for
+//     subsequent rotation/annotation events,
+//   - register a synthetic startup source that fires exactly one event when
+//     the manager elects this replica leader, kicking off the first
+//     Reconcile that creates the Secret.
+//
+// After the first Reconcile, the loop is self-driven: Reconcile returns
+// ctrl.Result{RequeueAfter: ...} based on certificate expiry. The Secret
+// predicate then catches subsequent annotation-driven rotations. Periodic
+// drift in target-cluster webhook configurations is covered by RequeueAfter
+// (and ultimately the manager's --sync-period for cached objects).
+//
 // The reconcile request key is ignored in patch mode — Reconcile branches on
 // r.WebhookConfigName being empty.
 func (r *WebhookReconciler) setupPatchMode(mgr ctrl.Manager) error {
@@ -758,8 +774,61 @@ func (r *WebhookReconciler) setupPatchMode(mgr ctrl.Manager) error {
 		return object.GetName() == r.CertSecretName && object.GetNamespace() == ns
 	})
 
+	// Buffered so the bootstrap Runnable's send never blocks even if the
+	// controller workers haven't started reading yet.
+	bootstrapCh := make(chan event.GenericEvent, 1)
+	bootstrap := &patchModeBootstrap{ch: bootstrapCh, namespace: ns, secretName: r.CertSecretName}
+	if err := mgr.Add(bootstrap); err != nil {
+		return fmt.Errorf("failed to register patch-mode bootstrap runnable: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("webhook-patch-mode").
 		For(&corev1.Secret{}, builder.WithPredicates(secretPredicate)).
+		WatchesRawSource(source.Channel(
+			bootstrapCh,
+			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, _ client.Object) []ctrl.Request {
+				return []ctrl.Request{{NamespacedName: types.NamespacedName{Name: r.CertSecretName, Namespace: ns}}}
+			}),
+		)).
 		Complete(r)
 }
+
+// patchModeBootstrap is a manager.Runnable that fires exactly one synthetic
+// event into the patch-mode controller's channel source when Start is called.
+// It runs on the leader (NeedLeaderElection returns true) so the bootstrap
+// reconcile and the controller it wakes up are governed by the same lease.
+type patchModeBootstrap struct {
+	ch         chan event.GenericEvent
+	namespace  string
+	secretName string
+}
+
+// Start sends one GenericEvent and returns. The event payload is a placeholder
+// ObjectMeta naming the cert Secret — the controller's mapper ignores its
+// fields and always enqueues the same Request, but a non-nil Object is
+// required by the Channel source.
+func (b *patchModeBootstrap) Start(ctx context.Context) error {
+	evt := event.GenericEvent{Object: &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: b.secretName, Namespace: b.namespace},
+	}}
+	select {
+	case b.ch <- evt:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
+}
+
+// NeedLeaderElection ensures the bootstrap only fires on the leader, matching
+// the controller's own (default) leader-election behavior. Without this, all
+// replicas would push a startup event and the followers' events would queue
+// against a controller that isn't running on them.
+func (b *patchModeBootstrap) NeedLeaderElection() bool { return true }
+
+// Compile-time assertions that patchModeBootstrap satisfies the manager
+// interfaces it needs.
+var (
+	_ manager.Runnable               = (*patchModeBootstrap)(nil)
+	_ manager.LeaderElectionRunnable = (*patchModeBootstrap)(nil)
+)
