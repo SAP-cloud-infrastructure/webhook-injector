@@ -61,7 +61,7 @@ func init() {
 	flag.StringVar(&webhookConfigName, "webhook-config-name", "", "ConfigMap name containing webhook definitions (ConfigMap mode). Mutually exclusive with --webhook-label.")
 	flag.StringVar(&webhookLabel, "webhook-label", "", "Label selector (key=value) used to discover MutatingWebhookConfigurations, ValidatingWebhookConfigurations, and CustomResourceDefinitions in the target cluster whose caBundle should be patched (patch mode). Required in patch mode.")
 	flag.StringVar(&certSANs, "cert-sans", "", "Comma-separated DNS names and/or IP addresses to include as certificate SANs. Required in patch mode. Optional in ConfigMap mode (in addition to SANs derived from the ConfigMap).")
-	flag.StringVar(&externalHost, "external-host", "", "host:port to substitute into clientConfig of labeled MutatingWebhookConfigurations, ValidatingWebhookConfigurations, and CRD conversion webhooks. Patch mode only. When set, each entry's clientConfig.Service is replaced with clientConfig.URL = \"https://<external-host><Service.Path>\" (path defaults to \"/\"). caBundle handling is unchanged. Ignored in ConfigMap mode.")
+	flag.StringVar(&externalHost, "external-host", "", "host:port to substitute into clientConfig of labeled MutatingWebhookConfigurations, ValidatingWebhookConfigurations, and CRD conversion webhooks. Required in patch mode. When set, each entry's clientConfig.Service is replaced with clientConfig.URL = \"https://<external-host><Service.Path>\" (path defaults to \"/\"). caBundle handling is unchanged. Ignored in ConfigMap mode.")
 	flag.StringVar(&namespace, "namespace", "", "Namespace for all resources (auto-detects from pod if not set)")
 	flag.StringVar(&certSecretName, "cert-secret-name", "webhook-injector-certs", "Secret name for storing certificates")
 	flag.StringVar(&certDir, "cert-dir", "/tmp/webhook-certs", "Directory to write certificate files")
@@ -120,6 +120,10 @@ func main() {
 	}
 	if patchModeActive && len(certSANsList) == 0 {
 		setupLog.Error(nil, "--cert-sans is required in patch mode")
+		os.Exit(1)
+	}
+	if patchModeActive && externalHost == "" {
+		setupLog.Error(nil, "--external-host is required in patch mode")
 		os.Exit(1)
 	}
 

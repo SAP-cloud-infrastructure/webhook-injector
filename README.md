@@ -196,7 +196,7 @@ Configure via command-line flags. Only `--webhook-config-name` is required; name
 | `--enable-leader-election` | Enable HA mode | `true` |
 | `--leader-election-id` | Lease name | `webhook-injector-leader` |
 | `--sync-period` | Reconciliation interval | `5m` |
-| `--external-host` | Patch-mode only: `host:port` to substitute into labeled MWC/VWC/CRD `clientConfig` (Service form is rewritten to `https://<host>:<port><Service.Path>`; URL-form entries are left untouched) | unset |
+| `--external-host` | Patch-mode only (required there): `host:port` to substitute into labeled MWC/VWC/CRD `clientConfig` (Service form is rewritten to `https://<host>:<port><Service.Path>`; URL-form entries are left untouched) | unset |
 | `--metrics-addr` | Metrics bind address | `:8082` |
 | `--health-addr` | Health probe address | `:8083` |
 | `--log-level` | Log level (debug/info/error) | `info` |
@@ -206,7 +206,7 @@ Configure via command-line flags. Only `--webhook-config-name` is required; name
 webhook-injector --webhook-config-name=my-config
 ```
 
-**Patch mode with external endpoint** (webhook server is reached at an external `host:port` from the target cluster — e.g., NodePort or LoadBalancer):
+**Patch mode with external endpoint** (webhook server is reached at an external `host:port` from the target cluster — e.g., NodePort or LoadBalancer). `--external-host` is required in patch mode:
 
 ```bash
 webhook-injector \
