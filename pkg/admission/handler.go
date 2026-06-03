@@ -103,11 +103,13 @@ func (m *Mutator) Handle(ctx context.Context, req admission.Request) admission.R
 	}
 }
 
-func (m *Mutator) mutateMWC(_ context.Context, req admission.Request, caBundle []byte) admission.Response {
+func (m *Mutator) mutateMWC(ctx context.Context, req admission.Request, caBundle []byte) admission.Response {
+	logger := log.FromContext(ctx)
 	obj := &admissionv1.MutatingWebhookConfiguration{}
 	if err := m.Decoder.Decode(req, obj); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
+	rewrites := 0
 	for i := range obj.Webhooks {
 		cc := &obj.Webhooks[i].ClientConfig
 		cc.CABundle = caBundle
@@ -115,16 +117,23 @@ func (m *Mutator) mutateMWC(_ context.Context, req admission.Request, caBundle [
 			url := webhookhost.BuildExternalURL(m.ExternalHost, cc.Service.Path)
 			cc.URL = &url
 			cc.Service = nil
+			rewrites++
 		}
 	}
+	logger.Info("mutated MutatingWebhookConfiguration",
+		"name", req.Name, "webhooks", len(obj.Webhooks),
+		"serviceToURLRewrites", rewrites, "externalHost", m.ExternalHost,
+	)
 	return marshalPatch(req, obj)
 }
 
-func (m *Mutator) mutateVWC(_ context.Context, req admission.Request, caBundle []byte) admission.Response {
+func (m *Mutator) mutateVWC(ctx context.Context, req admission.Request, caBundle []byte) admission.Response {
+	logger := log.FromContext(ctx)
 	obj := &admissionv1.ValidatingWebhookConfiguration{}
 	if err := m.Decoder.Decode(req, obj); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
+	rewrites := 0
 	for i := range obj.Webhooks {
 		cc := &obj.Webhooks[i].ClientConfig
 		cc.CABundle = caBundle
@@ -132,27 +141,39 @@ func (m *Mutator) mutateVWC(_ context.Context, req admission.Request, caBundle [
 			url := webhookhost.BuildExternalURL(m.ExternalHost, cc.Service.Path)
 			cc.URL = &url
 			cc.Service = nil
+			rewrites++
 		}
 	}
+	logger.Info("mutated ValidatingWebhookConfiguration",
+		"name", req.Name, "webhooks", len(obj.Webhooks),
+		"serviceToURLRewrites", rewrites, "externalHost", m.ExternalHost,
+	)
 	return marshalPatch(req, obj)
 }
 
-func (m *Mutator) mutateCRD(_ context.Context, req admission.Request, caBundle []byte) admission.Response {
+func (m *Mutator) mutateCRD(ctx context.Context, req admission.Request, caBundle []byte) admission.Response {
+	logger := log.FromContext(ctx)
 	obj := &apiextensionsv1.CustomResourceDefinition{}
 	if err := m.Decoder.Decode(req, obj); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 	conv := obj.Spec.Conversion
 	if conv == nil || conv.Strategy != apiextensionsv1.WebhookConverter || conv.Webhook == nil || conv.Webhook.ClientConfig == nil {
+		logger.Info("CRD has no Webhook conversion strategy, allowing unchanged", "name", req.Name)
 		return admission.Allowed("CRD has no Webhook conversion strategy")
 	}
 	cc := conv.Webhook.ClientConfig
 	cc.CABundle = caBundle
+	rewritten := false
 	if m.ExternalHost != "" && cc.Service != nil {
 		url := webhookhost.BuildExternalURL(m.ExternalHost, cc.Service.Path)
 		cc.URL = &url
 		cc.Service = nil
+		rewritten = true
 	}
+	logger.Info("mutated CustomResourceDefinition conversion webhook",
+		"name", req.Name, "serviceToURLRewritten", rewritten, "externalHost", m.ExternalHost,
+	)
 	return marshalPatch(req, obj)
 }
 
