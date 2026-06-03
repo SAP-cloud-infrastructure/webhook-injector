@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,8 +17,10 @@ import (
 	"time"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/client-go/rest"
@@ -28,7 +31,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
+	whadmission "github.com/sap-cloud-infrastructure/webhook-injector/pkg/admission"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers"
 )
 
@@ -53,6 +59,8 @@ var (
 	syncPeriod            time.Duration
 	metricsAddr           string
 	healthAddr            string
+	admissionWebhookName  string
+	admissionWebhookPort  int
 	showVersion           bool
 )
 
@@ -73,6 +81,8 @@ func init() {
 	flag.DurationVar(&syncPeriod, "sync-period", 5*time.Minute, "Controller reconciliation sync period")
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8082", "Metrics server bind address")
 	flag.StringVar(&healthAddr, "health-addr", ":8083", "Health probe server bind address")
+	flag.StringVar(&admissionWebhookName, "admission-webhook-name", "webhook-injector-mutator", "Name of the MutatingWebhookConfiguration the controller bootstraps in the target cluster to register its own admission mutator. Patch mode only. Empty disables admission-webhook bootstrap.")
+	flag.IntVar(&admissionWebhookPort, "admission-webhook-port", 9444, "Port the admission webhook server binds to. Patch mode only. The target cluster reaches it via --external-host's port; configure your Service/NodePort/LoadBalancer to forward to this port.")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	// Initialize scheme
@@ -171,7 +181,7 @@ func main() {
 	)
 
 	// Create manager for hosting cluster
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgrOpts := ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
@@ -191,7 +201,14 @@ func main() {
 			},
 			SyncPeriod: &syncPeriod,
 		},
-	})
+	}
+	if patchModeActive {
+		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{
+			Port:    admissionWebhookPort,
+			CertDir: certDir,
+		})
+	}
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
 		setupLog.Error(err, "Unable to create manager")
 		os.Exit(1)
@@ -256,6 +273,7 @@ func main() {
 		WebhookLabelValue:     labelValue,
 		CertSANs:              certSANsList,
 		ExternalHost:          effectiveExternalHost,
+		AdmissionWebhookName:  effectiveAdmissionWebhookName(patchModeActive),
 		Namespace:             namespace,
 		CertSecretName:        certSecretName,
 		CertValidity:          certValidity,
@@ -267,6 +285,26 @@ func main() {
 		os.Exit(1)
 	}
 	setupLog.Info("WebhookReconciler controller registered (runs on leader only)")
+
+	// Register the admission mutator handlers in patch mode. Runs on all replicas
+	// (controller-runtime's webhook server does not participate in leader election),
+	// matching CertificateReloader's behavior.
+	if patchModeActive {
+		mutator := &whadmission.Mutator{
+			Decoder:      admission.NewDecoder(mgr.GetScheme()),
+			ExternalHost: effectiveExternalHost,
+			CABundle:     newCABundleSource(mgr.GetClient(), namespace, certSecretName),
+			SelfMWCName:  effectiveAdmissionWebhookName(patchModeActive),
+		}
+		ws := mgr.GetWebhookServer()
+		ws.Register("/mutate-mwc", &webhook.Admission{Handler: mutator})
+		ws.Register("/mutate-vwc", &webhook.Admission{Handler: mutator})
+		ws.Register("/mutate-crd", &webhook.Admission{Handler: mutator})
+		setupLog.Info("Admission mutator registered",
+			"port", admissionWebhookPort, "certDir", certDir,
+			"paths", []string{"/mutate-mwc", "/mutate-vwc", "/mutate-crd"},
+		)
+	}
 
 	// Add health checks
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -403,4 +441,29 @@ func getTargetClient() (client.Client, error) {
 	}
 
 	return targetClient, nil
+}
+
+// effectiveAdmissionWebhookName returns the configured admission-webhook name
+// only when patch mode is active; ConfigMap mode does not bootstrap an
+// admission webhook.
+func effectiveAdmissionWebhookName(patchMode bool) string {
+	if !patchMode {
+		return ""
+	}
+	return admissionWebhookName
+}
+
+// newCABundleSource returns a callback the admission mutator invokes on every
+// request to read the current PEM cert. It uses the manager's cache reader,
+// which is populated by CertificateReloader's watch on the certificate Secret,
+// so cert rotations propagate without restarting the webhook server.
+func newCABundleSource(c client.Client, ns, secretName string) whadmission.CABundleSource {
+	const tlsCrtKey = "tls.crt"
+	return func(ctx context.Context) ([]byte, error) {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, types.NamespacedName{Name: secretName, Namespace: ns}, secret); err != nil {
+			return nil, err
+		}
+		return secret.Data[tlsCrtKey], nil
+	}
 }

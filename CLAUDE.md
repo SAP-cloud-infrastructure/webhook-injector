@@ -216,6 +216,7 @@ The reconciler selects its mode at startup based on which of `--webhook-config-n
 - Resources are never created — only existing labeled resources are patched. Resources that match the label but have no `Webhook` conversion strategy (CRDs only) or no `clientConfig` are skipped.
 - For each entry: `clientConfig.CABundle` is always updated. `clientConfig.URL` and `clientConfig.Service` are left untouched unless `--external-host` is set (see above).
 - Drift correction relies on the periodic `--sync-period`, since the manager cache does not watch target-cluster resources.
+- **Admission-webhook bootstrap**: in addition to the periodic patch loop, the controller bootstraps a `MutatingWebhookConfiguration` in the target cluster (named via `--admission-webhook-name`, default `webhook-injector-mutator`) that registers webhook-injector itself as an admission mutator on labeled MWC/VWC/CRD resources. CREATE/UPDATE on those resources is then mutated synchronously — `caBundle` is stamped and Service-form `clientConfig` is rewritten to URL form — so the desired state is in place at admission time, not after the next reconcile. The bootstrapped MWC is unlabeled by design and the handler also short-circuits any object whose name equals `--admission-webhook-name`, so it cannot match its own `objectSelector` and trigger self-admission. `failurePolicy: Ignore` keeps target-cluster updates working when webhook-injector is down — the periodic patch loop is the safety net for drift in that window.
 
 When both `--webhook-config-name` and `--webhook-label` are set, webhook-injector runs ConfigMap mode and additionally refreshes `caBundle` on labeled CRDs (labeled admission webhooks are ignored). `--cert-sans` is optional in ConfigMap mode (entries are merged with SANs derived from the ConfigMap) and required in patch mode. `--external-host` is required in patch mode and is logged-and-ignored in ConfigMap mode.
 
@@ -230,6 +231,10 @@ Common flags:
 - `--target-kubeconfig` - Path to target cluster kubeconfig (optional, defaults to in-cluster)
 - `--enable-leader-election` - Enable HA with multiple replicas
 - `--sync-period` - Reconciliation interval
+
+Patch-mode-only flags:
+- `--admission-webhook-name` - name of the `MutatingWebhookConfiguration` the controller bootstraps in the target cluster to register itself as an admission mutator (default `webhook-injector-mutator`). Empty disables bootstrap (only the periodic patch loop runs).
+- `--admission-webhook-port` - port the admission webhook server binds to inside the pod (default `9444`). The target cluster reaches the server via `--external-host`'s port; configure your Service / NodePort / LoadBalancer to forward that port to this one.
 
 ## Remote Cluster Support
 

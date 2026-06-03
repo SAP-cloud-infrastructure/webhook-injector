@@ -32,6 +32,7 @@ import (
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/webhookhost"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/webhooks"
 )
 
@@ -90,6 +91,14 @@ type WebhookReconciler struct {
 	// DNS SAN. Required in patch mode (sole SAN source). In ConfigMap mode, these are
 	// merged with SANs derived from the ConfigMap's webhook services/URLs.
 	CertSANs []string
+
+	// AdmissionWebhookName is the name of the MutatingWebhookConfiguration the
+	// reconciler creates in the target cluster to register webhook-injector's own
+	// admission mutator. Patch mode only; empty disables bootstrap. The MWC's
+	// clientConfig.URL points at https://<ExternalHost>/mutate-{mwc,vwc,crd} and
+	// its objectSelector matches WebhookLabelKey/Value so it never fires against
+	// itself (the MWC itself is unlabeled).
+	AdmissionWebhookName string
 
 	Namespace             string
 	CertSecretName        string
@@ -512,6 +521,10 @@ func (r *WebhookReconciler) reconcilePatchMode(ctx context.Context) (ctrl.Result
 
 	caCert := secret.Data[tlsCrtKey]
 
+	if err := r.bootstrapAdmissionWebhook(ctx, caCert); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to bootstrap admission webhook: %w", err)
+	}
+
 	if err := r.patchExistingWebhookConfigurations(ctx, caCert); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to patch webhook configurations: %w", err)
 	}
@@ -529,18 +542,10 @@ func (r *WebhookReconciler) reconcilePatchMode(ctx context.Context) (ctrl.Result
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
-// buildExternalURL composes the URL that replaces a Service-form clientConfig
-// when --external-host is set. Path semantics: nil pointer or empty string → "/";
-// "/foo" → "/foo"; "foo" → "/foo" (leading slash is added).
+// buildExternalURL is a thin wrapper over webhookhost.BuildExternalURL kept
+// for in-package readability.
 func buildExternalURL(host string, svcPath *string) string {
-	path := "/"
-	if svcPath != nil && *svcPath != "" {
-		path = *svcPath
-		if path[0] != '/' {
-			path = "/" + path
-		}
-	}
-	return "https://" + host + path
+	return webhookhost.BuildExternalURL(host, svcPath)
 }
 
 // patchExistingWebhookConfigurations lists MutatingWebhookConfigurations and
@@ -680,6 +685,139 @@ func (r *WebhookReconciler) patchCRDs(ctx context.Context, caCert []byte) error 
 	}
 
 	return nil
+}
+
+// bootstrapAdmissionWebhook creates or updates the MutatingWebhookConfiguration
+// in the target cluster that registers webhook-injector's own admission mutator.
+// It runs only in patch mode and only when AdmissionWebhookName and ExternalHost
+// are set. The MWC's clientConfig.URL points at https://<ExternalHost>/mutate-{mwc,vwc,crd}
+// and its objectSelector matches WebhookLabelKey/Value, so the MWC itself
+// (which is unlabeled) is naturally excluded from its own mutation.
+//
+// failurePolicy is Ignore so an outage of webhook-injector does not block
+// target-cluster creates/updates of MWC/VWC/CRD — the periodic reconcile loop
+// (patchExistingWebhookConfigurations / patchCRDs) is the safety net for drift.
+func (r *WebhookReconciler) bootstrapAdmissionWebhook(ctx context.Context, caCert []byte) error {
+	if r.WebhookConfigName != "" {
+		return nil // ConfigMap mode owns its own admission webhook lifecycle.
+	}
+	if r.AdmissionWebhookName == "" || r.ExternalHost == "" {
+		return nil
+	}
+	if r.WebhookLabelKey == "" || r.WebhookLabelValue == "" {
+		return nil
+	}
+	logger := log.FromContext(ctx)
+
+	desired := r.desiredAdmissionWebhook(caCert)
+
+	existing := &admissionv1.MutatingWebhookConfiguration{}
+	err := r.TargetClient.Get(ctx, types.NamespacedName{Name: r.AdmissionWebhookName}, existing)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			if err := r.TargetClient.Create(ctx, desired); err != nil {
+				return fmt.Errorf("failed to create admission MWC %s: %w", r.AdmissionWebhookName, err)
+			}
+			logger.Info("Created admission MutatingWebhookConfiguration", "name", r.AdmissionWebhookName)
+			return nil
+		}
+		return fmt.Errorf("failed to get admission MWC %s: %w", r.AdmissionWebhookName, err)
+	}
+
+	existing.Webhooks = desired.Webhooks
+	// Force-clear labels on every reconcile so an external relabel cannot
+	// stick — the objectSelector requires the configured webhook label, and
+	// we never want our own MWC to match its own selector.
+	existing.Labels = map[string]string{}
+	if err := r.TargetClient.Update(ctx, existing); err != nil {
+		return fmt.Errorf("failed to update admission MWC %s: %w", r.AdmissionWebhookName, err)
+	}
+	logger.Info("Updated admission MutatingWebhookConfiguration", "name", r.AdmissionWebhookName)
+	return nil
+}
+
+// desiredAdmissionWebhook builds the desired MutatingWebhookConfiguration that
+// registers webhook-injector's admission mutator with the target cluster. It
+// has three webhook entries — one per kind — pointing at /mutate-mwc,
+// /mutate-vwc, /mutate-crd on the hosting cluster's external host.
+//
+// Self-bootstrap exclusion: the MWC's objectSelector requires the configured
+// --webhook-label, but the MWC itself is stamped with empty Labels here so
+// the selector cannot match it even if some external actor (operator, GitOps
+// reconciler, human with kubectl) tries to relabel it. The handler also
+// short-circuits any object whose name matches AdmissionWebhookName as
+// belt-and-suspenders.
+//
+// timeoutSeconds is set to 5s — admission must be fast and our handler is
+// purely in-memory. reinvocationPolicy is intentionally NOT set: our
+// transforms are idempotent but a re-invocation buys nothing, and Kubernetes
+// defaults to Never which is what we want.
+func (r *WebhookReconciler) desiredAdmissionWebhook(caCert []byte) *admissionv1.MutatingWebhookConfiguration {
+	failurePolicy := admissionv1.Ignore
+	sideEffects := admissionv1.SideEffectClassNone
+	scopeAll := admissionv1.AllScopes
+	timeoutSeconds := int32(5)
+
+	objectSelector := &metav1.LabelSelector{
+		MatchLabels: map[string]string{r.WebhookLabelKey: r.WebhookLabelValue},
+	}
+
+	mkClientConfig := func(path string) admissionv1.WebhookClientConfig {
+		url := "https://" + r.ExternalHost + path
+		return admissionv1.WebhookClientConfig{URL: &url, CABundle: caCert}
+	}
+	mkRule := func(group, resource string) admissionv1.RuleWithOperations {
+		return admissionv1.RuleWithOperations{
+			Operations: []admissionv1.OperationType{admissionv1.Create, admissionv1.Update},
+			Rule: admissionv1.Rule{
+				APIGroups:   []string{group},
+				APIVersions: []string{"v1"},
+				Resources:   []string{resource},
+				Scope:       &scopeAll,
+			},
+		}
+	}
+
+	return &admissionv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: r.AdmissionWebhookName,
+			// Pin to empty so the objectSelector below cannot match this MWC
+			// itself, even if someone manually stamps the configured label.
+			Labels: map[string]string{},
+		},
+		Webhooks: []admissionv1.MutatingWebhook{
+			{
+				Name:                    "mwc.webhook-injector.sap.com",
+				ClientConfig:            mkClientConfig("/mutate-mwc"),
+				Rules:                   []admissionv1.RuleWithOperations{mkRule("admissionregistration.k8s.io", "mutatingwebhookconfigurations")},
+				FailurePolicy:           &failurePolicy,
+				SideEffects:             &sideEffects,
+				TimeoutSeconds:          &timeoutSeconds,
+				AdmissionReviewVersions: []string{"v1"},
+				ObjectSelector:          objectSelector,
+			},
+			{
+				Name:                    "vwc.webhook-injector.sap.com",
+				ClientConfig:            mkClientConfig("/mutate-vwc"),
+				Rules:                   []admissionv1.RuleWithOperations{mkRule("admissionregistration.k8s.io", "validatingwebhookconfigurations")},
+				FailurePolicy:           &failurePolicy,
+				SideEffects:             &sideEffects,
+				TimeoutSeconds:          &timeoutSeconds,
+				AdmissionReviewVersions: []string{"v1"},
+				ObjectSelector:          objectSelector,
+			},
+			{
+				Name:                    "crd.webhook-injector.sap.com",
+				ClientConfig:            mkClientConfig("/mutate-crd"),
+				Rules:                   []admissionv1.RuleWithOperations{mkRule("apiextensions.k8s.io", "customresourcedefinitions")},
+				FailurePolicy:           &failurePolicy,
+				SideEffects:             &sideEffects,
+				TimeoutSeconds:          &timeoutSeconds,
+				AdmissionReviewVersions: []string{"v1"},
+				ObjectSelector:          objectSelector,
+			},
+		},
+	}
 }
 
 // updateCertExpiryGauge sets the certificate expiry metric from the secret's TLS cert.

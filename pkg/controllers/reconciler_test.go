@@ -1789,3 +1789,35 @@ func TestPatchModeBootstrap_NeedsLeaderElection(t *testing.T) {
 		t.Error("patchModeBootstrap must require leader election so only one replica fires the startup event")
 	}
 }
+
+func TestDesiredAdmissionWebhook_Shape(t *testing.T) {
+	r := &WebhookReconciler{
+		AdmissionWebhookName: "webhook-injector-mutator",
+		ExternalHost:         "ext.example.com:9443",
+		WebhookLabelKey:      "webhook-injector/managed",
+		WebhookLabelValue:    "true",
+	}
+	mwc := r.desiredAdmissionWebhook([]byte("PEM"))
+
+	if mwc.Name != "webhook-injector-mutator" {
+		t.Errorf("Name = %q, want %q", mwc.Name, "webhook-injector-mutator")
+	}
+	if mwc.Labels == nil || len(mwc.Labels) != 0 {
+		t.Errorf("Labels = %v, want non-nil empty map (so the objectSelector cannot match the MWC itself)", mwc.Labels)
+	}
+	if got, want := len(mwc.Webhooks), 3; got != want {
+		t.Fatalf("len(Webhooks) = %d, want %d", got, want)
+	}
+	for _, wh := range mwc.Webhooks {
+		if wh.TimeoutSeconds == nil || *wh.TimeoutSeconds != 5 {
+			t.Errorf("%s: TimeoutSeconds = %v, want *5", wh.Name, wh.TimeoutSeconds)
+		}
+		if wh.ReinvocationPolicy != nil {
+			t.Errorf("%s: ReinvocationPolicy = %v, want nil (default Never; idempotent transform doesn't need re-runs)", wh.Name, *wh.ReinvocationPolicy)
+		}
+		if wh.ObjectSelector == nil ||
+			wh.ObjectSelector.MatchLabels[r.WebhookLabelKey] != r.WebhookLabelValue {
+			t.Errorf("%s: ObjectSelector = %+v, want MatchLabels[%s]=%s", wh.Name, wh.ObjectSelector, r.WebhookLabelKey, r.WebhookLabelValue)
+		}
+	}
+}
