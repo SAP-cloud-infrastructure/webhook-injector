@@ -95,10 +95,18 @@ type WebhookReconciler struct {
 	// AdmissionWebhookName is the name of the MutatingWebhookConfiguration the
 	// reconciler creates in the target cluster to register webhook-injector's own
 	// admission mutator. Patch mode only; empty disables bootstrap. The MWC's
-	// clientConfig.URL points at https://<ExternalHost>/mutate-{mwc,vwc,crd} and
-	// its objectSelector matches WebhookLabelKey/Value so it never fires against
-	// itself (the MWC itself is unlabeled).
+	// clientConfig.URL points at https://<AdmissionExternalHost>/mutate-{mwc,vwc,crd}
+	// and its objectSelector matches WebhookLabelKey/Value so it never fires
+	// against itself (the MWC itself is unlabeled).
 	AdmissionWebhookName string
+
+	// AdmissionExternalHost is the host:port the target cluster uses to reach
+	// this controller's admission webhook server. Composed by main.go from the
+	// host portion of --external-host and --admission-external-port, so the
+	// admission endpoint and the labeled-webhook callbacks share the same host
+	// but use independent ports. Patch mode only; required when
+	// AdmissionWebhookName is non-empty.
+	AdmissionExternalHost string
 
 	Namespace             string
 	CertSecretName        string
@@ -689,10 +697,11 @@ func (r *WebhookReconciler) patchCRDs(ctx context.Context, caCert []byte) error 
 
 // bootstrapAdmissionWebhook creates or updates the MutatingWebhookConfiguration
 // in the target cluster that registers webhook-injector's own admission mutator.
-// It runs only in patch mode and only when AdmissionWebhookName and ExternalHost
-// are set. The MWC's clientConfig.URL points at https://<ExternalHost>/mutate-{mwc,vwc,crd}
-// and its objectSelector matches WebhookLabelKey/Value, so the MWC itself
-// (which is unlabeled) is naturally excluded from its own mutation.
+// It runs only in patch mode and only when AdmissionWebhookName and
+// AdmissionExternalHost are set. The MWC's clientConfig.URL points at
+// https://<AdmissionExternalHost>/mutate-{mwc,vwc,crd} and its objectSelector
+// matches WebhookLabelKey/Value, so the MWC itself (which is unlabeled) is
+// naturally excluded from its own mutation.
 //
 // failurePolicy is Ignore so an outage of webhook-injector does not block
 // target-cluster creates/updates of MWC/VWC/CRD — the periodic reconcile loop
@@ -701,7 +710,7 @@ func (r *WebhookReconciler) bootstrapAdmissionWebhook(ctx context.Context, caCer
 	if r.WebhookConfigName != "" {
 		return nil // ConfigMap mode owns its own admission webhook lifecycle.
 	}
-	if r.AdmissionWebhookName == "" || r.ExternalHost == "" {
+	if r.AdmissionWebhookName == "" || r.AdmissionExternalHost == "" {
 		return nil
 	}
 	if r.WebhookLabelKey == "" || r.WebhookLabelValue == "" {
@@ -763,7 +772,7 @@ func (r *WebhookReconciler) desiredAdmissionWebhook(caCert []byte) *admissionv1.
 	}
 
 	mkClientConfig := func(path string) admissionv1.WebhookClientConfig {
-		url := "https://" + r.ExternalHost + path
+		url := "https://" + r.AdmissionExternalHost + path
 		return admissionv1.WebhookClientConfig{URL: &url, CABundle: caCert}
 	}
 	mkRule := func(group, resource string) admissionv1.RuleWithOperations {

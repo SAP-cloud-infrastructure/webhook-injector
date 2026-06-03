@@ -61,6 +61,7 @@ var (
 	healthAddr            string
 	admissionWebhookName  string
 	admissionWebhookPort  int
+	admissionExternalPort int
 	showVersion           bool
 )
 
@@ -82,7 +83,8 @@ func init() {
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8082", "Metrics server bind address")
 	flag.StringVar(&healthAddr, "health-addr", ":8083", "Health probe server bind address")
 	flag.StringVar(&admissionWebhookName, "admission-webhook-name", "webhook-injector-mutator", "Name of the MutatingWebhookConfiguration the controller bootstraps in the target cluster to register its own admission mutator. Patch mode only. Empty disables admission-webhook bootstrap.")
-	flag.IntVar(&admissionWebhookPort, "admission-webhook-port", 9444, "Port the admission webhook server binds to. Patch mode only. The target cluster reaches it via --external-host's port; configure your Service/NodePort/LoadBalancer to forward to this port.")
+	flag.IntVar(&admissionWebhookPort, "admission-webhook-port", 9444, "Port the admission webhook server binds to inside the pod. Patch mode only. Configure your Service/NodePort/LoadBalancer to forward --admission-external-port to this port.")
+	flag.IntVar(&admissionExternalPort, "admission-external-port", 0, "External port (combined with the host portion of --external-host) the target cluster uses to reach the admission webhook server. Required in patch mode when admission-webhook bootstrap is active. Distinct from --external-host's port, which targets the labeled webhook callbacks rather than this controller's admission endpoint.")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	// Initialize scheme
@@ -136,6 +138,19 @@ func main() {
 		setupLog.Error(nil, "--external-host is required in patch mode")
 		os.Exit(1)
 	}
+	// --admission-external-port is required when bootstrap is active so the
+	// MWC URL we install in the target cluster points at a port the user has
+	// actually mapped to --admission-webhook-port. We don't pick a default
+	// because the value depends entirely on the user's Service / NodePort /
+	// LoadBalancer wiring, and a wrong default silently produces a bootstrap
+	// MWC the apiserver cannot reach.
+	if patchModeActive && admissionWebhookName != "" {
+		if admissionExternalPort < 1 || admissionExternalPort > 65535 {
+			setupLog.Error(nil, "--admission-external-port is required in patch mode (when admission-webhook bootstrap is active) and must be in [1, 65535]",
+				"value", admissionExternalPort)
+			os.Exit(1)
+		}
+	}
 
 	// Validate --external-host format. Patch mode only; in ConfigMap mode it's
 	// silently ignored after a warning so users running mixed deployments
@@ -151,6 +166,20 @@ func main() {
 		} else {
 			setupLog.Info("--external-host is ignored in ConfigMap mode", "external-host", externalHost)
 		}
+	}
+
+	// Compose the host:port the bootstrap MWC will use. Reuse the host portion
+	// of --external-host (so users only configure DNS/IP once) but combine it
+	// with --admission-external-port, since that targets this controller's
+	// admission server, not the labeled webhook callbacks.
+	effectiveAdmissionExternalHost := ""
+	if patchModeActive && admissionWebhookName != "" && effectiveExternalHost != "" {
+		host, _, err := net.SplitHostPort(effectiveExternalHost)
+		if err != nil {
+			setupLog.Error(err, "could not split --external-host", "value", effectiveExternalHost)
+			os.Exit(1)
+		}
+		effectiveAdmissionExternalHost = net.JoinHostPort(host, strconv.Itoa(admissionExternalPort))
 	}
 
 	// Auto-detect namespace if not provided
@@ -176,6 +205,7 @@ func main() {
 		"webhook-label", webhookLabel,
 		"cert-sans", certSANsList,
 		"external-host", effectiveExternalHost,
+		"admission-external-host", effectiveAdmissionExternalHost,
 		"cert-secret-name", certSecretName,
 		"enable-leader-election", enableLeaderElection,
 	)
@@ -274,6 +304,7 @@ func main() {
 		CertSANs:              certSANsList,
 		ExternalHost:          effectiveExternalHost,
 		AdmissionWebhookName:  effectiveAdmissionWebhookName(patchModeActive),
+		AdmissionExternalHost: effectiveAdmissionExternalHost,
 		Namespace:             namespace,
 		CertSecretName:        certSecretName,
 		CertValidity:          certValidity,

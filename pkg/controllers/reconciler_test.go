@@ -1792,10 +1792,11 @@ func TestPatchModeBootstrap_NeedsLeaderElection(t *testing.T) {
 
 func TestDesiredAdmissionWebhook_Shape(t *testing.T) {
 	r := &WebhookReconciler{
-		AdmissionWebhookName: "webhook-injector-mutator",
-		ExternalHost:         "ext.example.com:9443",
-		WebhookLabelKey:      "webhook-injector/managed",
-		WebhookLabelValue:    "true",
+		AdmissionWebhookName:  "webhook-injector-mutator",
+		ExternalHost:          "ext.example.com:9443",
+		AdmissionExternalHost: "ext.example.com:31443",
+		WebhookLabelKey:       "webhook-injector/managed",
+		WebhookLabelValue:     "true",
 	}
 	mwc := r.desiredAdmissionWebhook([]byte("PEM"))
 
@@ -1808,6 +1809,11 @@ func TestDesiredAdmissionWebhook_Shape(t *testing.T) {
 	if got, want := len(mwc.Webhooks), 3; got != want {
 		t.Fatalf("len(Webhooks) = %d, want %d", got, want)
 	}
+	wantPathByName := map[string]string{
+		"mwc.webhook-injector.sap.com": "/mutate-mwc",
+		"vwc.webhook-injector.sap.com": "/mutate-vwc",
+		"crd.webhook-injector.sap.com": "/mutate-crd",
+	}
 	for _, wh := range mwc.Webhooks {
 		if wh.TimeoutSeconds == nil || *wh.TimeoutSeconds != 5 {
 			t.Errorf("%s: TimeoutSeconds = %v, want *5", wh.Name, wh.TimeoutSeconds)
@@ -1818,6 +1824,17 @@ func TestDesiredAdmissionWebhook_Shape(t *testing.T) {
 		if wh.ObjectSelector == nil ||
 			wh.ObjectSelector.MatchLabels[r.WebhookLabelKey] != r.WebhookLabelValue {
 			t.Errorf("%s: ObjectSelector = %+v, want MatchLabels[%s]=%s", wh.Name, wh.ObjectSelector, r.WebhookLabelKey, r.WebhookLabelValue)
+		}
+		// URL must use AdmissionExternalHost (the dedicated admission port),
+		// NOT ExternalHost (which targets labeled webhook callbacks).
+		path, ok := wantPathByName[wh.Name]
+		if !ok {
+			t.Errorf("unexpected webhook name %q", wh.Name)
+			continue
+		}
+		wantURL := "https://" + r.AdmissionExternalHost + path
+		if wh.ClientConfig.URL == nil || *wh.ClientConfig.URL != wantURL {
+			t.Errorf("%s: URL = %v, want %q", wh.Name, wh.ClientConfig.URL, wantURL)
 		}
 	}
 }
