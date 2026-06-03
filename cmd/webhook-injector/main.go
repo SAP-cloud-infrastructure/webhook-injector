@@ -48,6 +48,7 @@ var (
 	webhookLabel          string
 	certSANs              string
 	externalHost          string
+	externalPort          int
 	namespace             string
 	certSecretName        string
 	certDir               string
@@ -70,7 +71,8 @@ func init() {
 	flag.StringVar(&webhookConfigName, "webhook-config-name", "", "ConfigMap name containing webhook definitions (ConfigMap mode). Mutually exclusive with --webhook-label.")
 	flag.StringVar(&webhookLabel, "webhook-label", "", "Label selector (key=value) used to discover MutatingWebhookConfigurations, ValidatingWebhookConfigurations, and CustomResourceDefinitions in the target cluster whose caBundle should be patched (patch mode). Required in patch mode.")
 	flag.StringVar(&certSANs, "cert-sans", "", "Comma-separated DNS names and/or IP addresses to include as certificate SANs. Required in patch mode. Optional in ConfigMap mode (in addition to SANs derived from the ConfigMap).")
-	flag.StringVar(&externalHost, "external-host", "", "host:port to substitute into clientConfig of labeled MutatingWebhookConfigurations, ValidatingWebhookConfigurations, and CRD conversion webhooks. Required in patch mode. When set, each entry's clientConfig.Service is replaced with clientConfig.URL = \"https://<external-host><Service.Path>\" (path defaults to \"/\"). caBundle handling is unchanged. Ignored in ConfigMap mode.")
+	flag.StringVar(&externalHost, "external-host", "", "External host (DNS name or IP, no port) the target cluster uses to reach this controller. Required in patch mode. Combined with --external-port to rewrite labeled MWC/VWC/CRD clientConfig.Service entries to clientConfig.URL = \"https://<external-host>:<external-port><Service.Path>\" (path defaults to \"/\"). Combined with --admission-external-port to form the bootstrap MWC URL. caBundle handling is unchanged. Ignored in ConfigMap mode.")
+	flag.IntVar(&externalPort, "external-port", 0, "External port the target cluster uses to reach the labeled MWC/VWC/CRD webhook callbacks. Required in patch mode. Distinct from --admission-external-port, which targets this controller's own admission endpoint.")
 	flag.StringVar(&namespace, "namespace", "", "Namespace for all resources (auto-detects from pod if not set)")
 	flag.StringVar(&certSecretName, "cert-secret-name", "webhook-injector-certs", "Secret name for storing certificates")
 	flag.StringVar(&certDir, "cert-dir", "/tmp/webhook-certs", "Directory to write certificate files")
@@ -84,7 +86,7 @@ func init() {
 	flag.StringVar(&healthAddr, "health-addr", ":8083", "Health probe server bind address")
 	flag.StringVar(&admissionWebhookName, "admission-webhook-name", "webhook-injector-mutator", "Name of the MutatingWebhookConfiguration the controller bootstraps in the target cluster to register its own admission mutator. Patch mode only. Empty disables admission-webhook bootstrap.")
 	flag.IntVar(&admissionWebhookPort, "admission-webhook-port", 9444, "Port the admission webhook server binds to inside the pod. Patch mode only. Configure your Service/NodePort/LoadBalancer to forward --admission-external-port to this port.")
-	flag.IntVar(&admissionExternalPort, "admission-external-port", 0, "External port (combined with the host portion of --external-host) the target cluster uses to reach the admission webhook server. Required in patch mode when admission-webhook bootstrap is active. Distinct from --external-host's port, which targets the labeled webhook callbacks rather than this controller's admission endpoint.")
+	flag.IntVar(&admissionExternalPort, "admission-external-port", 0, "External port (combined with --external-host) the target cluster uses to reach the admission webhook server. Required in patch mode when admission-webhook bootstrap is active. Distinct from --external-port, which targets the labeled webhook callbacks rather than this controller's admission endpoint.")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	// Initialize scheme
@@ -138,6 +140,10 @@ func main() {
 		setupLog.Error(nil, "--external-host is required in patch mode")
 		os.Exit(1)
 	}
+	if patchModeActive && (externalPort < 1 || externalPort > 65535) {
+		setupLog.Error(nil, "--external-port is required in patch mode and must be in [1, 65535]", "value", externalPort)
+		os.Exit(1)
+	}
 	// --admission-external-port is required when bootstrap is active so the
 	// MWC URL we install in the target cluster points at a port the user has
 	// actually mapped to --admission-webhook-port. We don't pick a default
@@ -152,34 +158,24 @@ func main() {
 		}
 	}
 
-	// Validate --external-host format. Patch mode only; in ConfigMap mode it's
+	// Compose the labeled-webhook callback host:port from --external-host +
+	// --external-port. Patch mode only; in ConfigMap mode --external-host is
 	// silently ignored after a warning so users running mixed deployments
 	// don't have to template flags differently per cluster.
 	effectiveExternalHost := ""
-	if externalHost != "" {
-		if err := validateHostPort(externalHost); err != nil {
-			setupLog.Error(err, "invalid --external-host", "value", externalHost)
-			os.Exit(1)
-		}
-		if patchModeActive {
-			effectiveExternalHost = externalHost
-		} else {
-			setupLog.Info("--external-host is ignored in ConfigMap mode", "external-host", externalHost)
-		}
+	if patchModeActive {
+		effectiveExternalHost = net.JoinHostPort(externalHost, strconv.Itoa(externalPort))
+	} else if externalHost != "" {
+		setupLog.Info("--external-host is ignored in ConfigMap mode", "external-host", externalHost)
 	}
 
-	// Compose the host:port the bootstrap MWC will use. Reuse the host portion
-	// of --external-host (so users only configure DNS/IP once) but combine it
-	// with --admission-external-port, since that targets this controller's
+	// Compose the host:port the bootstrap MWC will use. Reuse --external-host
+	// (so users only configure DNS/IP once) but combine it with
+	// --admission-external-port, since that targets this controller's
 	// admission server, not the labeled webhook callbacks.
 	effectiveAdmissionExternalHost := ""
-	if patchModeActive && admissionWebhookName != "" && effectiveExternalHost != "" {
-		host, _, err := net.SplitHostPort(effectiveExternalHost)
-		if err != nil {
-			setupLog.Error(err, "could not split --external-host", "value", effectiveExternalHost)
-			os.Exit(1)
-		}
-		effectiveAdmissionExternalHost = net.JoinHostPort(host, strconv.Itoa(admissionExternalPort))
+	if patchModeActive && admissionWebhookName != "" {
+		effectiveAdmissionExternalHost = net.JoinHostPort(externalHost, strconv.Itoa(admissionExternalPort))
 	}
 
 	// Auto-detect namespace if not provided
@@ -405,29 +401,6 @@ func modeLabel(configMapMode bool) string {
 		return "configmap"
 	}
 	return "patch"
-}
-
-// validateHostPort returns an error if s is not a valid host:port string with
-// a non-empty host (DNS or IP) and an integer port in [1, 65535].
-func validateHostPort(s string) error {
-	host, port, err := net.SplitHostPort(s)
-	if err != nil {
-		return fmt.Errorf("must be host:port: %w", err)
-	}
-	if host == "" {
-		return errors.New("host must not be empty")
-	}
-	if port == "" {
-		return errors.New("port must not be empty")
-	}
-	n, err := strconv.Atoi(port)
-	if err != nil {
-		return fmt.Errorf("port %q is not an integer", port)
-	}
-	if n < 1 || n > 65535 {
-		return fmt.Errorf("port %d out of range [1,65535]", n)
-	}
-	return nil
 }
 
 func detectNamespace() (string, error) {

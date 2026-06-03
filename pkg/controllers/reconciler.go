@@ -101,11 +101,11 @@ type WebhookReconciler struct {
 	AdmissionWebhookName string
 
 	// AdmissionExternalHost is the host:port the target cluster uses to reach
-	// this controller's admission webhook server. Composed by main.go from the
-	// host portion of --external-host and --admission-external-port, so the
-	// admission endpoint and the labeled-webhook callbacks share the same host
-	// but use independent ports. Patch mode only; required when
-	// AdmissionWebhookName is non-empty.
+	// this controller's admission webhook server. Composed by main.go from
+	// --external-host and --admission-external-port, so the admission endpoint
+	// and the labeled-webhook callbacks share the same host but use
+	// independent ports. Patch mode only; required when AdmissionWebhookName
+	// is non-empty.
 	AdmissionExternalHost string
 
 	Namespace             string
