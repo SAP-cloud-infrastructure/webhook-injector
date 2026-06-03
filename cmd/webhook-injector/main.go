@@ -19,6 +19,8 @@ import (
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -35,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	whadmission "github.com/sap-cloud-infrastructure/webhook-injector/pkg/admission"
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers"
 )
 
@@ -343,6 +346,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// In patch mode the manager hosts a webhook server whose certwatcher reads
+	// tls.crt/tls.key from --cert-dir at mgr.Start. On a cold start neither the
+	// Secret nor the on-disk files exist yet, and the controller that would
+	// create them cannot run until mgr.Start succeeds — chicken and egg.
+	// Resolve it here, outside the manager, so every replica races to populate
+	// the Secret atomically (one wins via Create; losers re-Get the winner's
+	// data) and writes the resulting cert/key to disk before mgr.Start.
+	if patchModeActive {
+		if err := bootstrapPatchModeCerts(context.Background(), namespace, certSecretName, certDir, certSANsList, certValidity); err != nil {
+			setupLog.Error(err, "Failed to bootstrap certificate files for webhook server")
+			os.Exit(1)
+		}
+	}
+
 	setupLog.Info("Starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Problem running manager")
@@ -470,4 +487,92 @@ func newCABundleSource(c client.Client, ns, secretName string) whadmission.CABun
 		}
 		return secret.Data[tlsCrtKey], nil
 	}
+}
+
+// bootstrapPatchModeCerts ensures tls.crt/tls.key exist on disk before
+// mgr.Start. The webhook server's certwatcher fails fast if either file is
+// missing, so this preflight runs *outside* the manager — it cannot wait for a
+// reconciler that hasn't started yet.
+//
+// Every replica races: each tries to read the cert Secret, and if it does not
+// exist, generates a fresh self-signed cert and Creates the Secret. Atomicity
+// of Create means exactly one replica wins; the rest get AlreadyExists and
+// re-read whatever the winner stored. All replicas then write the same bytes
+// to --cert-dir.
+//
+// The leader still owns rotation post-startup via WebhookReconciler. This
+// function only handles the initial population.
+func bootstrapPatchModeCerts(ctx context.Context, namespace, secretName, certDir string, certSANs []string, validity time.Duration) error {
+	const (
+		tlsCrtKey = "tls.crt"
+		tlsKeyKey = "tls.key"
+	)
+
+	cfg, err := ctrl.GetConfig()
+	if err != nil {
+		return fmt.Errorf("get rest config: %w", err)
+	}
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("build hosting-cluster client: %w", err)
+	}
+
+	key := types.NamespacedName{Name: secretName, Namespace: namespace}
+	secret := &corev1.Secret{}
+	getErr := c.Get(ctx, key, secret)
+	switch {
+	case getErr == nil:
+		// Existing Secret — use whatever is already there. If a field is
+		// missing or empty the WebhookReconciler will rotate post-startup;
+		// the certwatcher just needs *some* parsable file to come up.
+	case apierrors.IsNotFound(getErr):
+		services := make([]certificates.ServiceReference, 0, len(certSANs))
+		for _, san := range certSANs {
+			services = append(services, certificates.ServiceReference{Hostname: san})
+		}
+		certPEM, keyPEM, genErr := certificates.GenerateSelfSignedCert(services, validity)
+		if genErr != nil {
+			return fmt.Errorf("generate bootstrap cert: %w", genErr)
+		}
+		fresh := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
+			Type:       corev1.SecretTypeTLS,
+			Data: map[string][]byte{
+				tlsCrtKey: certPEM,
+				tlsKeyKey: keyPEM,
+			},
+		}
+		createErr := c.Create(ctx, fresh)
+		switch {
+		case createErr == nil:
+			secret = fresh
+			setupLog.Info("Bootstrapped certificate Secret", "name", secretName, "namespace", namespace)
+		case apierrors.IsAlreadyExists(createErr):
+			if err := c.Get(ctx, key, secret); err != nil {
+				return fmt.Errorf("re-read Secret after AlreadyExists: %w", err)
+			}
+		default:
+			return fmt.Errorf("create bootstrap Secret: %w", createErr)
+		}
+	default:
+		return fmt.Errorf("read cert Secret: %w", getErr)
+	}
+
+	certPEM := secret.Data[tlsCrtKey]
+	keyPEM := secret.Data[tlsKeyKey]
+	if len(certPEM) == 0 || len(keyPEM) == 0 {
+		return fmt.Errorf("secret %s/%s missing %s or %s", namespace, secretName, tlsCrtKey, tlsKeyKey)
+	}
+
+	if err := os.MkdirAll(certDir, 0o755); err != nil {
+		return fmt.Errorf("create cert dir %s: %w", certDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(certDir, tlsCrtKey), certPEM, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", tlsCrtKey, err)
+	}
+	if err := os.WriteFile(filepath.Join(certDir, tlsKeyKey), keyPEM, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", tlsKeyKey, err)
+	}
+	setupLog.Info("Wrote bootstrap certificate files", "dir", certDir)
+	return nil
 }
