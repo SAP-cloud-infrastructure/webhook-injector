@@ -315,8 +315,10 @@ func (r *TargetWebhookReconciler) labelPredicateCRD() predicate.TypedPredicate[*
 
 // reconcileMWC stamps caBundle and (optionally) rewrites Service-form
 // clientConfig on a single MutatingWebhookConfiguration in the target cluster.
-// The operation is idempotent: a reconcile of an already-converged object is
-// a no-op once the apiserver normalizes the round-trip.
+// Short-circuits the Update when every entry's caBundle already matches and
+// no Service→URL rewrite is needed — without this, every Update bumps
+// resourceVersion, fires another Watch event, and the reconcile loops on
+// itself. (CRDs have the same protection in reconcileCRD.)
 func (r *TargetWebhookReconciler) reconcileMWC(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("kind", "MutatingWebhookConfiguration", "name", req.Name)
 
@@ -340,9 +342,13 @@ func (r *TargetWebhookReconciler) reconcileMWC(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, nil
 	}
 
+	caChanged := false
 	rewroteURL := ""
 	for j := range mwc.Webhooks {
 		cc := &mwc.Webhooks[j].ClientConfig
+		if !bytes.Equal(cc.CABundle, caCert) {
+			caChanged = true
+		}
 		cc.CABundle = caCert
 		if r.ExternalHost != "" && cc.Service != nil {
 			url := webhookhost.BuildExternalURL(r.ExternalHost, cc.Service.Path)
@@ -351,15 +357,20 @@ func (r *TargetWebhookReconciler) reconcileMWC(ctx context.Context, req ctrl.Req
 			rewroteURL = url
 		}
 	}
+	if !caChanged && rewroteURL == "" {
+		// Already converged — likely a Watch event from our own previous
+		// stamp. Skip the Update to avoid bouncing resourceVersion.
+		return ctrl.Result{}, nil
+	}
 
 	if err := r.TargetClient.Update(ctx, mwc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update MutatingWebhookConfiguration %s: %w", mwc.Name, err)
 	}
 
 	if rewroteURL != "" {
-		logger.Info("Stamped MutatingWebhookConfiguration", "webhooks", len(mwc.Webhooks), "rewroteURL", rewroteURL)
+		logger.Info("Stamped MutatingWebhookConfiguration", "webhooks", len(mwc.Webhooks), "rewroteURL", rewroteURL, "caBundleChanged", caChanged)
 	} else {
-		logger.Info("Stamped MutatingWebhookConfiguration", "webhooks", len(mwc.Webhooks))
+		logger.Info("Stamped MutatingWebhookConfiguration", "webhooks", len(mwc.Webhooks), "caBundleChanged", caChanged)
 	}
 	return ctrl.Result{}, nil
 }
@@ -385,9 +396,13 @@ func (r *TargetWebhookReconciler) reconcileVWC(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, nil
 	}
 
+	caChanged := false
 	rewroteURL := ""
 	for j := range vwc.Webhooks {
 		cc := &vwc.Webhooks[j].ClientConfig
+		if !bytes.Equal(cc.CABundle, caCert) {
+			caChanged = true
+		}
 		cc.CABundle = caCert
 		if r.ExternalHost != "" && cc.Service != nil {
 			url := webhookhost.BuildExternalURL(r.ExternalHost, cc.Service.Path)
@@ -396,15 +411,20 @@ func (r *TargetWebhookReconciler) reconcileVWC(ctx context.Context, req ctrl.Req
 			rewroteURL = url
 		}
 	}
+	if !caChanged && rewroteURL == "" {
+		// Already converged — likely a Watch event from our own previous
+		// stamp. Skip the Update to avoid bouncing resourceVersion.
+		return ctrl.Result{}, nil
+	}
 
 	if err := r.TargetClient.Update(ctx, vwc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
 	}
 
 	if rewroteURL != "" {
-		logger.Info("Stamped ValidatingWebhookConfiguration", "webhooks", len(vwc.Webhooks), "rewroteURL", rewroteURL)
+		logger.Info("Stamped ValidatingWebhookConfiguration", "webhooks", len(vwc.Webhooks), "rewroteURL", rewroteURL, "caBundleChanged", caChanged)
 	} else {
-		logger.Info("Stamped ValidatingWebhookConfiguration", "webhooks", len(vwc.Webhooks))
+		logger.Info("Stamped ValidatingWebhookConfiguration", "webhooks", len(vwc.Webhooks), "caBundleChanged", caChanged)
 	}
 	return ctrl.Result{}, nil
 }
