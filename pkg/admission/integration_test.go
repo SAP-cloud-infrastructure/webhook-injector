@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	admissionv1api "k8s.io/api/admission/v1"
-	admissionv1 "k8s.io/api/admissionregistration/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -26,27 +26,42 @@ import (
 // we can stand to an e2e test without spinning up kind: it covers the wire
 // format, JSON-patch generation, and the handler/Server interaction that
 // the kube-apiserver would drive.
+//
+// The handler is CRD-only (kube-apiserver bypasses admission webhooks for
+// MutatingWebhookConfiguration / ValidatingWebhookConfiguration), so this
+// test exercises a CustomResourceDefinition with a Webhook conversion
+// strategy.
 func TestAdmission_HTTPEndpoint_AppliesPatchAtAdmissionTime(t *testing.T) {
 	caBundle := []byte("PEM-CERT")
-	mutatePath := "/mutate"
-	mwc := &admissionv1.MutatingWebhookConfiguration{
+	convertPath := "/convert"
+	crd := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   "tenant-mwc",
+			Name:   "things.example.com",
 			Labels: map[string]string{"webhook-injector/managed": "true"},
 		},
-		Webhooks: []admissionv1.MutatingWebhook{{
-			Name: "wh.example.com",
-			ClientConfig: admissionv1.WebhookClientConfig{
-				Service: &admissionv1.ServiceReference{Name: "svc", Namespace: "ns", Path: &mutatePath},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "example.com",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural: "things", Singular: "thing", Kind: "Thing", ListKind: "ThingList",
 			},
-		}},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Conversion: &apiextensionsv1.CustomResourceConversion{
+				Strategy: apiextensionsv1.WebhookConverter,
+				Webhook: &apiextensionsv1.WebhookConversion{
+					ConversionReviewVersions: []string{"v1"},
+					ClientConfig: &apiextensionsv1.WebhookClientConfig{
+						Service: &apiextensionsv1.ServiceReference{Name: "svc", Namespace: "ns", Path: &convertPath},
+					},
+				},
+			},
+		},
 	}
-	rawObj, err := json.Marshal(mwc)
+	rawObj, err := json.Marshal(crd)
 	if err != nil {
-		t.Fatalf("marshal mwc: %v", err)
+		t.Fatalf("marshal crd: %v", err)
 	}
 
-	mutator := newMutator(t, "ext.example.com:9443", caBundle)
+	mutator := newMutator(t, caBundle)
 	srv := httptest.NewServer(&webhook.Admission{Handler: mutator})
 	defer srv.Close()
 
@@ -54,9 +69,9 @@ func TestAdmission_HTTPEndpoint_AppliesPatchAtAdmissionTime(t *testing.T) {
 		TypeMeta: metav1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"},
 		Request: &admissionv1api.AdmissionRequest{
 			UID:       "11111111-1111-1111-1111-111111111111",
-			Kind:      metav1.GroupVersionKind{Group: "admissionregistration.k8s.io", Version: "v1", Kind: KindMutatingWebhookConfiguration},
-			Resource:  metav1.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "mutatingwebhookconfigurations"},
-			Name:      "tenant-mwc",
+			Kind:      metav1.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: KindCustomResourceDefinition},
+			Resource:  metav1.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"},
+			Name:      "things.example.com",
 			Operation: admissionv1api.Create,
 			Object:    runtime.RawExtension{Raw: rawObj},
 		},
@@ -113,14 +128,14 @@ func TestAdmission_HTTPEndpoint_AppliesPatchAtAdmissionTime(t *testing.T) {
 		}
 	}
 
-	wantURL := "https://ext.example.com:9443/mutate"
+	wantURL := "https://ext.example.com:9443/convert"
 	var sawCA, sawURL bool
 	for _, op := range ops {
 		path, _ := op["path"].(string)
 		switch path {
-		case "/webhooks/0/clientConfig/caBundle":
+		case "/spec/conversion/webhook/clientConfig/caBundle":
 			sawCA = true
-		case "/webhooks/0/clientConfig/url":
+		case "/spec/conversion/webhook/clientConfig/url":
 			if got, _ := op["value"].(string); got != wantURL {
 				t.Errorf("url op value = %q, want %q", got, wantURL)
 			}

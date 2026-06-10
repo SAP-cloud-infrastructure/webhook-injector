@@ -18,11 +18,11 @@ A Kubernetes controller that runs as a sidecar to webhook servers, managing webh
 
 ## Architecture
 
-webhook-injector runs as a sidecar with two controllers:
+webhook-injector runs as a sidecar with up to three controllers, depending on mode:
 
-**WebhookReconciler** (leader only): Manages webhook lifecycle and certificate generation. Watches ConfigMap and Secret, generates self-signed certificates with dynamic SANs, injects CA bundle, and applies webhook configurations to target cluster.
-
-**CertificateReloader** (all replicas): Syncs certificates from Secret to local filesystem (`/tmp/webhook-certs`). Optimizes by skipping writes when content unchanged. Ensures all replicas stay synchronized.
+- **WebhookReconciler** (leader only, both modes): Manages the certificate Secret in the hosting cluster and bootstraps the admission `MutatingWebhookConfiguration` in patch mode. In ConfigMap mode it also parses webhook definitions, injects the CA bundle, and applies them to the target cluster. In patch mode it no longer touches MWC/VWC/CRD on the target cluster — that work is delegated to TargetWebhookReconciler.
+- **TargetWebhookReconciler** (leader only, patch mode only): Watches labeled `MutatingWebhookConfiguration`, `ValidatingWebhookConfiguration`, and `CustomResourceDefinition` resources on the target cluster via a separate `cluster.Cluster` handle whose cache is label-scoped. Stamps `caBundle` and rewrites Service-form `clientConfig` to URL form. Acts as the safety net for drift.
+- **CertificateReloader** (all replicas, both modes): Syncs certificates from Secret to local filesystem (`/tmp/webhook-certs`). Skips writes when content is unchanged.
 
 ### Remote Cluster Architecture
 
@@ -196,9 +196,9 @@ Configure via command-line flags. Only `--webhook-config-name` is required; name
 | `--enable-leader-election` | Enable HA mode | `true` |
 | `--leader-election-id` | Lease name | `webhook-injector-leader` |
 | `--sync-period` | Reconciliation interval | `5m` |
-| `--external-host` | Patch-mode only (**required** there): DNS name or IP (no port) the target cluster uses to reach this controller. Combined with `--external-port` to rewrite labeled MWC/VWC/CRD `clientConfig.Service` to `https://<external-host>:<external-port><Service.Path>`; URL-form entries are left untouched. | unset |
-| `--external-port` | Patch-mode only (**required** there): external port the target cluster uses to reach the labeled webhook callbacks. Distinct from `--admission-external-port`. | unset |
-| `--admission-webhook-name` | Patch-mode only: name of the `MutatingWebhookConfiguration` the controller bootstraps in the target cluster to register itself as an admission mutator on labeled MWC/VWC/CRD. Empty disables bootstrap. | `webhook-injector-mutator` |
+| `--external-host` | **Required** in patch mode, and in ConfigMap mode when `--webhook-label` is set: DNS name or IP (no port) the target cluster uses to reach this controller. Combined with `--external-port` to rewrite labeled `clientConfig.Service` to `https://<external-host>:<external-port><Service.Path>`; URL-form entries are left untouched. In ConfigMap mode this only applies to labeled CRDs (admission webhooks are owned by the ConfigMap). | unset |
+| `--external-port` | **Required** in patch mode, and in ConfigMap mode when `--webhook-label` is set: external port the target cluster uses to reach the labeled webhook callbacks. Distinct from `--admission-external-port`. | unset |
+| `--admission-webhook-name` | Patch-mode only: name of the `MutatingWebhookConfiguration` the controller bootstraps in the target cluster to register itself as an admission mutator on labeled CRDs only. MWC/VWC are handled by TargetWebhookReconciler's Watch instead, because kube-apiserver bypasses admission webhooks on `admissionregistration.k8s.io/{mutating,validating}webhookconfigurations`. Empty disables bootstrap. | `webhook-injector-mutator` |
 | `--admission-webhook-port` | Patch-mode only: port the in-process admission webhook server binds to. Configure your Service / NodePort / LoadBalancer to forward `--admission-external-port` to this port. | `9444` |
 | `--admission-external-port` | Patch-mode only, **required** when `--admission-webhook-name` is non-empty: external port the target cluster uses to reach this controller's admission server. Combined with `--external-host` to form the bootstrap MWC URL. Distinct from `--external-port` (which targets the labeled webhook callbacks). | unset |
 | `--metrics-addr` | Metrics bind address | `:8082` |
@@ -221,9 +221,19 @@ webhook-injector \
   --admission-external-port=30444
 ```
 
-`--external-host` + `--external-port` rewrite every labeled `MutatingWebhookConfiguration`, `ValidatingWebhookConfiguration`, and `CustomResourceDefinition` conversion-webhook entry whose `clientConfig.Service` is set: the Service is replaced with `clientConfig.URL = https://<external-host>:<external-port><Service.Path>` (Service.Path nil/empty → `/`). Entries that already use URL-form `clientConfig` are left untouched. `caBundle` is patched as usual. These flags do not affect SAN generation — `--cert-sans` is still the sole SAN source in patch mode.
+**ConfigMap mode with labeled CRDs** also requires `--external-host` / `--external-port` so labeled-CRD `clientConfig.Service` entries can be rewritten to URL form:
 
-In patch mode the controller also bootstraps a `MutatingWebhookConfiguration` in the target cluster (named via `--admission-webhook-name`) that registers webhook-injector itself as an admission mutator on labeled MWC/VWC/CRD resources. CREATE/UPDATE on those resources is then mutated synchronously — `caBundle` is stamped and Service-form `clientConfig` is rewritten to URL form — so the desired state is in place at admission time, not after the next reconcile. The bootstrap MWC's `clientConfig.URL` uses **`--external-host`** combined with **`--admission-external-port`** (a separate port from `--external-port`, which targets the labeled webhook callbacks). The bootstrapped MWC is unlabeled and the handler also short-circuits any object whose name equals `--admission-webhook-name`, so it cannot match its own `objectSelector` and never triggers self-admission. `failurePolicy: Ignore` keeps target-cluster updates working when webhook-injector is down — the periodic patch loop is the safety net for drift in that window. The webhook server inside the controller pod listens on `--admission-webhook-port` (default `9444`); configure your Service / NodePort / LoadBalancer to forward `--admission-external-port` to that port.
+```bash
+webhook-injector \
+  --webhook-config-name=my-config \
+  --webhook-label=webhook-injector/name=cert-manager \
+  --external-host=webhook.example.com \
+  --external-port=9443
+```
+
+`--external-host` + `--external-port` rewrite every labeled entry whose `clientConfig.Service` is set: the Service is replaced with `clientConfig.URL = https://<external-host>:<external-port><Service.Path>` (Service.Path nil/empty → `/`). Entries that already use URL-form `clientConfig` are left untouched. `caBundle` is patched as usual. In patch mode this applies to labeled MWC/VWC/CRD; in ConfigMap mode it applies only to labeled CRDs (admission webhooks are owned by the ConfigMap). These flags do not affect SAN generation — `--cert-sans` is still the sole SAN source in patch mode.
+
+In patch mode the controller also bootstraps a `MutatingWebhookConfiguration` in the target cluster (named via `--admission-webhook-name`) that registers webhook-injector itself as an admission mutator. The bootstrap MWC contains a single webhook entry — `crd.webhook-injector.sap.com` pointing at `/mutate-crd` — because kube-apiserver self-protects against admission webhooks on `admissionregistration.k8s.io/{mutating,validating}webhookconfigurations` and bypasses them entirely. CRD CREATE/UPDATE on labeled resources is therefore mutated synchronously — `caBundle` is stamped and Service-form `clientConfig` is rewritten to URL form — so the desired state is in place at admission time. MWC/VWC convergence is achieved exclusively through TargetWebhookReconciler's Watch, since admission cannot reach them. The bootstrap MWC's `clientConfig.URL` uses **`--external-host`** combined with **`--admission-external-port`** (a separate port from `--external-port`, which targets the labeled webhook callbacks). The bootstrap MWC is unlabeled by design and its `objectSelector` requires the configured `--webhook-label`, so it cannot match itself. `failurePolicy: Ignore` keeps target-cluster updates working when webhook-injector is down — TargetWebhookReconciler's Watch is the safety net for drift, and on cert rotation WebhookReconciler signals it via a buffered channel to re-stamp every labeled MWC/VWC/CRD immediately, without waiting for `--sync-period`. The webhook server inside the controller pod listens on `--admission-webhook-port` (default `9444`); configure your Service / NodePort / LoadBalancer to forward `--admission-external-port` to that port.
 
 ## Metrics
 

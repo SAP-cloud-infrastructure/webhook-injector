@@ -21,6 +21,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -30,6 +31,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -74,8 +76,8 @@ func init() {
 	flag.StringVar(&webhookConfigName, "webhook-config-name", "", "ConfigMap name containing webhook definitions (ConfigMap mode). Mutually exclusive with --webhook-label.")
 	flag.StringVar(&webhookLabel, "webhook-label", "", "Label selector (key=value) used to discover MutatingWebhookConfigurations, ValidatingWebhookConfigurations, and CustomResourceDefinitions in the target cluster whose caBundle should be patched (patch mode). Required in patch mode.")
 	flag.StringVar(&certSANs, "cert-sans", "", "Comma-separated DNS names and/or IP addresses to include as certificate SANs. Required in patch mode. Optional in ConfigMap mode (in addition to SANs derived from the ConfigMap).")
-	flag.StringVar(&externalHost, "external-host", "", "External host (DNS name or IP, no port) the target cluster uses to reach this controller. Required in patch mode. Combined with --external-port to rewrite labeled MWC/VWC/CRD clientConfig.Service entries to clientConfig.URL = \"https://<external-host>:<external-port><Service.Path>\" (path defaults to \"/\"). Combined with --admission-external-port to form the bootstrap MWC URL. caBundle handling is unchanged. Ignored in ConfigMap mode.")
-	flag.IntVar(&externalPort, "external-port", 0, "External port the target cluster uses to reach the labeled MWC/VWC/CRD webhook callbacks. Required in patch mode. Distinct from --admission-external-port, which targets this controller's own admission endpoint.")
+	flag.StringVar(&externalHost, "external-host", "", "External host (DNS name or IP, no port) the target cluster uses to reach this controller. Required in patch mode, and in ConfigMap mode when --webhook-label is set. Combined with --external-port to rewrite labeled MWC/VWC/CRD clientConfig.Service entries (labeled CRDs only in ConfigMap mode) to clientConfig.URL = \"https://<external-host>:<external-port><Service.Path>\" (path defaults to \"/\"). Combined with --admission-external-port to form the bootstrap MWC URL. caBundle handling is unchanged. Ignored in ConfigMap mode without --webhook-label.")
+	flag.IntVar(&externalPort, "external-port", 0, "External port the target cluster uses to reach the labeled webhook callbacks. Required in patch mode, and in ConfigMap mode when --webhook-label is set. Distinct from --admission-external-port, which targets this controller's own admission endpoint.")
 	flag.StringVar(&namespace, "namespace", "", "Namespace for all resources (auto-detects from pod if not set)")
 	flag.StringVar(&certSecretName, "cert-secret-name", "webhook-injector-certs", "Secret name for storing certificates")
 	flag.StringVar(&certDir, "cert-dir", "/tmp/webhook-certs", "Directory to write certificate files")
@@ -147,6 +149,23 @@ func main() {
 		setupLog.Error(nil, "--external-port is required in patch mode and must be in [1, 65535]", "value", externalPort)
 		os.Exit(1)
 	}
+	// In ConfigMap mode, --external-host / --external-port are required when
+	// --webhook-label is set. The labeled CRDs in the target cluster may
+	// carry Service-form clientConfig that resolves to a hosting-cluster
+	// Service the target cluster cannot reach; webhook-injector rewrites
+	// those entries to URL-form using these flags. caBundle stamping does
+	// not need them, but we require both together so misconfiguration is a
+	// startup failure rather than a runtime surprise on the first labeled
+	// CRD with a Service-form clientConfig.
+	configMapWithCRDLabel := configMapModeActive && labelOK
+	if configMapWithCRDLabel && externalHost == "" {
+		setupLog.Error(nil, "--external-host is required in ConfigMap mode when --webhook-label is set")
+		os.Exit(1)
+	}
+	if configMapWithCRDLabel && (externalPort < 1 || externalPort > 65535) {
+		setupLog.Error(nil, "--external-port is required in ConfigMap mode when --webhook-label is set and must be in [1, 65535]", "value", externalPort)
+		os.Exit(1)
+	}
 	// --admission-external-port is required when bootstrap is active so the
 	// MWC URL we install in the target cluster points at a port the user has
 	// actually mapped to --admission-webhook-port. We don't pick a default
@@ -162,14 +181,14 @@ func main() {
 	}
 
 	// Compose the labeled-webhook callback host:port from --external-host +
-	// --external-port. Patch mode only; in ConfigMap mode --external-host is
-	// silently ignored after a warning so users running mixed deployments
-	// don't have to template flags differently per cluster.
+	// --external-port. Used in patch mode for MWC/VWC/CRD Service→URL rewrites,
+	// and in ConfigMap mode (when --webhook-label is set) for labeled-CRD
+	// Service→URL rewrites. Empty in ConfigMap mode without --webhook-label.
 	effectiveExternalHost := ""
-	if patchModeActive {
+	if patchModeActive || configMapWithCRDLabel {
 		effectiveExternalHost = net.JoinHostPort(externalHost, strconv.Itoa(externalPort))
 	} else if externalHost != "" {
-		setupLog.Info("--external-host is ignored in ConfigMap mode", "external-host", externalHost)
+		setupLog.Info("--external-host is ignored in ConfigMap mode without --webhook-label", "external-host", externalHost)
 	}
 
 	// Compose the host:port the bootstrap MWC will use. Reuse --external-host
@@ -294,6 +313,17 @@ func main() {
 
 	// Set up webhook reconciler (generates certificates and applies webhooks)
 	// Runs on leader ONLY via default leader election behavior to prevent conflicts
+	//
+	// rotationTrigger is a buffered single-slot channel: WebhookReconciler signals
+	// it on every detected cert rotation in patch mode, and TargetWebhookReconciler
+	// reacts by force-stamping every labeled MWC/VWC/CRD currently in the target
+	// cache. Buffer 1 + non-blocking send means a missed signal (receiver still
+	// fanning out the previous one) is harmless — a single signal triggers a full
+	// re-stamp pass.
+	var rotationTrigger chan struct{}
+	if patchModeActive {
+		rotationTrigger = make(chan struct{}, 1)
+	}
 	webhookReconciler := &controllers.WebhookReconciler{
 		Client:                mgr.GetClient(),
 		TargetClient:          targetClient,
@@ -309,6 +339,7 @@ func main() {
 		CertValidity:          certValidity,
 		CertRotationThreshold: certRotationThreshold,
 		Scheme:                mgr.GetScheme(),
+		RotationTrigger:       rotationTrigger,
 	}
 	if err := webhookReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Unable to create WebhookReconciler controller")
@@ -324,15 +355,69 @@ func main() {
 			Decoder:      admission.NewDecoder(mgr.GetScheme()),
 			ExternalHost: effectiveExternalHost,
 			CABundle:     newCABundleSource(mgr.GetClient(), namespace, certSecretName),
-			SelfMWCName:  effectiveAdmissionWebhookName(patchModeActive),
 		}
 		ws := mgr.GetWebhookServer()
-		ws.Register("/mutate-mwc", &webhook.Admission{Handler: mutator})
-		ws.Register("/mutate-vwc", &webhook.Admission{Handler: mutator})
 		ws.Register("/mutate-crd", &webhook.Admission{Handler: mutator})
 		setupLog.Info("Admission mutator registered",
 			"port", admissionWebhookPort, "certDir", certDir,
-			"paths", []string{"/mutate-mwc", "/mutate-vwc", "/mutate-crd"},
+			"paths", []string{"/mutate-crd"},
+		)
+	}
+
+	// In patch mode, wire a target-cluster cluster.Cluster handle so the
+	// TargetWebhookReconciler can Watch labeled MutatingWebhookConfiguration,
+	// ValidatingWebhookConfiguration, and CustomResourceDefinition objects on
+	// the target cluster. The cache is label-scoped via cache.ByObject so we
+	// don't pull every MWC/VWC/CRD in the cluster into memory — combined with
+	// the in-controller label predicate this ensures we only reconcile the
+	// resources we manage.
+	//
+	// kube-apiserver self-protects against admission webhooks on
+	// admissionregistration.k8s.io/{mutating,validating}webhookconfigurations
+	// (rules.IsExemptAdmissionConfigurationResource), so an admission-time
+	// hook is impossible for those kinds. CRDs are not exempt — the bootstrap
+	// MWC stamps them at admission time — but the same Watch loop also acts
+	// as the drift-correction safety net for out-of-band CRD edits.
+	if patchModeActive {
+		targetCfg, err := getTargetRestConfig()
+		if err != nil {
+			setupLog.Error(err, "Unable to build target cluster rest config")
+			os.Exit(1)
+		}
+		labelSelector := labels.SelectorFromSet(labels.Set{labelKey: labelValue})
+		targetCluster, err := cluster.New(targetCfg, func(o *cluster.Options) {
+			o.Scheme = scheme
+			o.Cache = cache.Options{
+				ByObject: map[client.Object]cache.ByObject{
+					&admissionv1.MutatingWebhookConfiguration{}:   {Label: labelSelector},
+					&admissionv1.ValidatingWebhookConfiguration{}: {Label: labelSelector},
+					&apiextensionsv1.CustomResourceDefinition{}:   {Label: labelSelector},
+				},
+			}
+		})
+		if err != nil {
+			setupLog.Error(err, "Unable to create target cluster handle")
+			os.Exit(1)
+		}
+		if err := mgr.Add(targetCluster); err != nil {
+			setupLog.Error(err, "Unable to add target cluster to manager")
+			os.Exit(1)
+		}
+		targetWebhookReconciler := &controllers.TargetWebhookReconciler{
+			HostingClient:     mgr.GetClient(),
+			TargetClient:      targetCluster.GetClient(),
+			Namespace:         namespace,
+			CertSecretName:    certSecretName,
+			WebhookLabelKey:   labelKey,
+			WebhookLabelValue: labelValue,
+			ExternalHost:      effectiveExternalHost,
+		}
+		if err := targetWebhookReconciler.SetupWithManager(mgr, targetCluster, rotationTrigger); err != nil {
+			setupLog.Error(err, "Unable to create TargetWebhookReconciler controller")
+			os.Exit(1)
+		}
+		setupLog.Info("TargetWebhookReconciler controller registered (runs on leader only)",
+			"label", labelKey+"="+labelValue,
 		)
 	}
 
@@ -435,33 +520,39 @@ func detectNamespace() (string, error) {
 	return "", errors.New("namespace not specified via --namespace flag, NAMESPACE env var not set, and serviceaccount namespace file not found")
 }
 
-// getTargetClient creates a client for the target cluster
-func getTargetClient() (client.Client, error) {
-	var targetConfig *rest.Config
-	var err error
-
+// getTargetRestConfig returns the rest.Config for the target cluster.
+func getTargetRestConfig() (*rest.Config, error) {
 	if targetKubeconfig != "" {
-		// Load from explicit kubeconfig
-		targetConfig, err = clientcmd.BuildConfigFromFlags("", targetKubeconfig)
+		cfg, err := clientcmd.BuildConfigFromFlags("", targetKubeconfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load kubeconfig from %s: %w", targetKubeconfig, err)
 		}
 		setupLog.Info("Using explicit kubeconfig for target cluster", "path", targetKubeconfig)
-	} else {
-		// Use in-cluster config
-		targetConfig, err = rest.InClusterConfig()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
-		}
-		setupLog.Info("Using in-cluster config for target cluster")
+		return cfg, nil
 	}
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
+	}
+	setupLog.Info("Using in-cluster config for target cluster")
+	return cfg, nil
+}
 
-	targetClient, err := client.New(targetConfig, client.Options{Scheme: scheme})
+// getTargetClient returns an uncached client for the target cluster. It is used
+// by code paths that perform direct one-shot reads/writes (CRD patch loop,
+// admission MWC bootstrap) and by patch-mode reconcile of CRDs. When patch mode
+// also needs to Watch labeled MWC/VWC, main builds an additional cluster.Cluster
+// via getTargetRestConfig with a label-scoped cache.
+func getTargetClient() (client.Client, error) {
+	cfg, err := getTargetRestConfig()
+	if err != nil {
+		return nil, err
+	}
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create target cluster client: %w", err)
 	}
-
-	return targetClient, nil
+	return c, nil
 }
 
 // effectiveAdmissionWebhookName returns the configured admission-webhook name

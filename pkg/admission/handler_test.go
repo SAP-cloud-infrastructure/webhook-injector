@@ -10,7 +10,6 @@ import (
 
 	jsonpatch "gomodules.xyz/jsonpatch/v2"
 	admissionv1api "k8s.io/api/admission/v1"
-	admissionv1 "k8s.io/api/admissionregistration/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -20,20 +19,19 @@ import (
 func newTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
-	if err := admissionv1.AddToScheme(s); err != nil {
-		t.Fatalf("add admissionv1 to scheme: %v", err)
-	}
 	if err := apiextensionsv1.AddToScheme(s); err != nil {
 		t.Fatalf("add apiextensionsv1 to scheme: %v", err)
 	}
 	return s
 }
 
-func newMutator(t *testing.T, externalHost string, caBundle []byte) *Mutator {
+const testExternalHost = "ext.example.com:9443"
+
+func newMutator(t *testing.T, caBundle []byte) *Mutator {
 	t.Helper()
 	return &Mutator{
 		Decoder:      admission.NewDecoder(newTestScheme(t)),
-		ExternalHost: externalHost,
+		ExternalHost: testExternalHost,
 		CABundle: func(_ context.Context) ([]byte, error) {
 			return caBundle, nil
 		},
@@ -59,100 +57,8 @@ func findPatchOp(patches []jsonpatch.Operation, path string) (jsonpatch.Operatio
 	return jsonpatch.Operation{}, false
 }
 
-func decodePatches(t *testing.T, resp admission.Response) []jsonpatch.Operation {
-	t.Helper()
+func decodePatches(_ *testing.T, resp admission.Response) []jsonpatch.Operation {
 	return resp.Patches
-}
-
-func TestMutator_MWC_ServiceFormRewrittenToURL(t *testing.T) {
-	caBundle := []byte("PEM-CERT")
-	mutatePath := "/mutate"
-	mwc := &admissionv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "tenant-mwc"},
-		Webhooks: []admissionv1.MutatingWebhook{{
-			Name: "wh.example.com",
-			ClientConfig: admissionv1.WebhookClientConfig{
-				Service: &admissionv1.ServiceReference{
-					Name:      "svc",
-					Namespace: "ns",
-					Path:      &mutatePath,
-				},
-			},
-		}},
-	}
-	req := admission.Request{AdmissionRequest: admissionv1api.AdmissionRequest{
-		Kind:      metav1.GroupVersionKind{Group: "admissionregistration.k8s.io", Version: "v1", Kind: KindMutatingWebhookConfiguration},
-		Operation: admissionv1api.Create,
-		Object:    runtime.RawExtension{Raw: mustJSON(t, mwc)},
-	}}
-
-	resp := newMutator(t, "ext.example.com:9443", caBundle).Handle(context.Background(), req)
-	if !resp.Allowed {
-		t.Fatalf("expected Allowed, got: %+v", resp)
-	}
-	patches := decodePatches(t, resp)
-	caOp, ok := findPatchOp(patches, "/webhooks/0/clientConfig/caBundle")
-	if !ok {
-		t.Fatalf("missing caBundle patch; got %+v", patches)
-	}
-	// JSON patches encode []byte as base64 of raw bytes, but we just check it's non-nil.
-	if caOp.Value == nil {
-		t.Errorf("caBundle patch value nil")
-	}
-
-	urlOp, ok := findPatchOp(patches, "/webhooks/0/clientConfig/url")
-	if !ok {
-		t.Fatalf("missing url patch; got %+v", patches)
-	}
-	if got, want := urlOp.Value.(string), "https://ext.example.com:9443/mutate"; got != want {
-		t.Errorf("url = %q, want %q", got, want)
-	}
-
-	if _, ok := findPatchOp(patches, "/webhooks/0/clientConfig/service"); !ok {
-		// service field removed via "remove" op
-		var found bool
-		for _, op := range patches {
-			if op.Operation == "remove" && op.Path == "/webhooks/0/clientConfig/service" {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("expected /webhooks/0/clientConfig/service to be removed; patches=%+v", patches)
-		}
-	}
-}
-
-func TestMutator_VWC_AlreadyURL_OnlyCABundleChanges(t *testing.T) {
-	caBundle := []byte("PEM-CERT")
-	existingURL := "https://already.example.com/validate"
-	vwc := &admissionv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "tenant-vwc"},
-		Webhooks: []admissionv1.ValidatingWebhook{{
-			Name: "wh.example.com",
-			ClientConfig: admissionv1.WebhookClientConfig{
-				URL: &existingURL,
-			},
-		}},
-	}
-	req := admission.Request{AdmissionRequest: admissionv1api.AdmissionRequest{
-		Kind:      metav1.GroupVersionKind{Group: "admissionregistration.k8s.io", Version: "v1", Kind: KindValidatingWebhookConfiguration},
-		Operation: admissionv1api.Update,
-		Object:    runtime.RawExtension{Raw: mustJSON(t, vwc)},
-	}}
-
-	resp := newMutator(t, "ext.example.com:9443", caBundle).Handle(context.Background(), req)
-	if !resp.Allowed {
-		t.Fatalf("expected Allowed, got: %+v", resp)
-	}
-	patches := decodePatches(t, resp)
-
-	if _, ok := findPatchOp(patches, "/webhooks/0/clientConfig/caBundle"); !ok {
-		t.Fatalf("missing caBundle patch; got %+v", patches)
-	}
-	if _, ok := findPatchOp(patches, "/webhooks/0/clientConfig/url"); ok {
-		t.Errorf("did not expect url to be patched when already URL-form; patches=%+v", patches)
-	}
 }
 
 func TestMutator_CRD_WithWebhookConversion(t *testing.T) {
@@ -185,7 +91,7 @@ func TestMutator_CRD_WithWebhookConversion(t *testing.T) {
 		Object:    runtime.RawExtension{Raw: mustJSON(t, crd)},
 	}}
 
-	resp := newMutator(t, "ext.example.com:9443", caBundle).Handle(context.Background(), req)
+	resp := newMutator(t, caBundle).Handle(context.Background(), req)
 	if !resp.Allowed {
 		t.Fatalf("expected Allowed, got: %+v", resp)
 	}
@@ -222,7 +128,7 @@ func TestMutator_CRD_NoWebhookConversion_NoOp(t *testing.T) {
 		Object:    runtime.RawExtension{Raw: mustJSON(t, crd)},
 	}}
 
-	resp := newMutator(t, "ext.example.com:9443", caBundle).Handle(context.Background(), req)
+	resp := newMutator(t, caBundle).Handle(context.Background(), req)
 	if !resp.Allowed {
 		t.Fatalf("expected Allowed, got: %+v", resp)
 	}
@@ -231,52 +137,17 @@ func TestMutator_CRD_NoWebhookConversion_NoOp(t *testing.T) {
 	}
 }
 
-func TestMutator_EmptyExternalHost_OnlyCABundleChanges(t *testing.T) {
-	caBundle := []byte("PEM-CERT")
-	mutatePath := "/mutate"
-	mwc := &admissionv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "tenant-mwc"},
-		Webhooks: []admissionv1.MutatingWebhook{{
-			Name: "wh.example.com",
-			ClientConfig: admissionv1.WebhookClientConfig{
-				Service: &admissionv1.ServiceReference{
-					Name: "svc", Namespace: "ns", Path: &mutatePath,
-				},
-			},
-		}},
-	}
-	req := admission.Request{AdmissionRequest: admissionv1api.AdmissionRequest{
-		Kind:      metav1.GroupVersionKind{Group: "admissionregistration.k8s.io", Version: "v1", Kind: KindMutatingWebhookConfiguration},
-		Operation: admissionv1api.Create,
-		Object:    runtime.RawExtension{Raw: mustJSON(t, mwc)},
-	}}
-
-	resp := newMutator(t, "", caBundle).Handle(context.Background(), req)
-	if !resp.Allowed {
-		t.Fatalf("expected Allowed, got: %+v", resp)
-	}
-	patches := decodePatches(t, resp)
-
-	if _, ok := findPatchOp(patches, "/webhooks/0/clientConfig/caBundle"); !ok {
-		t.Fatalf("missing caBundle patch; got %+v", patches)
-	}
-	if _, ok := findPatchOp(patches, "/webhooks/0/clientConfig/url"); ok {
-		t.Errorf("did not expect url patch when ExternalHost is empty; patches=%+v", patches)
-	}
-}
-
 func TestMutator_EmptyCABundle_AllowsUnchanged(t *testing.T) {
-	mwc := &admissionv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "tenant-mwc"},
-		Webhooks:   []admissionv1.MutatingWebhook{{Name: "wh.example.com"}},
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "things.example.com"},
 	}
 	req := admission.Request{AdmissionRequest: admissionv1api.AdmissionRequest{
-		Kind:      metav1.GroupVersionKind{Group: "admissionregistration.k8s.io", Version: "v1", Kind: KindMutatingWebhookConfiguration},
+		Kind:      metav1.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: KindCustomResourceDefinition},
 		Operation: admissionv1api.Create,
-		Object:    runtime.RawExtension{Raw: mustJSON(t, mwc)},
+		Object:    runtime.RawExtension{Raw: mustJSON(t, crd)},
 	}}
 
-	resp := newMutator(t, "ext.example.com:9443", nil).Handle(context.Background(), req)
+	resp := newMutator(t, nil).Handle(context.Background(), req)
 	if !resp.Allowed {
 		t.Fatalf("expected Allowed, got: %+v", resp)
 	}
@@ -292,7 +163,7 @@ func TestMutator_UnhandledKind(t *testing.T) {
 		Object:    runtime.RawExtension{Raw: []byte(`{}`)},
 	}}
 
-	resp := newMutator(t, "ext.example.com:9443", []byte("PEM")).Handle(context.Background(), req)
+	resp := newMutator(t, []byte("PEM")).Handle(context.Background(), req)
 	if !resp.Allowed {
 		t.Fatalf("expected Allowed, got: %+v", resp)
 	}
@@ -301,35 +172,5 @@ func TestMutator_UnhandledKind(t *testing.T) {
 	}
 }
 
-func TestMutator_SelfMWC_SkipByName(t *testing.T) {
-	caBundle := []byte("PEM-CERT")
-	mutatePath := "/mutate"
-	mwc := &admissionv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "webhook-injector-mutator"},
-		Webhooks: []admissionv1.MutatingWebhook{{
-			Name: "wh.example.com",
-			ClientConfig: admissionv1.WebhookClientConfig{
-				Service: &admissionv1.ServiceReference{Name: "svc", Namespace: "ns", Path: &mutatePath},
-			},
-		}},
-	}
-	req := admission.Request{AdmissionRequest: admissionv1api.AdmissionRequest{
-		Kind:      metav1.GroupVersionKind{Group: "admissionregistration.k8s.io", Version: "v1", Kind: KindMutatingWebhookConfiguration},
-		Name:      "webhook-injector-mutator",
-		Operation: admissionv1api.Update,
-		Object:    runtime.RawExtension{Raw: mustJSON(t, mwc)},
-	}}
-
-	m := newMutator(t, "ext.example.com:9443", caBundle)
-	m.SelfMWCName = "webhook-injector-mutator"
-	resp := m.Handle(context.Background(), req)
-	if !resp.Allowed {
-		t.Fatalf("expected Allowed, got: %+v", resp)
-	}
-	if len(resp.Patches) != 0 {
-		t.Errorf("expected no patches for self MWC, got %+v", resp.Patches)
-	}
-}
-
 // Compile-time guard: schema registration is required for the decoder.
-// (This file would not compile without admissionv1 + apiextensionsv1 in newTestScheme.)
+// (This file would not compile without apiextensionsv1 in newTestScheme.)

@@ -65,12 +65,12 @@ type WebhookReconciler struct {
 	WebhookConfigName string
 
 	// Label selector used to discover target-cluster resources whose caBundle
-	// should be patched. clientConfig.URL and clientConfig.Service are left
-	// unchanged. CRDs without a Webhook conversion strategy are logged and skipped.
+	// should be patched.
 	//
-	// In patch mode (WebhookConfigName empty), the label applies to
-	// MutatingWebhookConfigurations, ValidatingWebhookConfigurations, and
-	// CustomResourceDefinitions.
+	// In patch mode (WebhookConfigName empty), the label is consumed by
+	// TargetWebhookReconciler, which Watches labeled MWC/VWC/CRD on the target
+	// cluster. WebhookReconciler itself does not use it in patch mode beyond
+	// gating the admission-webhook bootstrap.
 	//
 	// In ConfigMap mode (WebhookConfigName set), the label applies to
 	// CustomResourceDefinitions only — labeled admission webhooks are ignored
@@ -78,12 +78,14 @@ type WebhookReconciler struct {
 	WebhookLabelKey   string
 	WebhookLabelValue string
 
-	// ExternalHost, when non-empty, rewrites labeled MWC/VWC/CRD-conversion
-	// clientConfig.Service entries to clientConfig.URL =
-	// "https://<ExternalHost><Service.Path>" (Service.Path nil/empty → "/").
-	// The Service field is then cleared. Entries that already use URL-form
-	// clientConfig are left untouched. Patch mode only; main.go ignores the
-	// flag in ConfigMap mode.
+	// ExternalHost is consumed by TargetWebhookReconciler in patch mode to
+	// rewrite labeled MWC/VWC/CRD-conversion clientConfig.Service entries to
+	// clientConfig.URL = "https://<ExternalHost><Service.Path>" (Service.Path
+	// nil/empty → "/"). The Service field is then cleared. Entries that
+	// already use URL-form clientConfig are left untouched. Patch mode only;
+	// main.go ignores the flag in ConfigMap mode. WebhookReconciler itself no
+	// longer reads this field — it's plumbed through here so main.go can pass
+	// a single struct around.
 	ExternalHost string
 
 	// CertSANs is a list of DNS names and/or IP addresses to include as certificate
@@ -94,8 +96,8 @@ type WebhookReconciler struct {
 
 	// AdmissionWebhookName is the name of the MutatingWebhookConfiguration the
 	// reconciler creates in the target cluster to register webhook-injector's own
-	// admission mutator. Patch mode only; empty disables bootstrap. The MWC's
-	// clientConfig.URL points at https://<AdmissionExternalHost>/mutate-{mwc,vwc,crd}
+	// admission mutator on labeled CRDs. Patch mode only; empty disables bootstrap.
+	// The MWC's clientConfig.URL points at https://<AdmissionExternalHost>/mutate-crd
 	// and its objectSelector matches WebhookLabelKey/Value so it never fires
 	// against itself (the MWC itself is unlabeled).
 	AdmissionWebhookName string
@@ -113,6 +115,19 @@ type WebhookReconciler struct {
 	CertValidity          time.Duration
 	CertRotationThreshold float64
 	Scheme                *runtime.Scheme
+
+	// RotationTrigger is signaled (non-blocking send) on every detected
+	// certificate rotation in patch mode. TargetWebhookReconciler reads
+	// from this channel and lists all labeled MWC/VWC/CRDs to force-stamp
+	// them with the new caBundle, instead of waiting for the target
+	// cluster cache --sync-period.
+	//
+	// Patch mode only. Nil in ConfigMap mode and in tests that don't
+	// exercise rotation. Should be created with a buffer of 1 so a
+	// missed send (because the receiver is mid-resync) is harmless —
+	// the next rotation will fire again, and a single signal is enough
+	// to trigger a full re-stamp pass.
+	RotationTrigger chan<- struct{}
 }
 
 // Reconcile handles ConfigMap changes and certificate rotation
@@ -480,13 +495,11 @@ func (r *WebhookReconciler) applyWebhookConfigurations(ctx context.Context, conf
 	return nil
 }
 
-// reconcilePatchMode runs the alternative reconcile flow for pre-existing webhook
-// configurations in the target cluster. It generates/rotates certificates whose SANs
-// match CertSANs, then for each named MutatingWebhookConfiguration / Validating-
-// WebhookConfiguration injects the freshly generated CA bundle into every webhook
-// entry's clientConfig.CABundle. Existing clientConfig.URL and clientConfig.Service
-// are left untouched. Missing target-cluster configurations are logged and skipped
-// (never created).
+// reconcilePatchMode runs the patch-mode reconcile flow: it manages the
+// hosting-cluster certificate Secret (generation, rotation, expiry gauge) and
+// bootstraps the admission MWC in the target cluster. Target-cluster MWC/VWC/
+// CRD convergence is owned entirely by TargetWebhookReconciler — patchCRDs is
+// not called here.
 func (r *WebhookReconciler) reconcilePatchMode(ctx context.Context) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -525,6 +538,19 @@ func (r *WebhookReconciler) reconcilePatchMode(ctx context.Context) (ctrl.Result
 		}
 	}
 
+	// Signal TargetWebhookReconciler to re-stamp every labeled MWC/VWC/CRD
+	// with the new caBundle. Non-blocking: if the channel is full, the
+	// receiver hasn't consumed the previous signal yet, which is fine —
+	// a single signal is enough to trigger a full re-stamp pass.
+	if reason != "" && r.RotationTrigger != nil {
+		select {
+		case r.RotationTrigger <- struct{}{}:
+			logger.Info("Signaled TargetWebhookReconciler to re-stamp labeled objects after rotation", "reason", reason)
+		default:
+			logger.V(1).Info("Rotation signal channel full, skipping (already pending)")
+		}
+	}
+
 	r.updateCertExpiryGauge(secret)
 
 	caCert := secret.Data[tlsCrtKey]
@@ -533,13 +559,10 @@ func (r *WebhookReconciler) reconcilePatchMode(ctx context.Context) (ctrl.Result
 		return ctrl.Result{}, fmt.Errorf("failed to bootstrap admission webhook: %w", err)
 	}
 
-	if err := r.patchExistingWebhookConfigurations(ctx, caCert); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to patch webhook configurations: %w", err)
-	}
-
-	if err := r.patchCRDs(ctx, caCert); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to patch CRDs: %w", err)
-	}
+	// MWC, VWC, and CRD convergence in patch mode is owned by
+	// TargetWebhookReconciler (target_webhook_reconciler.go). It watches the
+	// target cluster directly and reacts in seconds, so the periodic list-
+	// and-patch loop here is no longer needed.
 
 	logger.Info("Patch-mode reconciliation complete")
 
@@ -550,107 +573,18 @@ func (r *WebhookReconciler) reconcilePatchMode(ctx context.Context) (ctrl.Result
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
-// buildExternalURL is a thin wrapper over webhookhost.BuildExternalURL kept
-// for in-package readability.
-func buildExternalURL(host string, svcPath *string) string {
-	return webhookhost.BuildExternalURL(host, svcPath)
-}
-
-// patchExistingWebhookConfigurations lists MutatingWebhookConfigurations and
-// ValidatingWebhookConfigurations in the target cluster matching the configured
-// label selector, and rewrites only clientConfig.CABundle on every entry. The
-// existing clientConfig.URL and clientConfig.Service fields are left untouched,
-// unless ExternalHost is set: in that case Service-form clientConfig is
-// rewritten to URL-form (URL = https://<ExternalHost><Service.Path>) and
-// Service is cleared. URL-form entries are left alone.
-// No-op when the label selector is unset, or when running in ConfigMap mode
-// (which owns admission-webhook creation; labeled admission configs are
-// intentionally ignored there).
-func (r *WebhookReconciler) patchExistingWebhookConfigurations(ctx context.Context, caCert []byte) error {
-	if r.WebhookConfigName != "" {
-		return nil
-	}
-	if r.WebhookLabelKey == "" || r.WebhookLabelValue == "" {
-		return nil
-	}
-	logger := log.FromContext(ctx)
-	selector := client.MatchingLabels{r.WebhookLabelKey: r.WebhookLabelValue}
-	labelStr := r.WebhookLabelKey + "=" + r.WebhookLabelValue
-
-	var mwcList admissionv1.MutatingWebhookConfigurationList
-	if err := r.TargetClient.List(ctx, &mwcList, selector); err != nil {
-		return fmt.Errorf("failed to list MutatingWebhookConfigurations: %w", err)
-	}
-	if len(mwcList.Items) == 0 {
-		logger.Info("No MutatingWebhookConfigurations matched label", "label", labelStr)
-	}
-	for i := range mwcList.Items {
-		mwc := &mwcList.Items[i]
-		rewroteURL := ""
-		for j := range mwc.Webhooks {
-			cc := &mwc.Webhooks[j].ClientConfig
-			cc.CABundle = caCert
-			if r.ExternalHost != "" && cc.Service != nil {
-				url := buildExternalURL(r.ExternalHost, cc.Service.Path)
-				cc.URL = &url
-				cc.Service = nil
-				rewroteURL = url
-			}
-		}
-		if err := r.TargetClient.Update(ctx, mwc); err != nil {
-			return fmt.Errorf("failed to update MutatingWebhookConfiguration %s: %w", mwc.Name, err)
-		}
-		if rewroteURL != "" {
-			logger.Info("Rewrote clientConfig.Service to URL via --external-host",
-				"kind", "MutatingWebhookConfiguration", "name", mwc.Name, "url", rewroteURL)
-		}
-		logger.Info("Patched MutatingWebhookConfiguration", "name", mwc.Name)
-	}
-
-	var vwcList admissionv1.ValidatingWebhookConfigurationList
-	if err := r.TargetClient.List(ctx, &vwcList, selector); err != nil {
-		return fmt.Errorf("failed to list ValidatingWebhookConfigurations: %w", err)
-	}
-	if len(vwcList.Items) == 0 {
-		logger.Info("No ValidatingWebhookConfigurations matched label", "label", labelStr)
-	}
-	for i := range vwcList.Items {
-		vwc := &vwcList.Items[i]
-		rewroteURL := ""
-		for j := range vwc.Webhooks {
-			cc := &vwc.Webhooks[j].ClientConfig
-			cc.CABundle = caCert
-			if r.ExternalHost != "" && cc.Service != nil {
-				url := buildExternalURL(r.ExternalHost, cc.Service.Path)
-				cc.URL = &url
-				cc.Service = nil
-				rewroteURL = url
-			}
-		}
-		if err := r.TargetClient.Update(ctx, vwc); err != nil {
-			return fmt.Errorf("failed to update ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
-		}
-		if rewroteURL != "" {
-			logger.Info("Rewrote clientConfig.Service to URL via --external-host",
-				"kind", "ValidatingWebhookConfiguration", "name", vwc.Name, "url", rewroteURL)
-		}
-		logger.Info("Patched ValidatingWebhookConfiguration", "name", vwc.Name)
-	}
-
-	return nil
-}
-
 // patchCRDs lists CustomResourceDefinitions in the target cluster matching the
-// configured label selector and updates only conversion-webhook
-// clientConfig.CABundle on each match. clientConfig.URL and clientConfig.Service
-// are left untouched, unless ExternalHost is set in patch mode: in that case
-// Service-form clientConfig is rewritten to URL-form (URL =
-// https://<ExternalHost><Service.Path>) and Service is cleared. CRDs that lack
-// a Webhook conversion strategy or have no clientConfig are logged and skipped.
-// No-op when the label selector is unset (ConfigMap mode without label-driven
-// CRD patching). ExternalHost rewrites are skipped in ConfigMap mode even when
-// the flag was passed (main.go is responsible for not propagating it there;
-// this is a defense-in-depth check).
+// configured label selector and updates conversion-webhook clientConfig on each
+// match: clientConfig.CABundle is always refreshed, and when ExternalHost is
+// non-empty Service-form clientConfig is rewritten to URL-form
+// (clientConfig.URL = "https://<ExternalHost><Service.Path>", Service cleared).
+// URL-form entries are left untouched. CRDs that lack a Webhook conversion
+// strategy or have no clientConfig are logged and skipped. No-op when the
+// label selector is unset.
+//
+// ConfigMap mode only — patch mode handles CRDs via TargetWebhookReconciler
+// (a Watch-driven, leader-only reconciler in target_webhook_reconciler.go).
+// Both modes use the same rewrite logic; the difference is only the trigger.
 func (r *WebhookReconciler) patchCRDs(ctx context.Context, caCert []byte) error {
 	if r.WebhookLabelKey == "" || r.WebhookLabelValue == "" {
 		return nil
@@ -676,8 +610,8 @@ func (r *WebhookReconciler) patchCRDs(ctx context.Context, caCert []byte) error 
 		cc := conv.Webhook.ClientConfig
 		cc.CABundle = caCert
 		rewroteURL := ""
-		if r.WebhookConfigName == "" && r.ExternalHost != "" && cc.Service != nil {
-			url := buildExternalURL(r.ExternalHost, cc.Service.Path)
+		if r.ExternalHost != "" && cc.Service != nil {
+			url := webhookhost.BuildExternalURL(r.ExternalHost, cc.Service.Path)
 			cc.URL = &url
 			cc.Service = nil
 			rewroteURL = url
@@ -686,8 +620,8 @@ func (r *WebhookReconciler) patchCRDs(ctx context.Context, caCert []byte) error 
 			return fmt.Errorf("failed to update CustomResourceDefinition %s: %w", crd.Name, err)
 		}
 		if rewroteURL != "" {
-			logger.Info("Rewrote clientConfig.Service to URL via --external-host",
-				"kind", "CustomResourceDefinition", "name", crd.Name, "url", rewroteURL)
+			logger.Info("Rewrote CRD conversion clientConfig.Service to URL via --external-host",
+				"name", crd.Name, "url", rewroteURL)
 		}
 		logger.Info("Patched CustomResourceDefinition conversion webhook", "name", crd.Name)
 	}
@@ -696,16 +630,22 @@ func (r *WebhookReconciler) patchCRDs(ctx context.Context, caCert []byte) error 
 }
 
 // bootstrapAdmissionWebhook creates or updates the MutatingWebhookConfiguration
-// in the target cluster that registers webhook-injector's own admission mutator.
-// It runs only in patch mode and only when AdmissionWebhookName and
-// AdmissionExternalHost are set. The MWC's clientConfig.URL points at
-// https://<AdmissionExternalHost>/mutate-{mwc,vwc,crd} and its objectSelector
-// matches WebhookLabelKey/Value, so the MWC itself (which is unlabeled) is
-// naturally excluded from its own mutation.
+// in the target cluster that registers webhook-injector's own admission mutator
+// for CRDs only. It runs only in patch mode and only when AdmissionWebhookName
+// and AdmissionExternalHost are set. The MWC's clientConfig.URL points at
+// https://<AdmissionExternalHost>/mutate-crd and its objectSelector matches
+// WebhookLabelKey/Value, so the MWC itself (which is unlabeled) is naturally
+// excluded from its own mutation.
+//
+// MutatingWebhookConfiguration / ValidatingWebhookConfiguration are
+// intentionally NOT registered here: kube-apiserver self-protects against
+// admission webhooks on those kinds (rules.IsExemptAdmissionConfigurationResource),
+// so any entry would be dead. Drift on labeled MWC/VWC is instead handled by
+// TargetWebhookReconciler, which watches them on the target cluster.
 //
 // failurePolicy is Ignore so an outage of webhook-injector does not block
-// target-cluster creates/updates of MWC/VWC/CRD — the periodic reconcile loop
-// (patchExistingWebhookConfigurations / patchCRDs) is the safety net for drift.
+// target-cluster creates/updates of CRDs — the periodic patchCRDs reconcile
+// loop is the safety net for drift.
 func (r *WebhookReconciler) bootstrapAdmissionWebhook(ctx context.Context, caCert []byte) error {
 	if r.WebhookConfigName != "" {
 		return nil // ConfigMap mode owns its own admission webhook lifecycle.
@@ -747,8 +687,14 @@ func (r *WebhookReconciler) bootstrapAdmissionWebhook(ctx context.Context, caCer
 
 // desiredAdmissionWebhook builds the desired MutatingWebhookConfiguration that
 // registers webhook-injector's admission mutator with the target cluster. It
-// has three webhook entries — one per kind — pointing at /mutate-mwc,
-// /mutate-vwc, /mutate-crd on the hosting cluster's external host.
+// has a single webhook entry — for CustomResourceDefinitions — pointing at
+// /mutate-crd on the hosting cluster's external host.
+//
+// MutatingWebhookConfiguration / ValidatingWebhookConfiguration are
+// intentionally absent: kube-apiserver self-protects against admission
+// webhooks on those kinds (rules.IsExemptAdmissionConfigurationResource), so
+// registering them would be dead code. MWC/VWC drift is handled instead by
+// TargetWebhookReconciler, which directly watches the target cluster.
 //
 // Self-bootstrap exclusion: the MWC's objectSelector requires the configured
 // --webhook-label, but the MWC itself is stamped with empty Labels here so
@@ -795,26 +741,6 @@ func (r *WebhookReconciler) desiredAdmissionWebhook(caCert []byte) *admissionv1.
 			Labels: map[string]string{},
 		},
 		Webhooks: []admissionv1.MutatingWebhook{
-			{
-				Name:                    "mwc.webhook-injector.sap.com",
-				ClientConfig:            mkClientConfig("/mutate-mwc"),
-				Rules:                   []admissionv1.RuleWithOperations{mkRule("admissionregistration.k8s.io", "mutatingwebhookconfigurations")},
-				FailurePolicy:           &failurePolicy,
-				SideEffects:             &sideEffects,
-				TimeoutSeconds:          &timeoutSeconds,
-				AdmissionReviewVersions: []string{"v1"},
-				ObjectSelector:          objectSelector,
-			},
-			{
-				Name:                    "vwc.webhook-injector.sap.com",
-				ClientConfig:            mkClientConfig("/mutate-vwc"),
-				Rules:                   []admissionv1.RuleWithOperations{mkRule("admissionregistration.k8s.io", "validatingwebhookconfigurations")},
-				FailurePolicy:           &failurePolicy,
-				SideEffects:             &sideEffects,
-				TimeoutSeconds:          &timeoutSeconds,
-				AdmissionReviewVersions: []string{"v1"},
-				ObjectSelector:          objectSelector,
-			},
 			{
 				Name:                    "crd.webhook-injector.sap.com",
 				ClientConfig:            mkClientConfig("/mutate-crd"),
