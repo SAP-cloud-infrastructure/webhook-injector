@@ -14,6 +14,10 @@ webhook-injector is a Kubernetes controller that runs as a **native sidecar** (K
 
 **Webhook Server Requirement**: The webhook server must watch certificate files (`tls.crt`, `tls.key`) and reload them when changed. Controller-runtime webhook servers (v0.17+) provide this automatically via an internal `certwatcher`. Other frameworks need custom implementation using inotify/fsnotify or periodic polling.
 
+The image ships two binaries:
+- `webhook-injector` — the long-running controller described in this document.
+- `crd-injector` — a small "apply once and exit" companion that reads CRD YAML from a ConfigMap in the hosting cluster and server-side applies each CRD to the target cluster. Intended as a Kubernetes Job or a regular initContainer that blocks the webhook server until CRDs exist. See the `cmd/crd-injector` section below.
+
 ## Build System
 
 This project uses **go-makefile-maker** for build automation. The Makefile is generated from `Makefile.maker.yaml`. On macOS, use `gmake` instead of `make` because the built-in make is too old for go-makefile-maker.
@@ -125,6 +129,10 @@ The application registers up to three independent controllers (the third is patc
 cmd/webhook-injector/           Main entrypoint
   main.go                       Creates manager, sets up both controllers, handles target cluster client
 
+cmd/crd-injector/               One-shot binary (apply CRDs from ConfigMap, then exit)
+  main.go                       parseCRDs() + applyCRD() — server-side apply via RawPatch+ApplyPatchType
+  main_test.go                  Table-driven tests for parseCRDs
+
 pkg/certificates/               Certificate generation using crypto/x509
   generator.go                  GenerateSelfSignedCert() with dynamic SANs
   types.go                      ServiceReference struct
@@ -144,6 +152,49 @@ pkg/webhooks/                   Webhook configuration parsing
   injector.go                   InjectCABundle()
 
 test/e2e/                       E2E integration tests with kind clusters
+```
+
+### cmd/crd-injector
+
+A separate "apply once and exit" binary that ships in the same image. It reads
+a ConfigMap from the hosting cluster, parses every key as multi-document YAML,
+requires every document to be `apiextensions.k8s.io/v1 CustomResourceDefinition`
+(anything else is an error so it can't be used as a generic applier), and
+server-side applies each CRD to the target cluster with field manager
+`crd-injector` and `ForceOwnership`. Exits 0 on success, non-zero on any
+parse or apply error. No watches, no controller-runtime manager, no caBundle
+handling — `webhook-injector`'s labeled-CRD path is responsible for stamping
+caBundle on these CRDs after they exist.
+
+Implementation notes worth knowing before changing this file:
+- Uses a `serializer.NewCodecFactory(scheme)` deserializer rather than
+  `clientgoscheme.Codecs` because the latter does not know
+  `apiextensions.k8s.io/v1` and would silently fail to decode CRDs.
+- Server-side apply is performed via `client.RawPatch(types.ApplyPatchType, body)`
+  rather than the deprecated `client.Apply` constant — the new
+  `client.Client.Apply()` API in controller-runtime v0.23 requires generated
+  `runtime.ApplyConfiguration` types we don't otherwise need here.
+- Namespace auto-detection uses the same priority order as `webhook-injector`:
+  `--namespace` flag → `NAMESPACE` env var → serviceaccount file → fail.
+- Target cluster connection mirrors `webhook-injector`: `--target-kubeconfig`
+  for explicit kubeconfig, in-cluster config otherwise.
+
+Flags:
+- `--configmap-name` — required; ConfigMap (in `--namespace`, hosting cluster) whose values contain CRD YAML.
+- `--namespace` — optional; auto-detects from `NAMESPACE` env or serviceaccount file.
+- `--target-kubeconfig` — optional; defaults to in-cluster config.
+- `--field-manager` — defaults to `crd-injector`; set if you want a different field-owner identity.
+
+Typical usage as a Kubernetes Job or initContainer that blocks the webhook
+server until CRDs exist:
+
+```yaml
+- name: install-crds
+  image: ghcr.io/.../webhook-injector:<tag>
+  command: ["/usr/bin/crd-injector"]
+  args:
+    - --configmap-name=my-crds
+    - --target-kubeconfig=/etc/target/kubeconfig  # optional
 ```
 
 ## Certificate Lifecycle

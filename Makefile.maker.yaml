@@ -6,6 +6,9 @@ binaries:
   - name: webhook-injector
     fromPackage: ./cmd/webhook-injector
     installTo: bin/
+  - name: crd-injector
+    fromPackage: ./cmd/crd-injector
+    installTo: bin/
 
 controllerGen:
   enabled: false

@@ -61,7 +61,8 @@ COPY --from=builder /etc/ssl/cert.pem /etc/ssl/cert.pem
 COPY --from=builder /pkg/ /usr/
 # make sure all binaries can be executed
 RUN set -x \
-  && webhook-injector --version 2>/dev/null
+  && webhook-injector --version 2>/dev/null \
+  && crd-injector --version 2>/dev/null
 
 ARG BININFO_BUILD_DATE BININFO_COMMIT_HASH BININFO_VERSION
 LABEL source_repository="https://github.com/SAP-cloud-infrastructure/webhook-injector" \
