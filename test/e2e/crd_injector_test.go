@@ -35,7 +35,14 @@ import (
 // lifecycle gating from TestWebhookLoadAndRotation so devs can run both tests
 // in one shot without paying the setup cost twice.
 func TestCRDInjector(t *testing.T) {
-	kubeconfigPath := filepath.Join(".", "kubeconfig")
+	// Use an absolute path. The crd-injector subprocess below runs with
+	// cmd.Dir set to the repo root (so `go run <module-path>` resolves), so
+	// any relative kubeconfig path would be looked up there instead of in
+	// test/e2e/. CI hit exactly this — `stat kubeconfig: no such file`.
+	kubeconfigPath, absErr := filepath.Abs(filepath.Join(".", "kubeconfig"))
+	if absErr != nil {
+		t.Fatalf("Resolve kubeconfig path: %v", absErr)
+	}
 	t.Setenv("KUBECONFIG", kubeconfigPath)
 
 	if !*reuseClusters {
