@@ -6,9 +6,11 @@
 // applies each CRD to the target cluster. It exits 0 on success and non-zero on
 // any parse or apply error.
 //
-// It is intentionally minimal: no controller, no caBundle handling, no watches.
+// It is intentionally minimal: no controller, no watches, no caBundle handling.
 // The expectation is that webhook-injector's labeled-CRD path stamps caBundle
-// on these CRDs after they exist.
+// (and the Service→URL rewrite) on these CRDs after they exist; to avoid
+// fighting webhook-injector across re-applies, applyCRD strips the fields
+// webhook-injector owns from the apply body when the CRD already exists.
 package main
 
 import (
@@ -180,12 +182,23 @@ func parseCRDs(cm *corev1.ConfigMap) ([]*apiextensionsv1.CustomResourceDefinitio
 	return out, nil
 }
 
-// applyCRD performs a server-side apply with Force ownership. Force is safe
-// here because crd-injector is the declared owner of these CRD definitions:
-// any conflicting field manager (e.g. an old kubectl apply) should yield to
-// the ConfigMap-driven source of truth. caBundle on conversion webhooks is
-// owned by webhook-injector via a separate field manager and is not touched
-// here (the ConfigMap typically omits it).
+// applyCRD performs a server-side apply of a single CRD.
+//
+// The three fields that webhook-injector owns on a Webhook conversion
+// strategy — spec.conversion.webhook.clientConfig.{caBundle,url,service} —
+// are intentionally stripped from the apply body whenever the CRD already
+// exists in the target cluster, so webhook-injector remains their sole
+// field-owner across re-applies. ForceOwnership is deliberately NOT used:
+// without those fields in our body there is nothing to force, and keeping
+// it on would let crd-injector steal future webhook-injector-owned fields.
+//
+// On first creation (CRD not yet in the target cluster) the user-authored
+// clientConfig is left intact: the apiserver requires `url` or `service`
+// to be set when strategy=Webhook, and webhook-injector's bootstrap
+// admission MWC rewrites the entry during the same admission cycle.
+// Admission-time mutations are attributed to the apiserver rather than to
+// crd-injector, so our managed-fields entry still does not list those
+// three keys after the create completes.
 //
 // We marshal to JSON and use RawPatch with types.ApplyPatchType rather than
 // client.Apply: the latter is deprecated in controller-runtime v0.23 in favor
@@ -203,13 +216,52 @@ func applyCRD(ctx context.Context, c client.Client, crd *apiextensionsv1.CustomR
 	crd.APIVersion = apiextensionsv1.SchemeGroupVersion.String()
 	crd.Kind = "CustomResourceDefinition"
 
+	// If the CRD already exists, drop the webhook-injector-owned fields
+	// from our apply body. With server-side apply, fields absent from the
+	// body are not owned by the applier, so re-applies become a true no-op
+	// for caBundle / url / service and we don't fight whatever
+	// webhook-injector has stamped (rotated cert, Service→URL rewrite).
+	existing := &apiextensionsv1.CustomResourceDefinition{}
+	switch err := c.Get(ctx, types.NamespacedName{Name: crd.Name}, existing); {
+	case err == nil:
+		stripWebhookInjectorFields(crd)
+	case apierrors.IsNotFound(err):
+		// First install: keep the user-authored clientConfig so the
+		// apiserver's CRD validator accepts the create.
+	default:
+		return fmt.Errorf("get existing: %w", err)
+	}
+
 	body, err := json.Marshal(crd)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
 	target := &apiextensionsv1.CustomResourceDefinition{}
 	target.SetName(crd.Name)
-	return c.Patch(ctx, target, client.RawPatch(types.ApplyPatchType, body), client.FieldOwner(fieldManager), client.ForceOwnership)
+	return c.Patch(ctx, target, client.RawPatch(types.ApplyPatchType, body), client.FieldOwner(fieldManager))
+}
+
+// stripWebhookInjectorFields zeroes the three fields under
+// spec.conversion.webhook.clientConfig that webhook-injector owns at
+// runtime — caBundle, url, and service. All three are omitempty in their
+// API types, so the subsequent JSON marshal omits the keys entirely and
+// crd-injector does not declare ownership of them via server-side apply.
+//
+// The surrounding clientConfig object is left in place: a CRD with
+// strategy=Webhook is required by the apiserver to carry one, and removing
+// the wrapper would change the structural shape of the apply body.
+func stripWebhookInjectorFields(crd *apiextensionsv1.CustomResourceDefinition) {
+	conv := crd.Spec.Conversion
+	if conv == nil || conv.Strategy != apiextensionsv1.WebhookConverter {
+		return
+	}
+	if conv.Webhook == nil || conv.Webhook.ClientConfig == nil {
+		return
+	}
+	cc := conv.Webhook.ClientConfig
+	cc.CABundle = nil
+	cc.URL = nil
+	cc.Service = nil
 }
 
 func detectNamespace() (string, error) {

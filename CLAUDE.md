@@ -161,10 +161,26 @@ a ConfigMap from the hosting cluster, parses every key as multi-document YAML,
 requires every document to be `apiextensions.k8s.io/v1 CustomResourceDefinition`
 (anything else is an error so it can't be used as a generic applier), and
 server-side applies each CRD to the target cluster with field manager
-`crd-injector` and `ForceOwnership`. Exits 0 on success, non-zero on any
-parse or apply error. No watches, no controller-runtime manager, no caBundle
-handling — `webhook-injector`'s labeled-CRD path is responsible for stamping
-caBundle on these CRDs after they exist.
+`crd-injector`. Exits 0 on success, non-zero on any parse or apply error. No
+watches, no controller-runtime manager, no caBundle handling — `webhook-injector`'s
+labeled-CRD path is responsible for stamping `caBundle` (and the Service→URL
+rewrite) on these CRDs after they exist.
+
+To avoid fighting `webhook-injector` across re-applies, `applyCRD` does a
+`Get` first; if the CRD already exists in the target cluster it strips the
+three fields `webhook-injector` owns at runtime — `spec.conversion.webhook.clientConfig.caBundle`,
+`spec.conversion.webhook.clientConfig.url`, and `spec.conversion.webhook.clientConfig.service` —
+from the apply body before SSA. With server-side apply, fields absent from the
+body are not owned by the applier, so re-applies are a true no-op for those
+three fields. On *first* creation the user-authored `clientConfig` is left
+intact (the apiserver requires `url` or `service` when `strategy=Webhook`),
+and `webhook-injector`'s bootstrap admission MWC rewrites the entry during the
+same admission cycle — admission-time mutations are attributed to the apiserver
+rather than to `crd-injector`, so our managed-fields entry still does not list
+those three keys after the create completes. `client.ForceOwnership` is
+deliberately *not* used: with the contested fields out of our body there is
+nothing to force, and keeping it on would let `crd-injector` steal future
+`webhook-injector`-owned fields.
 
 Implementation notes worth knowing before changing this file:
 - Uses a `serializer.NewCodecFactory(scheme)` deserializer rather than
@@ -174,6 +190,11 @@ Implementation notes worth knowing before changing this file:
   rather than the deprecated `client.Apply` constant — the new
   `client.Client.Apply()` API in controller-runtime v0.23 requires generated
   `runtime.ApplyConfiguration` types we don't otherwise need here.
+- The strip helper `stripWebhookInjectorFields` zeroes only the three
+  `clientConfig` sub-fields, not the surrounding `clientConfig` object: a
+  CRD with `strategy=Webhook` is required by the apiserver to carry one.
+  All three sub-fields are `omitempty` in their API types, so the JSON
+  marshal omits the keys entirely once they're nil.
 - Namespace auto-detection uses the same priority order as `webhook-injector`:
   `--namespace` flag → `NAMESPACE` env var → serviceaccount file → fail.
 - Target cluster connection mirrors `webhook-injector`: `--target-kubeconfig`

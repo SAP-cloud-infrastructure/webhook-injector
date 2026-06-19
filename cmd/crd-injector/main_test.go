@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -175,4 +176,135 @@ func namesOf(crds []*apiextensionsv1.CustomResourceDefinition) []string {
 		out[i] = c.Name
 	}
 	return out
+}
+
+// TestStripWebhookInjectorFields covers the field-stripping that crd-injector
+// performs before server-side applying a CRD that already exists. The three
+// fields under spec.conversion.webhook.clientConfig that webhook-injector owns
+// at runtime — caBundle, url, service — must be cleared on the in-memory
+// object so the subsequent JSON marshal omits them entirely (all three are
+// omitempty in their API types). Anything else on the CRD must be left alone.
+func TestStripWebhookInjectorFields(t *testing.T) {
+	caBundle := []byte("AAAA")
+	url := "https://stale.example.com/convert"
+	svcPath := "/convert"
+
+	tests := []struct {
+		name string
+		in   *apiextensionsv1.CustomResourceDefinition
+		// jsonShouldNotContain are substrings that must NOT appear in the
+		// marshalled JSON of the (possibly stripped) CRD. Empty means we
+		// don't care about the JSON contents for this case.
+		jsonShouldNotContain []string
+	}{
+		{
+			name: "Webhook strategy with service+caBundle is stripped",
+			in: &apiextensionsv1.CustomResourceDefinition{
+				Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+					Conversion: &apiextensionsv1.CustomResourceConversion{
+						Strategy: apiextensionsv1.WebhookConverter,
+						Webhook: &apiextensionsv1.WebhookConversion{
+							ClientConfig: &apiextensionsv1.WebhookClientConfig{
+								CABundle: caBundle,
+								Service: &apiextensionsv1.ServiceReference{
+									Namespace: "ns",
+									Name:      "svc",
+									Path:      &svcPath,
+								},
+							},
+						},
+					},
+				},
+			},
+			jsonShouldNotContain: []string{`"caBundle"`, `"service"`, `"url"`},
+		},
+		{
+			name: "Webhook strategy with url+caBundle is stripped",
+			in: &apiextensionsv1.CustomResourceDefinition{
+				Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+					Conversion: &apiextensionsv1.CustomResourceConversion{
+						Strategy: apiextensionsv1.WebhookConverter,
+						Webhook: &apiextensionsv1.WebhookConversion{
+							ClientConfig: &apiextensionsv1.WebhookClientConfig{
+								CABundle: caBundle,
+								URL:      &url,
+							},
+						},
+					},
+				},
+			},
+			jsonShouldNotContain: []string{`"caBundle"`, `"service"`, `"url"`},
+		},
+		{
+			name: "None strategy is left untouched",
+			in: &apiextensionsv1.CustomResourceDefinition{
+				Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+					Conversion: &apiextensionsv1.CustomResourceConversion{
+						Strategy: apiextensionsv1.NoneConverter,
+					},
+				},
+			},
+		},
+		{
+			name: "nil Conversion is a no-op",
+			in:   &apiextensionsv1.CustomResourceDefinition{},
+		},
+		{
+			name: "Webhook strategy with nil Webhook is a no-op",
+			in: &apiextensionsv1.CustomResourceDefinition{
+				Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+					Conversion: &apiextensionsv1.CustomResourceConversion{
+						Strategy: apiextensionsv1.WebhookConverter,
+					},
+				},
+			},
+		},
+		{
+			name: "Webhook strategy with nil ClientConfig is a no-op",
+			in: &apiextensionsv1.CustomResourceDefinition{
+				Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+					Conversion: &apiextensionsv1.CustomResourceConversion{
+						Strategy: apiextensionsv1.WebhookConverter,
+						Webhook:  &apiextensionsv1.WebhookConversion{},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stripWebhookInjectorFields(tc.in)
+
+			// For Webhook-strategy cases, the in-memory object's three
+			// fields must be zeroed.
+			if conv := tc.in.Spec.Conversion; conv != nil &&
+				conv.Strategy == apiextensionsv1.WebhookConverter &&
+				conv.Webhook != nil && conv.Webhook.ClientConfig != nil {
+				cc := conv.Webhook.ClientConfig
+				if cc.CABundle != nil {
+					t.Errorf("CABundle not cleared: got %q", cc.CABundle)
+				}
+				if cc.URL != nil {
+					t.Errorf("URL not cleared: got %q", *cc.URL)
+				}
+				if cc.Service != nil {
+					t.Errorf("Service not cleared: got %+v", *cc.Service)
+				}
+			}
+
+			if len(tc.jsonShouldNotContain) == 0 {
+				return
+			}
+			body, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			for _, needle := range tc.jsonShouldNotContain {
+				if strings.Contains(string(body), needle) {
+					t.Errorf("apply body contains %s; full body=%s", needle, body)
+				}
+			}
+		})
+	}
 }
