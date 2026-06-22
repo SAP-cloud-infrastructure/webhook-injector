@@ -66,7 +66,7 @@ reuse download Apache-2.0      # Download license file
 
 ### Controllers
 
-The application registers up to three independent controllers (the third is patch-mode only) with different leader election behavior:
+The application registers up to four independent controllers (the second and third are patch-mode only; the third is also opt-in via `--managed-resource-mode`) with different leader election behavior:
 
 1. **WebhookReconciler** (runs on **leader only**)
    - Location: `pkg/controllers/reconciler.go`
@@ -90,7 +90,19 @@ The application registers up to three independent controllers (the third is patc
    - Why this exists for CRDs: the bootstrap MWC stamps CRDs synchronously at CREATE/UPDATE, but out-of-band edits (kubectl, GitOps, other controllers) bypass admission. The Watch is the drift-correction safety net.
    - Leader election: DEFAULT behavior (requires leader)
 
-3. **CertificateReloader** (runs on **all replicas**)
+3. **ManagedResourceReconciler** (patch mode + `--managed-resource-mode` only; runs on **leader only**)
+   - Location: `pkg/controllers/managed_resource_reconciler.go`
+   - Watches: labeled `ManagedResource` (`resources.gardener.cloud/v1alpha1`) objects on the **hosting** cluster (not the target cluster). Cache is label-scoped, cluster-wide.
+   - Why this exists: on a Gardener seed, CRDs are not applied directly to the shoot — they live inside `ManagedResource` Secrets, and gardener-resource-manager (GRM) reconciles them into the shoot. `TargetWebhookReconciler` would stamp the shoot-side CRD, but GRM immediately overwrites it from the Secret. Stamping the *source* (this controller) makes the stamp survive GRM's next sync.
+   - For each labeled MR: walks `spec.secretRefs[*]`, fetches the referenced Secret, decodes each data key (with brotli `.br` support to match GRM's compression), finds CRDs with `conversion.strategy=Webhook`, stamps `clientConfig.caBundle`, and — when `--external-host` is set and the entry is Service-form — rewrites to URL-form via `webhookhost.BuildExternalURL`. Documents the controller doesn't touch survive byte-for-byte (no YAML round-trip), preserving user-authored formatting.
+   - Idempotency: a no-op reconcile must produce zero Secret updates. Both per-doc (`maybeStampCRDDoc` returns the original bytes when already converged) and per-Secret (skip `Update` when no doc in that Secret changed).
+   - **Force-reconcile annotation** (`--managed-resource-force-reconcile`, default `true`): after a successful Secret stamp, patches `gardener.cloud/operation=reconcile` on the MR so GRM picks up the change immediately even if it is in backoff. Set only on reconciles that actually wrote a Secret, and skipped when the annotation is already present — no-op reconciles do not churn GRM. GRM clears the annotation itself after consuming it.
+   - **keepObjects=true invariant**: when an MR ships at least one CRD, the reconciler verifies that `spec.keepObjects` is explicitly `true`. If unset or `false`, the reconcile still stamps the CRD (we'd rather have a working webhook than refuse to write), but logs an error and increments `webhook_injector_managed_resource_keep_objects_violations_total`. The destructive shape: without `keepObjects=true`, deleting the MR cascades into the shoot's CRDs and every custom resource of those kinds. CRDs with `conversion.strategy=None` still count for this check.
+   - **GRM health observation**: every reconcile reads `mr.Status.Conditions` and checks `ResourcesApplied` and `ResourcesHealthy`. If either is present and not `Status=True`, the reconcile logs an error (including `Reason`/`Message`) and increments `webhook_injector_managed_resource_unhealthy_total{condition,status}`. Missing conditions (freshly created MRs before GRM evaluates) are deliberately ignored to avoid noise during normal MR creation. The check is non-blocking — the stamp still happens — and runs on every reconcile pass (including periodic `--sync-period` ticks), so dashboards reflect current GRM state.
+   - **Rotation fan-out**: subscribes to the same rotation signal as `TargetWebhookReconciler` via a one-to-two splitter goroutine in `main.go`. On rotation, lists every labeled MR on the hosting cluster and enqueues each for reconcile so the new caBundle propagates immediately rather than waiting for the next `--sync-period` tick.
+   - Leader election: DEFAULT behavior (requires leader)
+
+4. **CertificateReloader** (runs on **all replicas**)
    - Location: `pkg/controllers/reloader.go`
    - Watches: Certificate Secret (in hosting cluster)
    - Writes certificates to local filesystem (`/tmp/webhook-certs` by default)
@@ -123,6 +135,11 @@ The application registers up to three independent controllers (the third is patc
 - webhook-injector parses, injects CA bundle, and applies to target cluster
 - Supports service references (in-cluster) and URLs (remote)
 
+**Gardener seed support:**
+- On a Gardener seed, CRDs are wrapped inside `ManagedResource` Secrets and applied to the shoot by `gardener-resource-manager`. Stamping the shoot-side CRD alone produces a thrash loop because GRM re-applies the original Secret on every sync.
+- The opt-in `--managed-resource-mode` flag enables `ManagedResourceReconciler`, which stamps the *source* (the MR's referenced Secret on the seed). The shoot-side `TargetWebhookReconciler` still runs as a belt-and-suspenders convergence path for the brief window between Secret update and GRM sync, but the authoritative stamp lives in the Secret.
+- Brotli (`.br` suffix) compression is supported because GRM transparently compresses larger payloads.
+
 ## Code Structure
 
 ```
@@ -143,9 +160,14 @@ pkg/config/                     Environment variable configuration
 pkg/controllers/                Two independent controllers
   reconciler.go                 WebhookReconciler (leader-only, manages certificates and target cluster)
   reloader.go                   CertificateReloader (all replicas, syncs certs to filesystem)
+  managed_resource_reconciler.go ManagedResourceReconciler (patch mode + --managed-resource-mode, stamps CRDs inside Gardener ManagedResource Secrets)
+  cabundle.go                    Shared loadCABundle helper used by TargetWebhookReconciler and ManagedResourceReconciler
+
+pkg/managedresource/            Helpers for decoding/re-encoding Gardener ManagedResource Secret data
+  codec.go                      Brotli-aware decode/encode + multi-doc YAML split/join (preserves untouched docs byte-for-byte)
 
 pkg/metrics/                    Prometheus metric definitions
-  metrics.go                    CertificateRotationsTotal, CertificateExpiryTime, CertFilesWrittenTotal
+  metrics.go                    Cert rotations / expiry / files-written, target-cluster stamps, admission decisions, rotation fan-out, ManagedResource stamps + force-reconcile + brotli encoding (see Metrics section)
 
 pkg/webhooks/                   Webhook configuration parsing
   parser.go                     ParseWebhookConfigurations(), ExtractServiceReferences()
@@ -316,12 +338,18 @@ Common flags:
 - `--cert-rotation-threshold` - When to rotate (0-1)
 - `--target-kubeconfig` - Path to target cluster kubeconfig (optional, defaults to in-cluster)
 - `--enable-leader-election` - Enable HA with multiple replicas
+- `--leader-election-id` - Leader election lease name. Default `webhook-injector-leader`.
 - `--sync-period` - Reconciliation interval
+- `--metrics-addr` - Metrics server bind address. Default `:8082`.
+- `--health-addr` - Health probe server bind address. Default `:8083`.
+- `--version` - Print version and exit. The binary exits 0 immediately after printing.
 
 Patch-mode-only flags:
 - `--admission-webhook-name` - name of the `MutatingWebhookConfiguration` the controller bootstraps in the target cluster to register itself as an admission mutator on labeled CRDs (default `webhook-injector-mutator`). Empty disables bootstrap; `TargetWebhookReconciler` continues to converge MWC/VWC/CRD via Watch, but CRDs lose synchronous stamping at admission time.
 - `--admission-webhook-port` - port the admission webhook server binds to inside the pod (default `9444`). Configure your Service / NodePort / LoadBalancer to forward `--admission-external-port` to this port.
 - `--admission-external-port` - **required when `--admission-webhook-name` is non-empty**; external port the target cluster uses to reach this controller's admission webhook server. Combined with `--external-host` to form the bootstrap MWC URL `https://<external-host>:<admission-external-port>/mutate-crd`. Distinct from `--external-port`, which targets the labeled webhook callbacks. No default — the value depends entirely on the user's Service / NodePort / LoadBalancer wiring, and a wrong default would silently produce a bootstrap MWC the apiserver cannot reach.
+- `--managed-resource-mode` - opt-in (default `false`). When `true` (patch mode only), registers `ManagedResourceReconciler`, which stamps the `caBundle` and rewrites Service-form conversion `clientConfig` on CRDs embedded inside Gardener `ManagedResource` Secrets on the hosting cluster. Required flags `--webhook-label`, `--external-host`, `--external-port` are already required by patch mode. Without this flag the controller is not registered and the existing `TargetWebhookReconciler` is the only path that touches CRDs (correct for non-Gardener targets; wrong for Gardener seeds, where GRM would overwrite the shoot-side stamp on every sync).
+- `--managed-resource-force-reconcile` - default `true`. When `--managed-resource-mode` is set, the controller patches `gardener.cloud/operation=reconcile` on each `ManagedResource` after a successful Secret stamp. This kicks `gardener-resource-manager` out of any backoff or debounce state so the new caBundle reaches the shoot promptly. The annotation is set **only** on reconciles that actually wrote a Secret — idempotent no-op reconciles do not churn GRM. The reconciler also skips the patch when the annotation is already present (GRM clears it after consuming, per the documented Gardener contract). Set to `false` to rely solely on GRM's own Secret watch — appropriate when the Secret-watch propagation latency is acceptable and you want one fewer hosting-cluster write per rotation.
 
 ## Remote Cluster Support
 
@@ -330,3 +358,51 @@ The target cluster client is created in `main.go`:
 - Otherwise: Use in-cluster config (hosting cluster = target cluster)
 
 **Important**: Use `--target-kubeconfig` not `KUBECONFIG` to avoid interfering with the manager's hosting cluster connection (which uses standard client-go config loading that checks KUBECONFIG).
+
+## Metrics
+
+All metrics are registered on controller-runtime's default Prometheus registry and exposed on `--metrics-addr` (default `:8082`). All metric names are prefixed `webhook_injector_`. Label cardinality is bounded — every label below has a fixed enum of values, declared as constants in `pkg/metrics/metrics.go`.
+
+### Certificate metrics (always on)
+
+- `webhook_injector_certificate_rotations_total{reason}` — counter. Labels: `reason ∈ {initial, expired, san_mismatch, force_rotation}`. Incremented by `WebhookReconciler` when a fresh cert is generated. The `force_rotation` value corresponds to the `webhook-injector.sap.com/force-rotation` annotation on the cert Secret.
+- `webhook_injector_certificate_expiry_time_seconds` — gauge. Unix timestamp of the current cert's `NotAfter`. Use `(metric - time())` in alerts for "expires within N hours".
+- `webhook_injector_cert_files_written_total` — counter. Incremented by `CertificateReloader` on every disk write. Each replica exposes its own value; a spike means rotation is propagating to the sidecar filesystem.
+
+### Target-cluster stamping (patch mode)
+
+- `webhook_injector_target_stamps_total{kind, result}` — counter. Labels: `kind ∈ {MutatingWebhookConfiguration, ValidatingWebhookConfiguration, CustomResourceDefinition}`; `result ∈ {stamped, converged, error}`. Emitted by `TargetWebhookReconciler.reconcile{MWC,VWC,CRD}` via a deferred classifier. `stamped` = `Update` succeeded; `converged` = idempotency-skip (caBundle already current, no Service→URL rewrite needed); `error` = Get or Update failure. The `converged/stamped` ratio is the natural "is rotation actually changing anything" signal on a steady-state cluster.
+- `webhook_injector_admission_decisions_total{result}` — counter. Labels: `result ∈ {mutated, passthrough, error}`. Emitted by the admission mutator (`pkg/admission`) via a deferred classifier of the `admission.Response`. `mutated` = JSON patch returned; `passthrough` = `Allowed` without a patch (kind not handled, CA bundle unavailable/empty, CRD without Webhook conversion); `error` = `Errored` response.
+
+### Rotation fan-out
+
+- `webhook_injector_rotation_fanout_events_total{kind, outcome}` — counter. Labels: `kind ∈ {MutatingWebhookConfiguration, ValidatingWebhookConfiguration, CustomResourceDefinition, ManagedResource}`; `outcome ∈ {emitted, dropped}`. Emitted by `targetResyncTrigger.fanOut` and `managedResourceResyncTrigger.fanOut` for every per-kind event pushed to (or dropped from) the controller's reconcile channel on every cert rotation. A non-zero `dropped` rate is informational — the next rotation or the periodic `--sync-period` tick re-converges; alarming on it makes sense only if the rate is sustained.
+
+### ManagedResource stamping (`--managed-resource-mode` only)
+
+- `webhook_injector_managed_resource_stamps_total{result}` — counter. Labels: `result ∈ {stamped, converged, error}`. Per-MR reconcile outcome. `stamped` = at least one referenced Secret was rewritten; `converged` = all Secrets already in desired state; `error` = Get / decode / Update failure.
+- `webhook_injector_managed_resource_crds_stamped_total` — counter (no labels). Per-CRD-document granularity, summed across all MRs and all Secrets. Distinct from the stamps counter because a single MR may carry multiple CRDs across multiple Secrets — this is the right signal for "how much work did the last rotation actually do".
+- `webhook_injector_managed_resource_secret_keys_total{encoding}` — counter. Labels: `encoding ∈ {plain, brotli}`. Increments once per Secret data key processed. Lets a dashboard confirm the brotli codec path is exercised against the live fleet — a seed whose MRs only ship plain YAML will show `encoding=brotli` at zero.
+- `webhook_injector_managed_resource_force_reconcile_total{result}` — counter. Labels: `result ∈ {patched, skipped, error}`. Tracks the `gardener.cloud/operation=reconcile` annotation patch. `patched` = annotation actually written (MR Patch succeeded); `skipped` = annotation already present (a previous reconcile set it and GRM has not yet consumed it); `error` = patch failed (reconcile itself does not fail in that case, so this counter is the sole signal of degraded GRM-kick).
+- `webhook_injector_managed_resource_keep_objects_violations_total` — counter (no labels). Incremented once per reconcile of a labeled MR that ships at least one CRD but does not set `spec.keepObjects: true`. The check is non-blocking — the controller still stamps the CRD so the webhook keeps working — but the counter and an accompanying error-level log surface a destructive misconfiguration: deleting that MR would cascade-delete every shoot CRD it ships, taking every custom resource of those kinds with it. The check measures _MRs_, not _CRDs_, so an MR with five CRDs and no `keepObjects=true` increments once per reconcile, not five times. CRDs with `conversion.strategy=None` still count as "observed CRDs" for this check — the destructive shape applies regardless of whether we rewrite the conversion clientConfig.
+- `webhook_injector_managed_resource_unhealthy_total{condition, status}` — counter. Labels: `condition ∈ {ResourcesApplied, ResourcesHealthy}`; `status ∈ {False, Progressing, Unknown}`. Incremented per condition per reconcile when the named condition is present on the MR with a status other than `True`. **Missing conditions are intentionally not counted** — a freshly created MR may not have status populated yet, and treating missing as unhealthy would generate noise during normal MR creation. Each increment is paired with an error-level log line carrying the condition's `Reason` and `Message`. The check is non-blocking — the stamp still happens — and runs on every reconcile pass (including periodic `--sync-period` ticks), so the rate naturally surfaces both "many MRs unhealthy briefly" and "one MR chronically unhealthy".
+
+### Examples
+
+The `converged` paths dominate in steady state, so a useful "is rotation propagating" panel is:
+
+```
+sum by (kind) (rate(webhook_injector_target_stamps_total{result="stamped"}[5m]))
++
+rate(webhook_injector_managed_resource_crds_stamped_total[5m])
+```
+
+A useful "error budget" panel:
+
+```
+sum by (job) (rate(webhook_injector_target_stamps_total{result="error"}[5m]))
++ sum by (job) (rate(webhook_injector_managed_resource_stamps_total{result="error"}[5m]))
++ sum by (job) (rate(webhook_injector_admission_decisions_total{result="error"}[5m]))
++ sum by (job) (rate(webhook_injector_managed_resource_force_reconcile_total{result="error"}[5m]))
+```
+
