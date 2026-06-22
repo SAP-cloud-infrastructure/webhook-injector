@@ -8,6 +8,63 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
+// Result label values shared across multiple metrics. Centralised so the
+// allowed cardinality is documented in one place — adding a new value
+// implicitly extends the set of series Prometheus stores.
+const (
+	// ResultStamped is the "we wrote a change" outcome — the reconciler
+	// or admission hook actually mutated the target object.
+	ResultStamped = "stamped"
+	// ResultConverged is the "already in desired state" no-op outcome — the
+	// reconciler observed the object but did not need to write. Used by
+	// idempotency-skip paths in target_webhook_reconciler and
+	// managed_resource_reconciler.
+	ResultConverged = "converged"
+	// ResultError is the "we tried and failed" outcome — used for both
+	// transient errors (Get failed, Update failed) and decoding failures
+	// inside an MR Secret. Lets a single panel show real failures without
+	// inflating the converged-path counter.
+	ResultError = "error"
+
+	// AdmissionMutated — the admission webhook returned a JSON patch.
+	AdmissionMutated = "mutated"
+	// AdmissionPassthrough — the admission webhook returned Allowed=true
+	// without mutating (object already converged, or not a CRD with a
+	// Webhook conversion strategy).
+	AdmissionPassthrough = "passthrough"
+	// AdmissionError — the admission webhook returned an error (decode
+	// failure, missing caBundle source, etc.).
+	AdmissionError = "error"
+
+	// FanOutEmitted — an event was successfully pushed onto the per-kind
+	// channel feeding the controller.
+	FanOutEmitted = "emitted"
+	// FanOutDropped — the channel was full and the non-blocking send was
+	// dropped. A non-zero rate of these means a rotation arrived faster
+	// than the previous one drained; the next rotation (or the periodic
+	// --sync-period reconcile) re-converges, so this is informational
+	// rather than a failure.
+	FanOutDropped = "dropped"
+
+	// ForceReconcilePatched — patched gardener.cloud/operation=reconcile
+	// onto the MR after a successful Secret stamp.
+	ForceReconcilePatched = "patched"
+	// ForceReconcileSkipped — patch skipped because the annotation was
+	// already present (a previous reconcile set it, GRM has not yet
+	// consumed it). Avoids no-op MR writes.
+	ForceReconcileSkipped = "skipped"
+	// ForceReconcileError — patch failed. The reconcile itself does not
+	// fail when this happens (we logged and moved on), so this counter is
+	// the only signal that GRM may be running on its own Secret-watch
+	// cadence instead of the kicked one.
+	ForceReconcileError = "error"
+
+	// EncodingPlain — uncompressed YAML key inside an MR Secret.
+	EncodingPlain = "plain"
+	// EncodingBrotli — `.br`-suffixed key handled via the brotli codec.
+	EncodingBrotli = "brotli"
+)
+
 var (
 	// CertificateRotationsTotal counts certificate rotations by reason.
 	// reason label values: "initial" (first generation), "expired" (past threshold),
@@ -36,6 +93,131 @@ var (
 			Help: "Total number of times certificate files were written to disk by the reloader.",
 		},
 	)
+
+	// TargetStampsTotal counts reconcile outcomes on target-cluster
+	// MutatingWebhookConfiguration / ValidatingWebhookConfiguration /
+	// CustomResourceDefinition objects, partitioned by kind and outcome.
+	// "stamped" = we wrote caBundle/URL; "converged" = idempotency-skip
+	// path (already in desired state); "error" = Get/Update failure.
+	TargetStampsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_target_stamps_total",
+			Help: "Total reconcile outcomes for target-cluster MWC/VWC/CRD stamping, labeled by kind and result (stamped|converged|error).",
+		},
+		[]string{"kind", "result"},
+	)
+
+	// AdmissionDecisionsTotal counts decisions made by the admission
+	// mutator, partitioned by outcome. "mutated" = returned a JSON patch;
+	// "passthrough" = Allowed without mutation (already converged or not
+	// a CRD with Webhook conversion); "error" = decode / cert-load failure.
+	AdmissionDecisionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_admission_decisions_total",
+			Help: "Total admission webhook decisions, labeled by result (mutated|passthrough|error).",
+		},
+		[]string{"result"},
+	)
+
+	// RotationFanOutEventsTotal counts per-kind events emitted (or dropped)
+	// from the rotation fan-out goroutines on every cert rotation. A
+	// non-zero "dropped" rate means a rotation fired while the previous
+	// fan-out was still draining — informational; the next rotation or
+	// --sync-period reconcile reconverges.
+	RotationFanOutEventsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_rotation_fanout_events_total",
+			Help: "Total events fanned out to per-kind reconcile channels on certificate rotation, labeled by kind and outcome (emitted|dropped).",
+		},
+		[]string{"kind", "outcome"},
+	)
+
+	// ManagedResourceStampsTotal counts reconcile outcomes on the
+	// hosting-cluster ManagedResource controller, partitioned by result.
+	// "stamped" = at least one referenced Secret was actually mutated;
+	// "converged" = all referenced Secrets were already in desired state;
+	// "error" = Get/decode/Update failure.
+	ManagedResourceStampsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_managed_resource_stamps_total",
+			Help: "Total reconcile outcomes for ManagedResource embedded-CRD stamping, labeled by result (stamped|converged|error).",
+		},
+		[]string{"result"},
+	)
+
+	// ManagedResourceCRDsStampedTotal counts individual CRD documents
+	// rewritten inside MR Secrets. Distinct from ManagedResourceStampsTotal
+	// because a single MR reconcile may stamp multiple CRDs in multiple
+	// Secrets, and the per-CRD signal is what you want for a "how much
+	// work did the rotation actually do" panel.
+	ManagedResourceCRDsStampedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_managed_resource_crds_stamped_total",
+			Help: "Total CRD documents inside Gardener ManagedResource Secrets that were rewritten with caBundle or URL.",
+		},
+	)
+
+	// ManagedResourceSecretKeysTotal counts every Secret data key the MR
+	// reconciler processed, partitioned by encoding. Lets dashboards
+	// confirm the brotli codec path is exercised against the production
+	// fleet — a seed running only plain-YAML MRs would show
+	// encoding="brotli" at zero.
+	ManagedResourceSecretKeysTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_managed_resource_secret_keys_total",
+			Help: "Total Secret data keys processed by the ManagedResource reconciler, labeled by encoding (plain|brotli).",
+		},
+		[]string{"encoding"},
+	)
+
+	// ManagedResourceForceReconcileTotal counts patches of the
+	// gardener.cloud/operation=reconcile annotation onto an MR, partitioned
+	// by outcome. "patched" = annotation actually written; "skipped" =
+	// already present (GRM hasn't consumed it yet); "error" = patch
+	// failed (reconcile itself does not fail in that case — this counter
+	// is the sole signal of degraded GRM-kick).
+	ManagedResourceForceReconcileTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_managed_resource_force_reconcile_total",
+			Help: "Total gardener.cloud/operation=reconcile annotation patches on ManagedResources, labeled by result (patched|skipped|error).",
+		},
+		[]string{"result"},
+	)
+
+	// ManagedResourceKeepObjectsViolationsTotal counts reconciles that
+	// observed at least one CRD inside the MR's referenced Secrets while
+	// the MR's spec.keepObjects was not explicitly true. Without that
+	// flag, deleting the ManagedResource cascade-deletes the shoot's CRDs
+	// and every custom resource of those kinds — a destructive
+	// misconfiguration the controller surfaces but does not block (we
+	// still stamp the CRD so the webhook keeps working). One increment
+	// per offending reconcile, not per CRD doc, so the metric measures
+	// "how many MRs are misconfigured" rather than "how many CRDs are
+	// at risk".
+	ManagedResourceKeepObjectsViolationsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_managed_resource_keep_objects_violations_total",
+			Help: "Total reconciles of a labeled ManagedResource that ships at least one CRD but does not set spec.keepObjects=true.",
+		},
+	)
+
+	// ManagedResourceUnhealthyTotal counts reconciles that observed a
+	// ManagedResource whose ResourcesApplied or ResourcesHealthy condition
+	// was present but not Status=True. Labels:
+	//   condition ∈ {ResourcesApplied, ResourcesHealthy}
+	//   status    ∈ {False, Progressing, Unknown}
+	// Missing conditions (e.g. on a freshly created MR before GRM evaluates)
+	// are intentionally NOT counted — the metric measures MRs that GRM has
+	// evaluated and found non-True, not MRs GRM has been silent about.
+	// One increment per condition per reconcile, so the rate is bounded by
+	// the reconcile frequency.
+	ManagedResourceUnhealthyTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_managed_resource_unhealthy_total",
+			Help: "Total reconciles that observed a labeled ManagedResource with ResourcesApplied or ResourcesHealthy not in Status=True, labeled by condition and observed status.",
+		},
+		[]string{"condition", "status"},
+	)
 )
 
 func init() {
@@ -43,5 +225,14 @@ func init() {
 		CertificateRotationsTotal,
 		CertificateExpiryTime,
 		CertFilesWrittenTotal,
+		TargetStampsTotal,
+		AdmissionDecisionsTotal,
+		RotationFanOutEventsTotal,
+		ManagedResourceStampsTotal,
+		ManagedResourceCRDsStampedTotal,
+		ManagedResourceSecretKeysTotal,
+		ManagedResourceForceReconcileTotal,
+		ManagedResourceKeepObjectsViolationsTotal,
+		ManagedResourceUnhealthyTotal,
 	)
 }

@@ -40,6 +40,33 @@ subjects:
   - kind: ServiceAccount
     name: webhook-injector
 ---
+# ClusterRole in the hosting cluster (only needed when --managed-resource-mode is set).
+# Grants the controller access to Gardener ManagedResources across all namespaces
+# and to the resource Secrets they reference.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: webhook-injector-hosting
+rules:
+  - apiGroups: ["resources.gardener.cloud"]
+    resources: ["managedresources"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: webhook-injector-hosting
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: webhook-injector-hosting
+subjects:
+  - kind: ServiceAccount
+    name: webhook-injector
+---
 # ClusterRole in target cluster (apply separately if remote)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

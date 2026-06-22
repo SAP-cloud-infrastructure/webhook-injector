@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/webhookhost"
 )
 
@@ -62,7 +63,21 @@ type Mutator struct {
 }
 
 // Handle implements admission.Handler.
-func (m *Mutator) Handle(ctx context.Context, req admission.Request) admission.Response {
+func (m *Mutator) Handle(ctx context.Context, req admission.Request) (resp admission.Response) {
+	// Classify the response for the metrics counter. A non-empty Patches slice
+	// means we emitted a JSON patch (mutated path); an Allowed response with
+	// no patches is the passthrough path; everything else is an error.
+	defer func() {
+		switch {
+		case !resp.Allowed:
+			metrics.AdmissionDecisionsTotal.WithLabelValues(metrics.AdmissionError).Inc()
+		case len(resp.Patches) > 0 || resp.PatchType != nil:
+			metrics.AdmissionDecisionsTotal.WithLabelValues(metrics.AdmissionMutated).Inc()
+		default:
+			metrics.AdmissionDecisionsTotal.WithLabelValues(metrics.AdmissionPassthrough).Inc()
+		}
+	}()
+
 	logger := log.FromContext(ctx).WithValues(
 		"kind", req.Kind.Kind,
 		"namespace", req.Namespace,

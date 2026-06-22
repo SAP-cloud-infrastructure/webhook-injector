@@ -6,11 +6,9 @@ package controllers
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
-	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -27,7 +25,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/webhookhost"
+)
+
+// Kind label values used by metrics that partition by GVK. Kept in sync with
+// the controller-runtime Watch types above so a typo can't silently create a
+// second time series. `crdKind` is shared with managed_resource_reconciler.go
+// (declared there) and intentionally referenced rather than redeclared.
+const (
+	kindMWC = "MutatingWebhookConfiguration"
+	kindVWC = "ValidatingWebhookConfiguration"
 )
 
 // TargetWebhookReconciler stamps caBundle (and optionally rewrites Service-form
@@ -228,7 +236,9 @@ func (t *targetResyncTrigger) fanOut(ctx context.Context, logger logr.Logger) {
 			obj := &mwcList.Items[i]
 			select {
 			case t.mwcCh <- event.GenericEvent{Object: obj}:
+				metrics.RotationFanOutEventsTotal.WithLabelValues(kindMWC, metrics.FanOutEmitted).Inc()
 			default:
+				metrics.RotationFanOutEventsTotal.WithLabelValues(kindMWC, metrics.FanOutDropped).Inc()
 				logger.Info("rotation fan-out: MWC channel full, dropping event", "name", obj.Name)
 			}
 		}
@@ -242,7 +252,9 @@ func (t *targetResyncTrigger) fanOut(ctx context.Context, logger logr.Logger) {
 			obj := &vwcList.Items[i]
 			select {
 			case t.vwcCh <- event.GenericEvent{Object: obj}:
+				metrics.RotationFanOutEventsTotal.WithLabelValues(kindVWC, metrics.FanOutEmitted).Inc()
 			default:
+				metrics.RotationFanOutEventsTotal.WithLabelValues(kindVWC, metrics.FanOutDropped).Inc()
 				logger.Info("rotation fan-out: VWC channel full, dropping event", "name", obj.Name)
 			}
 		}
@@ -256,7 +268,9 @@ func (t *targetResyncTrigger) fanOut(ctx context.Context, logger logr.Logger) {
 			obj := &crdList.Items[i]
 			select {
 			case t.crdCh <- event.GenericEvent{Object: obj}:
+				metrics.RotationFanOutEventsTotal.WithLabelValues(crdKind, metrics.FanOutEmitted).Inc()
 			default:
+				metrics.RotationFanOutEventsTotal.WithLabelValues(crdKind, metrics.FanOutDropped).Inc()
 				logger.Info("rotation fan-out: CRD channel full, dropping event", "name", obj.Name)
 			}
 		}
@@ -321,9 +335,12 @@ func (r *TargetWebhookReconciler) labelPredicateCRD() predicate.TypedPredicate[*
 // itself. (CRDs have the same protection in reconcileCRD.)
 func (r *TargetWebhookReconciler) reconcileMWC(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("kind", "MutatingWebhookConfiguration", "name", req.Name)
+	result := metrics.ResultConverged
+	defer func() { metrics.TargetStampsTotal.WithLabelValues(kindMWC, result).Inc() }()
 
 	caCert, err := r.loadCABundle(ctx)
 	if err != nil {
+		result = metrics.ResultError
 		return ctrl.Result{}, err
 	}
 
@@ -332,6 +349,7 @@ func (r *TargetWebhookReconciler) reconcileMWC(ctx context.Context, req ctrl.Req
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
+		result = metrics.ResultError
 		return ctrl.Result{}, fmt.Errorf("failed to get MutatingWebhookConfiguration %s: %w", req.Name, err)
 	}
 
@@ -364,8 +382,10 @@ func (r *TargetWebhookReconciler) reconcileMWC(ctx context.Context, req ctrl.Req
 	}
 
 	if err := r.TargetClient.Update(ctx, mwc); err != nil {
+		result = metrics.ResultError
 		return ctrl.Result{}, fmt.Errorf("failed to update MutatingWebhookConfiguration %s: %w", mwc.Name, err)
 	}
+	result = metrics.ResultStamped
 
 	if rewroteURL != "" {
 		logger.Info("Stamped MutatingWebhookConfiguration", "webhooks", len(mwc.Webhooks), "rewroteURL", rewroteURL, "caBundleChanged", caChanged)
@@ -378,9 +398,12 @@ func (r *TargetWebhookReconciler) reconcileMWC(ctx context.Context, req ctrl.Req
 // reconcileVWC mirrors reconcileMWC for ValidatingWebhookConfiguration.
 func (r *TargetWebhookReconciler) reconcileVWC(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("kind", "ValidatingWebhookConfiguration", "name", req.Name)
+	result := metrics.ResultConverged
+	defer func() { metrics.TargetStampsTotal.WithLabelValues(kindVWC, result).Inc() }()
 
 	caCert, err := r.loadCABundle(ctx)
 	if err != nil {
+		result = metrics.ResultError
 		return ctrl.Result{}, err
 	}
 
@@ -389,6 +412,7 @@ func (r *TargetWebhookReconciler) reconcileVWC(ctx context.Context, req ctrl.Req
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
+		result = metrics.ResultError
 		return ctrl.Result{}, fmt.Errorf("failed to get ValidatingWebhookConfiguration %s: %w", req.Name, err)
 	}
 
@@ -418,8 +442,10 @@ func (r *TargetWebhookReconciler) reconcileVWC(ctx context.Context, req ctrl.Req
 	}
 
 	if err := r.TargetClient.Update(ctx, vwc); err != nil {
+		result = metrics.ResultError
 		return ctrl.Result{}, fmt.Errorf("failed to update ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
 	}
+	result = metrics.ResultStamped
 
 	if rewroteURL != "" {
 		logger.Info("Stamped ValidatingWebhookConfiguration", "webhooks", len(vwc.Webhooks), "rewroteURL", rewroteURL, "caBundleChanged", caChanged)
@@ -440,9 +466,12 @@ func (r *TargetWebhookReconciler) reconcileVWC(ctx context.Context, req ctrl.Req
 // (and the resulting resourceVersion bump that would re-trigger us).
 func (r *TargetWebhookReconciler) reconcileCRD(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("kind", "CustomResourceDefinition", "name", req.Name)
+	result := metrics.ResultConverged
+	defer func() { metrics.TargetStampsTotal.WithLabelValues(crdKind, result).Inc() }()
 
 	caCert, err := r.loadCABundle(ctx)
 	if err != nil {
+		result = metrics.ResultError
 		return ctrl.Result{}, err
 	}
 
@@ -451,6 +480,7 @@ func (r *TargetWebhookReconciler) reconcileCRD(ctx context.Context, req ctrl.Req
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
+		result = metrics.ResultError
 		return ctrl.Result{}, fmt.Errorf("failed to get CustomResourceDefinition %s: %w", req.Name, err)
 	}
 
@@ -481,8 +511,10 @@ func (r *TargetWebhookReconciler) reconcileCRD(ctx context.Context, req ctrl.Req
 	cc.CABundle = caCert
 
 	if err := r.TargetClient.Update(ctx, crd); err != nil {
+		result = metrics.ResultError
 		return ctrl.Result{}, fmt.Errorf("failed to update CustomResourceDefinition %s: %w", crd.Name, err)
 	}
+	result = metrics.ResultStamped
 
 	if rewroteURL != "" {
 		logger.Info("Stamped CustomResourceDefinition conversion webhook", "rewroteURL", rewroteURL, "caBundleChanged", caChanged)
@@ -492,19 +524,9 @@ func (r *TargetWebhookReconciler) reconcileCRD(ctx context.Context, req ctrl.Req
 	return ctrl.Result{}, nil
 }
 
-// loadCABundle reads tls.crt from the hosting-cluster certificate Secret. An
-// empty or missing tls.crt is returned as an error so the controller retries
-// with backoff — the WebhookReconciler is on a different reconcile loop and
-// will populate the Secret shortly after startup.
+// loadCABundle reads tls.crt from the hosting-cluster certificate Secret via
+// the shared package-private helper. Kept as a thin method on the receiver so
+// reconcile bodies don't need to thread Namespace/CertSecretName explicitly.
 func (r *TargetWebhookReconciler) loadCABundle(ctx context.Context) ([]byte, error) {
-	secret := &corev1.Secret{}
-	key := types.NamespacedName{Name: r.CertSecretName, Namespace: r.Namespace}
-	if err := r.HostingClient.Get(ctx, key, secret); err != nil {
-		return nil, fmt.Errorf("failed to get cert Secret %s: %w", key, err)
-	}
-	caCert := secret.Data[tlsCrtKey]
-	if len(caCert) == 0 {
-		return nil, errors.New("cert Secret has empty tls.crt; retrying")
-	}
-	return caCert, nil
+	return loadCABundle(ctx, r.HostingClient, r.Namespace, r.CertSecretName)
 }

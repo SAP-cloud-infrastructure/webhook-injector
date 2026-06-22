@@ -41,6 +41,8 @@ import (
 	whadmission "github.com/sap-cloud-infrastructure/webhook-injector/pkg/admission"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers"
+
+	resourcesv1alpha1 "github.com/gardener/gardener/pkg/apis/resources/v1alpha1"
 )
 
 var (
@@ -49,26 +51,28 @@ var (
 )
 
 var (
-	webhookConfigName     string
-	webhookLabel          string
-	certSANs              string
-	externalHost          string
-	externalPort          int
-	namespace             string
-	certSecretName        string
-	certDir               string
-	certValidity          time.Duration
-	certRotationThreshold float64
-	targetKubeconfig      string
-	enableLeaderElection  bool
-	leaderElectionID      string
-	syncPeriod            time.Duration
-	metricsAddr           string
-	healthAddr            string
-	admissionWebhookName  string
-	admissionWebhookPort  int
-	admissionExternalPort int
-	showVersion           bool
+	webhookConfigName             string
+	webhookLabel                  string
+	certSANs                      string
+	externalHost                  string
+	externalPort                  int
+	namespace                     string
+	certSecretName                string
+	certDir                       string
+	certValidity                  time.Duration
+	certRotationThreshold         float64
+	targetKubeconfig              string
+	enableLeaderElection          bool
+	leaderElectionID              string
+	syncPeriod                    time.Duration
+	metricsAddr                   string
+	healthAddr                    string
+	admissionWebhookName          string
+	admissionWebhookPort          int
+	admissionExternalPort         int
+	managedResourceMode           bool
+	managedResourceForceReconcile bool
+	showVersion                   bool
 )
 
 func init() {
@@ -92,6 +96,10 @@ func init() {
 	flag.StringVar(&admissionWebhookName, "admission-webhook-name", "webhook-injector-mutator", "Name of the MutatingWebhookConfiguration the controller bootstraps in the target cluster to register its own admission mutator. Patch mode only. Empty disables admission-webhook bootstrap.")
 	flag.IntVar(&admissionWebhookPort, "admission-webhook-port", 9444, "Port the admission webhook server binds to inside the pod. Patch mode only. Configure your Service/NodePort/LoadBalancer to forward --admission-external-port to this port.")
 	flag.IntVar(&admissionExternalPort, "admission-external-port", 0, "External port (combined with --external-host) the target cluster uses to reach the admission webhook server. Required in patch mode when admission-webhook bootstrap is active. Distinct from --external-port, which targets the labeled webhook callbacks rather than this controller's admission endpoint.")
+	flag.BoolVar(&managedResourceMode, "managed-resource-mode", false,
+		"Enable the ManagedResource controller that stamps caBundle and rewrites Service-form conversion clientConfig directly inside Gardener ManagedResource Secrets on the hosting cluster. Patch mode only; requires --webhook-label, --external-host, and --external-port (already required in patch mode).")
+	flag.BoolVar(&managedResourceForceReconcile, "managed-resource-force-reconcile", true,
+		"When --managed-resource-mode is set, patch gardener.cloud/operation=reconcile on each ManagedResource after a successful Secret stamp. This kicks gardener-resource-manager out of any backoff so the new caBundle reaches the shoot promptly. The annotation is set only on reconciles that actually wrote a Secret — no-op reconciles do not churn GRM. Default true; set to false to rely solely on GRM's own Secret watch.")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	// Initialize scheme
@@ -102,6 +110,9 @@ func init() {
 		panic(err)
 	}
 	if err := apiextensionsv1.AddToScheme(scheme); err != nil {
+		panic(err)
+	}
+	if err := resourcesv1alpha1.AddToScheme(scheme); err != nil {
 		panic(err)
 	}
 }
@@ -179,6 +190,10 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if managedResourceMode && !patchModeActive {
+		setupLog.Error(nil, "--managed-resource-mode requires patch mode (--webhook-label set, --webhook-config-name unset)")
+		os.Exit(1)
+	}
 
 	// Compose the labeled-webhook callback host:port from --external-host +
 	// --external-port. Used in patch mode for MWC/VWC/CRD Service→URL rewrites,
@@ -226,6 +241,7 @@ func main() {
 		"admission-external-host", effectiveAdmissionExternalHost,
 		"cert-secret-name", certSecretName,
 		"enable-leader-election", enableLeaderElection,
+		"managed-resource-mode", managedResourceMode,
 	)
 
 	// Create manager for hosting cluster
@@ -255,6 +271,23 @@ func main() {
 			Port:    admissionWebhookPort,
 			CertDir: certDir,
 		})
+	}
+	// Managed-resource mode watches Gardener ManagedResource objects across all
+	// seed namespaces (one shoot per namespace). Override the per-type cache
+	// config for ManagedResource only — every other type stays scoped to the
+	// pod's namespace via DefaultNamespaces. An *empty* Namespaces map (not
+	// nil) is required: per controller-runtime docs a nil map inherits
+	// DefaultNamespaces, while an empty map disables that defaulting and
+	// caches across all namespaces.
+	if managedResourceMode {
+		labelSelector := labels.SelectorFromSet(labels.Set{labelKey: labelValue})
+		if mgrOpts.Cache.ByObject == nil {
+			mgrOpts.Cache.ByObject = map[client.Object]cache.ByObject{}
+		}
+		mgrOpts.Cache.ByObject[&resourcesv1alpha1.ManagedResource{}] = cache.ByObject{
+			Label:      labelSelector,
+			Namespaces: map[string]cache.Config{},
+		}
 	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
@@ -320,9 +353,42 @@ func main() {
 	// cache. Buffer 1 + non-blocking send means a missed signal (receiver still
 	// fanning out the previous one) is harmless — a single signal triggers a full
 	// re-stamp pass.
-	var rotationTrigger chan struct{}
+	//
+	// With ManagedResourceReconciler we have two consumers, so a tiny splitter
+	// goroutine fans the producer's signal out to each downstream channel
+	// independently (each non-blocking, each with its own 1-slot buffer).
+	var (
+		rotationTrigger       chan struct{}   // WebhookReconciler → splitter
+		targetRotationTrigger <-chan struct{} // splitter → TargetWebhookReconciler
+		mrRotationTrigger     <-chan struct{} // splitter → ManagedResourceReconciler (nil unless managedResourceMode)
+	)
 	if patchModeActive {
 		rotationTrigger = make(chan struct{}, 1)
+		targetCh := make(chan struct{}, 1)
+		targetRotationTrigger = targetCh
+		var mrCh chan struct{}
+		if managedResourceMode {
+			mrCh = make(chan struct{}, 1)
+			mrRotationTrigger = mrCh
+		}
+		go func() {
+			for range rotationTrigger {
+				// Non-blocking send to each downstream consumer. A full
+				// downstream channel means a previous signal is still being
+				// processed; dropping is safe because a single signal triggers
+				// a full re-stamp pass.
+				select {
+				case targetCh <- struct{}{}:
+				default:
+				}
+				if mrCh != nil {
+					select {
+					case mrCh <- struct{}{}:
+					default:
+					}
+				}
+			}
+		}()
 	}
 	webhookReconciler := &controllers.WebhookReconciler{
 		Client:                mgr.GetClient(),
@@ -412,12 +478,36 @@ func main() {
 			WebhookLabelValue: labelValue,
 			ExternalHost:      effectiveExternalHost,
 		}
-		if err := targetWebhookReconciler.SetupWithManager(mgr, targetCluster, rotationTrigger); err != nil {
+		if err := targetWebhookReconciler.SetupWithManager(mgr, targetCluster, targetRotationTrigger); err != nil {
 			setupLog.Error(err, "Unable to create TargetWebhookReconciler controller")
 			os.Exit(1)
 		}
 		setupLog.Info("TargetWebhookReconciler controller registered (runs on leader only)",
 			"label", labelKey+"="+labelValue,
+		)
+	}
+
+	// In managed-resource mode (patch mode only — validated above), additionally
+	// reconcile Gardener ManagedResource objects on the hosting cluster so the
+	// embedded CRDs' clientConfig is stamped at the source, surviving GRM's
+	// next sync into the shoot.
+	if managedResourceMode {
+		mrReconciler := &controllers.ManagedResourceReconciler{
+			HostingClient:     mgr.GetClient(),
+			Namespace:         namespace,
+			CertSecretName:    certSecretName,
+			WebhookLabelKey:   labelKey,
+			WebhookLabelValue: labelValue,
+			ExternalHost:      effectiveExternalHost,
+			ForceReconcile:    managedResourceForceReconcile,
+		}
+		if err := mrReconciler.SetupWithManager(mgr, mrRotationTrigger); err != nil {
+			setupLog.Error(err, "Unable to create ManagedResourceReconciler controller")
+			os.Exit(1)
+		}
+		setupLog.Info("ManagedResourceReconciler controller registered (runs on leader only)",
+			"label", labelKey+"="+labelValue,
+			"force-reconcile", managedResourceForceReconcile,
 		)
 	}
 
