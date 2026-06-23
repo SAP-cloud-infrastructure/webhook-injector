@@ -2,12 +2,8 @@ metadata:
   url: https://github.com/SAP-cloud-infrastructure/webhook-injector
 
 binaries:
-  # we want to scikube to be the release binary
   - name: webhook-injector
     fromPackage: ./cmd/webhook-injector
-    installTo: bin/
-  - name: crd-injector
-    fromPackage: ./cmd/crd-injector
     installTo: bin/
 
 controllerGen:

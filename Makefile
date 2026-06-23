@@ -89,13 +89,10 @@ GO_TESTFLAGS  +=
 GO_TESTENV    +=
 GO_BUILDENV   +=
 
-build-all: build/webhook-injector build/crd-injector
+build-all: build/webhook-injector
 
 build/webhook-injector: FORCE
 	env $(GO_BUILDENV) go build $(GO_BUILDFLAGS) -ldflags '-s -w $(GO_LDFLAGS)' -o build/webhook-injector ./cmd/webhook-injector
-
-build/crd-injector: FORCE
-	env $(GO_BUILDENV) go build $(GO_BUILDFLAGS) -ldflags '-s -w $(GO_LDFLAGS)' -o build/crd-injector ./cmd/crd-injector
 
 DESTDIR =
 ifeq ($(UNAME_S),Darwin)
@@ -104,11 +101,9 @@ else
 	PREFIX = /usr
 endif
 
-install: FORCE build/webhook-injector build/crd-injector
+install: FORCE build/webhook-injector
 	install -d -m 0755 "$(DESTDIR)$(PREFIX)/bin"
 	install -m 0755 build/webhook-injector "$(DESTDIR)$(PREFIX)/bin/webhook-injector"
-	install -d -m 0755 "$(DESTDIR)$(PREFIX)/bin"
-	install -m 0755 build/crd-injector "$(DESTDIR)$(PREFIX)/bin/crd-injector"
 
 # which packages to test with test runner
 GO_TESTPKGS := $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev 'test/integration')
@@ -226,7 +221,6 @@ help: FORCE
 	@printf "\e[1mBuild\e[0m\n"
 	@printf "  \e[36mbuild-all\e[0m                    Build all binaries.\n"
 	@printf "  \e[36mbuild/webhook-injector\e[0m       Build webhook-injector.\n"
-	@printf "  \e[36mbuild/crd-injector\e[0m           Build crd-injector.\n"
 	@printf "  \e[36minstall\e[0m                      Install all binaries. This option understands the conventional 'DESTDIR' and 'PREFIX' environment variables for choosing install locations.\n"
 	@printf "\n"
 	@printf "\e[1mTest\e[0m\n"

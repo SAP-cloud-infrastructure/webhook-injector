@@ -22,6 +22,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -31,6 +33,21 @@ import (
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/managedresource"
 )
+
+// loadContextConfig builds a rest.Config from a kubeconfig file, pinned to
+// the given context. Used by tests that talk directly to the kind clusters
+// via controller-runtime client.
+func loadContextConfig(t *testing.T, kubeconfigPath, contextName string) *rest.Config {
+	t.Helper()
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath},
+		&clientcmd.ConfigOverrides{CurrentContext: contextName},
+	).ClientConfig()
+	if err != nil {
+		t.Fatalf("Load kubeconfig context %s: %v", contextName, err)
+	}
+	return cfg
+}
 
 // TestManagedResourceFlow exercises ManagedResourceReconciler end-to-end
 // against the real kind-hosting apiserver. It:
@@ -125,8 +142,7 @@ func TestManagedResourceFlow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	// Build a typed controller-runtime client. Reuses the existing
-	// loadContextConfig helper from crd_injector_test.go.
+	// Build a typed controller-runtime client.
 	cfg := loadContextConfig(t, kubeconfigPath, "kind-hosting")
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))

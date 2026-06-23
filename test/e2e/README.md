@@ -74,7 +74,6 @@ Available flags:
 2. Multi-cluster communication (hosting → target)
 3. Load distribution across 3 replicas
 4. Webhook availability during cert rotation
-5. `crd-injector`: applying CRDs from a hosting-cluster ConfigMap into the target cluster, plus a second-run idempotency check (`TestCRDInjector` in `crd_injector_test.go`). The test invokes the binary via `go run` rather than deploying it as a Job, so it runs against whatever's currently in `cmd/crd-injector/` without rebuilding the image.
 
 ## Isolated Kubeconfig
 

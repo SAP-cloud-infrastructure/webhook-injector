@@ -8,11 +8,6 @@ SPDX-License-Identifier: Apache-2.0
 
 A Kubernetes controller that runs as a sidecar to webhook servers, managing webhook configurations and TLS certificates for remote or local clusters.
 
-The image ships two binaries:
-
-- **`webhook-injector`** — the long-running sidecar controller described below.
-- **`crd-injector`** — a small "apply once and exit" companion that reads CRD YAML from a ConfigMap and server-side applies each CRD to the target cluster. Run it as a Kubernetes Job or as an initContainer that blocks the webhook server until CRDs exist. See [crd-injector](#crd-injector).
-
 ## Features
 
 - **Automatic Certificate Management**: Generates and rotates self-signed certificates with dynamic SANs.
@@ -263,84 +258,6 @@ When webhook-injector runs on a Gardener seed, the CRDs it must stamp don't live
                                   │   conversion clientConfig   │
                                   └─────────────────────────────┘
 ```
-
-## crd-injector
-
-`crd-injector` is a separate binary in the same image. It reads a ConfigMap from the hosting cluster, parses every value as multi-document YAML, and server-side applies each CustomResourceDefinition to the target cluster. It exits 0 on success and non-zero on any parse or apply error.
-
-**Lifecycle:** apply once, then exit. There is no controller, no watch, no reconcile loop — re-running the binary is what re-applies the CRDs. Pair it with a ConfigMap that holds the desired CRD YAML.
-
-**What it does not do:** it does not manage `caBundle` on conversion webhooks. CRDs are applied verbatim. On a Gardener seed, `webhook-injector`'s `ManagedResourceReconciler` is the supported path for stamping `caBundle` (and rewriting Service-form clientConfig) on CRDs — but it operates on the MR Secret on the hosting cluster, not on the target-cluster CRD. `crd-injector` is therefore most useful for non-Gardener target clusters where you want CRDs installed verbatim, or as a bootstrap step that pre-creates CRD objects.
-
-**Strict input check:** every YAML document in the ConfigMap must decode as `apiextensions.k8s.io/v1 CustomResourceDefinition`. Anything else is an error so the binary cannot accidentally be used as a generic applier.
-
-### Flags
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--configmap-name` | ConfigMap (in `--namespace`, hosting cluster) whose values contain CRD YAML | *required* |
-| `--namespace` | Namespace of the ConfigMap | auto-detect (flag → `NAMESPACE` env → serviceaccount file) |
-| `--target-kubeconfig` | Path to target cluster kubeconfig | in-cluster config |
-| `--field-manager` | fieldManager value used for server-side apply | `crd-injector` |
-| `--version` | Print version and exit | — |
-
-### Usage
-
-As a Kubernetes Job (run once):
-
-```yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: install-crds
-spec:
-  template:
-    spec:
-      restartPolicy: OnFailure
-      serviceAccountName: crd-injector
-      containers:
-        - name: crd-injector
-          image: ghcr.io/sap-cloud-infrastructure/webhook-injector:latest
-          command: ["/usr/bin/crd-injector"]
-          args:
-            - --configmap-name=my-crds
-```
-
-As an initContainer that blocks a webhook server until CRDs exist:
-
-```yaml
-initContainers:
-  - name: install-crds
-    image: ghcr.io/sap-cloud-infrastructure/webhook-injector:latest
-    command: ["/usr/bin/crd-injector"]
-    args: ["--configmap-name=my-crds"]
-```
-
-The ConfigMap that drives it can hold a single multi-document YAML or split CRDs across keys; keys are processed in lexicographic order:
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: my-crds
-data:
-  crds.yaml: |
-    apiVersion: apiextensions.k8s.io/v1
-    kind: CustomResourceDefinition
-    metadata:
-      name: foos.example.com
-    spec: { ... }
-    ---
-    apiVersion: apiextensions.k8s.io/v1
-    kind: CustomResourceDefinition
-    metadata:
-      name: bars.example.com
-    spec: { ... }
-```
-
-### RBAC
-
-`crd-injector` needs `get` on the ConfigMap in the hosting cluster and `get/create/patch` on `customresourcedefinitions` in the target cluster.
 
 ## Metrics
 

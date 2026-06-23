@@ -14,10 +14,6 @@ webhook-injector is a Kubernetes controller that runs as a **native sidecar** (K
 
 **Webhook Server Requirement**: The webhook server must watch certificate files (`tls.crt`, `tls.key`) and reload them when changed. Controller-runtime webhook servers (v0.17+) provide this automatically via an internal `certwatcher`. Other frameworks need custom implementation using inotify/fsnotify or periodic polling.
 
-The image ships two binaries:
-- `webhook-injector` — the long-running controller described in this document.
-- `crd-injector` — a small "apply once and exit" companion that reads CRD YAML from a ConfigMap in the hosting cluster and server-side applies each CRD to the target cluster. Intended as a Kubernetes Job or a regular initContainer that blocks the webhook server until CRDs exist. See the `cmd/crd-injector` section below.
-
 ## Build System
 
 This project uses **go-makefile-maker** for build automation. The Makefile is generated from `Makefile.maker.yaml`. On macOS, use `gmake` instead of `make` because the built-in make is too old for go-makefile-maker.
@@ -135,10 +131,6 @@ The application registers up to three independent controllers (the second is opt
 cmd/webhook-injector/           Main entrypoint
   main.go                       Creates manager, sets up controllers, handles target cluster client
 
-cmd/crd-injector/               One-shot binary (apply CRDs from ConfigMap, then exit)
-  main.go                       parseCRDs() + applyCRD() — server-side apply via RawPatch+ApplyPatchType
-  main_test.go                  Table-driven tests for parseCRDs
-
 pkg/certificates/               Certificate generation using crypto/x509
   generator.go                  GenerateSelfSignedCert() with dynamic SANs
   types.go                      ServiceReference struct
@@ -163,68 +155,6 @@ pkg/webhooks/                   Webhook configuration parsing
   injector.go                   InjectCABundle()
 
 test/e2e/                       E2E integration tests with kind clusters
-```
-
-### cmd/crd-injector
-
-A separate "apply once and exit" binary that ships in the same image. It reads
-a ConfigMap from the hosting cluster, parses every key as multi-document YAML,
-requires every document to be `apiextensions.k8s.io/v1 CustomResourceDefinition`
-(anything else is an error so it can't be used as a generic applier), and
-server-side applies each CRD to the target cluster with field manager
-`crd-injector`. Exits 0 on success, non-zero on any parse or apply error. No
-watches, no controller-runtime manager, no caBundle handling — `webhook-injector`'s
-`ManagedResourceReconciler` is responsible for stamping `caBundle` (and the
-Service→URL rewrite) on CRDs that live inside `ManagedResource` Secrets, which
-is the supported path on a Gardener seed.
-
-To avoid fighting `webhook-injector` on re-applies, `applyCRD` does a `Get`
-first; if the CRD already exists in the target cluster it strips the three
-fields `webhook-injector` owns at runtime — `spec.conversion.webhook.clientConfig.caBundle`,
-`spec.conversion.webhook.clientConfig.url`, and `spec.conversion.webhook.clientConfig.service` —
-from the apply body before SSA. With server-side apply, fields absent from the
-body are not owned by the applier, so re-applies are a true no-op for those
-three fields. On *first* creation the user-authored `clientConfig` is left
-intact (the apiserver requires `url` or `service` when `strategy=Webhook`); on
-a Gardener seed `ManagedResourceReconciler` then stamps the contested fields
-on the MR side. `client.ForceOwnership` is deliberately *not* used: with the
-contested fields out of our body there is nothing to force, and keeping it on
-would let `crd-injector` steal future `webhook-injector`-owned fields.
-
-Implementation notes worth knowing before changing this file:
-- Uses a `serializer.NewCodecFactory(scheme)` deserializer rather than
-  `clientgoscheme.Codecs` because the latter does not know
-  `apiextensions.k8s.io/v1` and would silently fail to decode CRDs.
-- Server-side apply is performed via `client.RawPatch(types.ApplyPatchType, body)`
-  rather than the deprecated `client.Apply` constant — the new
-  `client.Client.Apply()` API in controller-runtime v0.23 requires generated
-  `runtime.ApplyConfiguration` types we don't otherwise need here.
-- The strip helper `stripWebhookInjectorFields` zeroes only the three
-  `clientConfig` sub-fields, not the surrounding `clientConfig` object: a
-  CRD with `strategy=Webhook` is required by the apiserver to carry one.
-  All three sub-fields are `omitempty` in their API types, so the JSON
-  marshal omits the keys entirely once they're nil.
-- Namespace auto-detection uses the same priority order as `webhook-injector`:
-  `--namespace` flag → `NAMESPACE` env var → serviceaccount file → fail.
-- Target cluster connection mirrors `webhook-injector`: `--target-kubeconfig`
-  for explicit kubeconfig, in-cluster config otherwise.
-
-Flags:
-- `--configmap-name` — required; ConfigMap (in `--namespace`, hosting cluster) whose values contain CRD YAML.
-- `--namespace` — optional; auto-detects from `NAMESPACE` env or serviceaccount file.
-- `--target-kubeconfig` — optional; defaults to in-cluster config.
-- `--field-manager` — defaults to `crd-injector`; set if you want a different field-owner identity.
-
-Typical usage as a Kubernetes Job or initContainer that blocks the webhook
-server until CRDs exist:
-
-```yaml
-- name: install-crds
-  image: ghcr.io/.../webhook-injector:<tag>
-  command: ["/usr/bin/crd-injector"]
-  args:
-    - --configmap-name=my-crds
-    - --target-kubeconfig=/etc/target/kubeconfig  # optional
 ```
 
 ## Certificate Lifecycle
