@@ -40,7 +40,7 @@ subjects:
   - kind: ServiceAccount
     name: webhook-injector
 ---
-# ClusterRole in the hosting cluster (only needed when --managed-resource-mode is set).
+# ClusterRole in the hosting cluster (only needed when --managed-resource-label is set).
 # Grants the controller access to Gardener ManagedResources across all namespaces
 # and to the resource Secrets they reference.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -50,7 +50,7 @@ metadata:
 rules:
   - apiGroups: ["resources.gardener.cloud"]
     resources: ["managedresources"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "update", "patch"]
@@ -67,7 +67,10 @@ subjects:
   - kind: ServiceAccount
     name: webhook-injector
 ---
-# ClusterRole in target cluster (apply separately if remote)
+# ClusterRole in target cluster (apply separately if remote). Grants the
+# ConfigMap mode reconciler permission to author MWC and VWC on the target
+# cluster. CRDs are intentionally NOT listed — they flow through Gardener
+# ManagedResources on the hosting cluster, not directly.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -76,9 +79,6 @@ rules:
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
-  - apiGroups: ["apiextensions.k8s.io"]
-    resources: ["customresourcedefinitions"]
-    verbs: ["get", "list", "watch", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

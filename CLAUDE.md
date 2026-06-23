@@ -66,43 +66,31 @@ reuse download Apache-2.0      # Download license file
 
 ### Controllers
 
-The application registers up to four independent controllers (the second is patch-mode only; the third is opt-in via `--managed-resource-mode` and works in both patch mode and ConfigMap mode) with different leader election behavior:
+The application registers up to three independent controllers (the second is opt-in via `--managed-resource-label`) with different leader election behavior:
 
 1. **WebhookReconciler** (runs on **leader only**)
    - Location: `pkg/controllers/reconciler.go`
-   - Watches (depend on mode — see Configuration):
-     - ConfigMap mode: webhook-definitions ConfigMap + certificate Secret (hosting cluster)
-     - Patch mode: certificate Secret (hosting cluster) — no ConfigMap. Target-cluster MWC/VWC/CRD convergence is handled by `TargetWebhookReconciler` (see below).
-   - Generates/rotates self-signed certificates with dynamic SANs
-   - Stores certificates in Secret (in hosting cluster)
-   - Injects CA bundle into webhook configurations
-   - ConfigMap mode: applies webhook configurations to target cluster (creates if missing). When `--webhook-label` is also supplied, additionally refreshes `caBundle` on labeled CRDs (labeled admission webhooks are intentionally ignored — ConfigMap mode owns admission-webhook creation).
-   - Patch mode: does **not** patch target-cluster resources directly. `TargetWebhookReconciler` (see below) Watches labeled MWC/VWC/CRD on the target cluster and converges them. `WebhookReconciler` in patch mode only manages the certificate Secret and bootstraps the admission MWC.
-   - Leader election: DEFAULT behavior (requires leader)
+   - Watches: webhook-definitions ConfigMap (`--webhook-config-name`) + certificate Secret on the hosting cluster.
+   - Generates/rotates self-signed certificates with dynamic SANs.
+   - Stores certificates in Secret (in hosting cluster).
+   - Injects CA bundle into `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` parsed from the ConfigMap and applies them to the target cluster (creates if missing, otherwise updates).
+   - Does **not** author CRDs. CRDs flow through `ManagedResource` objects on the hosting cluster and are stamped by `ManagedResourceReconciler`.
+   - Signals `ManagedResourceReconciler` (when registered) on every detected cert rotation so the new caBundle reaches MR-embedded CRDs within seconds.
+   - Leader election: DEFAULT behavior (requires leader).
 
-2. **TargetWebhookReconciler** (patch mode only; runs on **leader only**)
-   - Location: `pkg/controllers/target_webhook_reconciler.go`
-   - Watches: labeled `MutatingWebhookConfiguration`, `ValidatingWebhookConfiguration`, and `CustomResourceDefinition` resources on the **target** cluster, via a separate `cluster.Cluster` handle whose cache is label-scoped
-   - Stamps `clientConfig.CABundle` from the hosting-cluster certificate Secret and (when `--external-host` is set) rewrites Service-form `clientConfig` to URL-form
-   - For CRDs: short-circuits the Update when nothing has changed (caBundle already current and no Service→URL rewrite needed) to avoid bouncing `resourceVersion` on every admission-stamped CRD write
-   - **Rotation fan-out**: receives a signal from `WebhookReconciler` whenever the cert rotates. On signal, lists every labeled MWC/VWC/CRD currently in the target cache and enqueues each for reconcile, so the new caBundle propagates immediately rather than waiting for the target cluster cache `--sync-period` tick. Uses a buffered single-slot channel + non-blocking send: a missed signal is harmless because a single signal is enough to trigger a full re-stamp pass.
-   - Why this exists for MWC/VWC: kube-apiserver self-protects against admission webhooks on `admissionregistration.k8s.io/{mutating,validating}webhookconfigurations` (`rules.IsExemptAdmissionConfigurationResource`), so an admission-time hook on those kinds is silently bypassed. A target-cluster Watch is the only way to converge on creates/updates.
-   - Why this exists for CRDs: the bootstrap MWC stamps CRDs synchronously at CREATE/UPDATE, but out-of-band edits (kubectl, GitOps, other controllers) bypass admission. The Watch is the drift-correction safety net.
-   - Leader election: DEFAULT behavior (requires leader)
-
-3. **ManagedResourceReconciler** (`--managed-resource-mode` only; runs on **leader only**)
+2. **ManagedResourceReconciler** (registered when `--managed-resource-label` is set; runs on **leader only**)
    - Location: `pkg/controllers/managed_resource_reconciler.go`
    - Watches: labeled `ManagedResource` (`resources.gardener.cloud/v1alpha1`) objects on the **hosting** cluster (not the target cluster). Cache is label-scoped, cluster-wide.
-   - Why this exists: on a Gardener seed, CRDs are not applied directly to the shoot — they live inside `ManagedResource` Secrets, and gardener-resource-manager (GRM) reconciles them into the shoot. `TargetWebhookReconciler` would stamp the shoot-side CRD, but GRM immediately overwrites it from the Secret. Stamping the *source* (this controller) makes the stamp survive GRM's next sync.
+   - Why this exists: on a Gardener seed, CRDs are not applied directly to the shoot — they live inside `ManagedResource` Secrets, and gardener-resource-manager (GRM) reconciles them into the shoot. Stamping the shoot-side CRD directly would produce a thrash loop: GRM would overwrite the stamp on its next sync. Stamping the *source* (this controller) makes the stamp survive GRM's next sync.
    - For each labeled MR: walks `spec.secretRefs[*]`, fetches the referenced Secret, decodes each data key (with brotli `.br` support to match GRM's compression), finds CRDs with `conversion.strategy=Webhook`, stamps `clientConfig.caBundle`, and — when `--external-host` is set and the entry is Service-form — rewrites to URL-form via `webhookhost.BuildExternalURL`. Documents the controller doesn't touch survive byte-for-byte (no YAML round-trip), preserving user-authored formatting.
    - Idempotency: a no-op reconcile must produce zero Secret updates. Both per-doc (`maybeStampCRDDoc` returns the original bytes when already converged) and per-Secret (skip `Update` when no doc in that Secret changed).
-   - **Force-reconcile annotation** (`--managed-resource-force-reconcile`, default `true`): after a successful Secret stamp, patches `gardener.cloud/operation=reconcile` on the MR so GRM picks up the change immediately even if it is in backoff. Set only on reconciles that actually wrote a Secret, and skipped when the annotation is already present — no-op reconciles do not churn GRM. GRM clears the annotation itself after consuming it.
+   - **Force-reconcile annotation** (`--force-reconcile`, default `true`): after a successful Secret stamp, patches `gardener.cloud/operation=reconcile` on the MR so GRM picks up the change immediately even if it is in backoff. Set only on reconciles that actually wrote a Secret, and skipped when the annotation is already present — no-op reconciles do not churn GRM. GRM clears the annotation itself after consuming it.
    - **keepObjects=true invariant**: when an MR ships at least one CRD, the reconciler verifies that `spec.keepObjects` is explicitly `true`. If unset or `false`, the reconcile still stamps the CRD (we'd rather have a working webhook than refuse to write), but logs an error and increments `webhook_injector_managed_resource_keep_objects_violations_total`. The destructive shape: without `keepObjects=true`, deleting the MR cascades into the shoot's CRDs and every custom resource of those kinds. CRDs with `conversion.strategy=None` still count for this check.
    - **GRM health observation**: every reconcile reads `mr.Status.Conditions` and checks `ResourcesApplied` and `ResourcesHealthy`. If either is present and not `Status=True`, the reconcile logs an error (including `Reason`/`Message`) and increments `webhook_injector_managed_resource_unhealthy_total{condition,status}`. Missing conditions (freshly created MRs before GRM evaluates) are deliberately ignored to avoid noise during normal MR creation. The check is non-blocking — the stamp still happens — and runs on every reconcile pass (including periodic `--sync-period` ticks), so dashboards reflect current GRM state.
-   - **Rotation fan-out**: subscribes to the same rotation signal as `TargetWebhookReconciler` via a one-to-two splitter goroutine in `main.go`. On rotation, lists every labeled MR on the hosting cluster and enqueues each for reconcile so the new caBundle propagates immediately rather than waiting for the next `--sync-period` tick.
+   - **Rotation fan-out**: subscribes to the rotation signal from `WebhookReconciler`. On rotation, lists every labeled MR on the hosting cluster and enqueues each for reconcile so the new caBundle propagates immediately rather than waiting for the next `--sync-period` tick. Buffered single-slot channel + non-blocking send: a missed signal is harmless because a single signal is enough to trigger a full re-stamp pass.
    - Leader election: DEFAULT behavior (requires leader)
 
-4. **CertificateReloader** (runs on **all replicas**)
+3. **CertificateReloader** (runs on **all replicas**)
    - Location: `pkg/controllers/reloader.go`
    - Watches: Certificate Secret (in hosting cluster)
    - Writes certificates to local filesystem (`/tmp/webhook-certs` by default)
@@ -112,39 +100,40 @@ The application registers up to four independent controllers (the second is patc
 ### Key Architectural Decisions
 
 **Two-cluster model:**
-- **Hosting cluster**: Where webhook-injector and webhook server run
-- **Target cluster**: Where webhooks are enforced (may be same or remote)
-- This enables serving webhooks for clusters you don't run in
+- **Hosting cluster**: Where webhook-injector and the webhook server run. Also where Gardener `ManagedResource` objects live on a seed.
+- **Target cluster**: Where webhooks are enforced (may be same or remote). Receives the `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` authored by `WebhookReconciler`. CRDs reach the target cluster only via GRM unpacking the `ManagedResource` Secrets — webhook-injector never authors CRDs directly on the target cluster.
+- This enables serving webhooks for clusters you don't run in.
 
 **Why this controller split:**
-- WebhookReconciler must run on leader only to prevent multiple replicas from generating conflicting certificates or racing to update target cluster
-- TargetWebhookReconciler must run on leader only to avoid concurrent writes to the same target-cluster MWC/VWC/CRD
-- CertificateReloader must run on all replicas so each webhook server pod gets certificates on its local filesystem
+- `WebhookReconciler` must run on leader only to prevent multiple replicas from generating conflicting certificates or racing to update the target cluster.
+- `ManagedResourceReconciler` must run on leader only to avoid concurrent writes to the same MR Secret.
+- `CertificateReloader` must run on all replicas so each webhook server pod gets certificates on its local filesystem.
 
 **Native sidecar pattern (Kubernetes 1.29+):**
-- webhook-injector is deployed as a native sidecar: an init container with `restartPolicy: Always`
-- Starts before the webhook server, ensuring certificates are available at startup
-- Terminates after the webhook server for clean shutdown ordering
-- Shares emptyDir volume for certificate files
-- Works with any webhook server that can watch certificate files and reload on changes
-- Controller-runtime v0.17+ webhook servers handle this automatically via fsnotify
-- For clusters < 1.29, can fall back to a regular sidecar container (no startup ordering guarantee)
+- webhook-injector is deployed as a native sidecar: an init container with `restartPolicy: Always`.
+- Starts before the webhook server, ensuring certificates are available at startup.
+- Terminates after the webhook server for clean shutdown ordering.
+- Shares emptyDir volume for certificate files.
+- Works with any webhook server that can watch certificate files and reload on changes.
+- Controller-runtime v0.17+ webhook servers handle this automatically via fsnotify.
+- For clusters < 1.29, can fall back to a regular sidecar container (no startup ordering guarantee).
 
-**ConfigMap-driven:**
-- Users provide full `MutatingWebhookConfiguration` or `ValidatingWebhookConfiguration` YAML in a ConfigMap
-- webhook-injector parses, injects CA bundle, and applies to target cluster
-- Supports service references (in-cluster) and URLs (remote)
+**ConfigMap-driven admission webhooks:**
+- Users provide full `MutatingWebhookConfiguration` or `ValidatingWebhookConfiguration` YAML in a ConfigMap.
+- webhook-injector parses, injects CA bundle, and applies to target cluster.
+- Supports service references (in-cluster) and URLs (remote).
 
-**Gardener seed support:**
+**Gardener seed support (canonical CRD path):**
 - On a Gardener seed, CRDs are wrapped inside `ManagedResource` Secrets and applied to the shoot by `gardener-resource-manager`. Stamping the shoot-side CRD alone produces a thrash loop because GRM re-applies the original Secret on every sync.
-- The opt-in `--managed-resource-mode` flag enables `ManagedResourceReconciler`, which stamps the *source* (the MR's referenced Secret on the seed). Works in both patch mode and ConfigMap mode (when `--webhook-label` is set). In patch mode, the shoot-side `TargetWebhookReconciler` runs as a belt-and-suspenders convergence path for the brief window between Secret update and GRM sync; in ConfigMap mode, `WebhookReconciler`'s labeled-CRD refresh path covers the equivalent role for target-cluster CRDs.
+- `--managed-resource-label` enables `ManagedResourceReconciler`, which stamps the *source* (the MR's referenced Secret on the seed) so the stamp survives GRM's next sync.
 - Brotli (`.br` suffix) compression is supported because GRM transparently compresses larger payloads.
+- This is the only path webhook-injector uses for CRDs — direct target-cluster CRD authoring is not supported, and removing it kept the controller surface small.
 
 ## Code Structure
 
 ```
 cmd/webhook-injector/           Main entrypoint
-  main.go                       Creates manager, sets up both controllers, handles target cluster client
+  main.go                       Creates manager, sets up controllers, handles target cluster client
 
 cmd/crd-injector/               One-shot binary (apply CRDs from ConfigMap, then exit)
   main.go                       parseCRDs() + applyCRD() — server-side apply via RawPatch+ApplyPatchType
@@ -157,17 +146,17 @@ pkg/certificates/               Certificate generation using crypto/x509
 pkg/config/                     Environment variable configuration
   config.go                     LoadFromEnv(), Validate()
 
-pkg/controllers/                Two independent controllers
-  reconciler.go                 WebhookReconciler (leader-only, manages certificates and target cluster)
+pkg/controllers/                Reconcilers
+  reconciler.go                 WebhookReconciler (leader-only, manages certificates and target-cluster MWC/VWC)
   reloader.go                   CertificateReloader (all replicas, syncs certs to filesystem)
-  managed_resource_reconciler.go ManagedResourceReconciler (--managed-resource-mode, stamps CRDs inside Gardener ManagedResource Secrets; works in both patch and ConfigMap mode)
-  cabundle.go                    Shared loadCABundle helper used by TargetWebhookReconciler and ManagedResourceReconciler
+  managed_resource_reconciler.go ManagedResourceReconciler (--managed-resource-label only, stamps CRDs inside Gardener ManagedResource Secrets on the hosting cluster)
+  cabundle.go                    Shared loadCABundle helper used by ManagedResourceReconciler
 
 pkg/managedresource/            Helpers for decoding/re-encoding Gardener ManagedResource Secret data
   codec.go                      Brotli-aware decode/encode + multi-doc YAML split/join (preserves untouched docs byte-for-byte)
 
 pkg/metrics/                    Prometheus metric definitions
-  metrics.go                    Cert rotations / expiry / files-written, target-cluster stamps, admission decisions, rotation fan-out, ManagedResource stamps + force-reconcile + brotli encoding (see Metrics section)
+  metrics.go                    Cert rotations / expiry / files-written, target-cluster MWC/VWC stamps, rotation fan-out, ManagedResource stamps + force-reconcile + brotli encoding (see Metrics section)
 
 pkg/webhooks/                   Webhook configuration parsing
   parser.go                     ParseWebhookConfigurations(), ExtractServiceReferences()
@@ -185,24 +174,22 @@ requires every document to be `apiextensions.k8s.io/v1 CustomResourceDefinition`
 server-side applies each CRD to the target cluster with field manager
 `crd-injector`. Exits 0 on success, non-zero on any parse or apply error. No
 watches, no controller-runtime manager, no caBundle handling — `webhook-injector`'s
-labeled-CRD path is responsible for stamping `caBundle` (and the Service→URL
-rewrite) on these CRDs after they exist.
+`ManagedResourceReconciler` is responsible for stamping `caBundle` (and the
+Service→URL rewrite) on CRDs that live inside `ManagedResource` Secrets, which
+is the supported path on a Gardener seed.
 
-To avoid fighting `webhook-injector` across re-applies, `applyCRD` does a
-`Get` first; if the CRD already exists in the target cluster it strips the
-three fields `webhook-injector` owns at runtime — `spec.conversion.webhook.clientConfig.caBundle`,
+To avoid fighting `webhook-injector` on re-applies, `applyCRD` does a `Get`
+first; if the CRD already exists in the target cluster it strips the three
+fields `webhook-injector` owns at runtime — `spec.conversion.webhook.clientConfig.caBundle`,
 `spec.conversion.webhook.clientConfig.url`, and `spec.conversion.webhook.clientConfig.service` —
 from the apply body before SSA. With server-side apply, fields absent from the
 body are not owned by the applier, so re-applies are a true no-op for those
 three fields. On *first* creation the user-authored `clientConfig` is left
-intact (the apiserver requires `url` or `service` when `strategy=Webhook`),
-and `webhook-injector`'s bootstrap admission MWC rewrites the entry during the
-same admission cycle — admission-time mutations are attributed to the apiserver
-rather than to `crd-injector`, so our managed-fields entry still does not list
-those three keys after the create completes. `client.ForceOwnership` is
-deliberately *not* used: with the contested fields out of our body there is
-nothing to force, and keeping it on would let `crd-injector` steal future
-`webhook-injector`-owned fields.
+intact (the apiserver requires `url` or `service` when `strategy=Webhook`); on
+a Gardener seed `ManagedResourceReconciler` then stamps the contested fields
+on the MR side. `client.ForceOwnership` is deliberately *not* used: with the
+contested fields out of our body there is nothing to force, and keeping it on
+would let `crd-injector` steal future `webhook-injector`-owned fields.
 
 Implementation notes worth knowing before changing this file:
 - Uses a `serializer.NewCodecFactory(scheme)` deserializer rather than
@@ -256,6 +243,7 @@ server until CRDs exist:
 **Certificate SANs:**
 - Service-based webhooks: `<service>.<namespace>.svc`, `<service>.<namespace>.svc.cluster.local`
 - URL-based webhooks: hostname or IP extracted from URL — DNS names go into DNS SANs (e.g., `webhook.example.com`), IP addresses go into IP SANs (e.g., `172.18.0.3` for NodePort-based remote clusters)
+- `--cert-sans` adds extra entries (auto-classified) on top of the ConfigMap-derived SANs.
 
 **Storage flow:**
 1. WebhookReconciler generates self-signed cert → stores in Secret (hosting cluster)
@@ -277,7 +265,7 @@ server until CRDs exist:
 
 **Leader election:**
 - Configured in main.go via manager options
-- WebhookReconciler: Uses default leader election behavior (no WithOptions) → requires leader
+- WebhookReconciler / ManagedResourceReconciler: Use default leader election behavior (no WithOptions) → require leader
 - CertificateReloader: Uses `WithOptions(controller.Options{NeedLeaderElection: ptr.To(false)})` → runs on all replicas
 - The explicit WithOptions approach is required because controller-runtime's builder doesn't always recognize the NeedLeaderElection interface method
 
@@ -308,30 +296,26 @@ server until CRDs exist:
 
 All configuration via command-line flags. Run `webhook-injector --help` for full list.
 
-The reconciler selects its mode at startup based on which of `--webhook-config-name` and `--webhook-label` are set:
+There is exactly one mode: ConfigMap mode, mandatory. `--webhook-config-name`
+must be set or startup fails. `--managed-resource-label` opts in to the
+Gardener `ManagedResource` reconciler on the hosting cluster.
 
-**ConfigMap mode** (apply webhook definitions from a ConfigMap):
-- `--webhook-config-name` - ConfigMap containing full `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` YAML. webhook-injector parses, injects CA bundle, and applies these to the target cluster (creating them if missing).
-- `--webhook-label` *(optional)* - when set together with `--webhook-config-name`, webhook-injector additionally refreshes `caBundle` on `CustomResourceDefinition` resources in the target cluster carrying this label, and rewrites labeled-CRD Service-form `clientConfig` to URL-form using `--external-host` + `--external-port` (see below). Labeled `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` resources are intentionally ignored, since ConfigMap mode already owns admission-webhook creation.
-- `--external-host` / `--external-port` *(required when `--webhook-label` is set)* - same semantics as in patch mode below, but applied only to labeled CRDs (not to the MWC/VWC parsed from the ConfigMap — those are applied as authored by the user).
+**Required:**
+- `--webhook-config-name` - ConfigMap (in `--namespace`, hosting cluster) carrying a `webhooks.yaml` key whose value contains the `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` YAML to apply to the target cluster. webhook-injector parses, injects the caBundle, and applies these to the target cluster (creating them if missing). **CRDs are not handled here** — CRDs flow through Gardener `ManagedResource` objects on the hosting cluster, see `--managed-resource-label`.
 
-**Patch mode** (patch pre-existing webhook configurations in the target cluster):
-- `--webhook-label` - **required in patch mode**; label selector in `key=value` form (e.g., `webhook-injector/name=cert-manager`). webhook-injector reconciles `MutatingWebhookConfiguration`, `ValidatingWebhookConfiguration`, and `CustomResourceDefinition` resources in the target cluster carrying this label.
-- `--cert-sans` - **required in patch mode**; comma-separated DNS names and/or IP addresses to include as certificate SANs. Each entry is auto-classified (parses as IP → IP SAN; otherwise → DNS SAN). This is the sole SAN source in patch mode. `--external-host` / `--external-port` do not affect SAN generation.
-- `--external-host` - **required in patch mode, and in ConfigMap mode when `--webhook-label` is set**; DNS name or IP address (no port — the port is `--external-port`) the target cluster uses to reach this controller. Combined with `--external-port` to rewrite labeled MWC/VWC/CRD-conversion entries (or labeled-CRD entries only in ConfigMap mode) whose `clientConfig.Service` is non-nil to `clientConfig.URL = https://<external-host>:<external-port><Service.Path>` (Service.Path nil/empty → `/`); the `Service` field is then cleared. Entries that already use URL-form `clientConfig` are left untouched. `caBundle` patching is unchanged. Ignored (with a log line) in ConfigMap mode without `--webhook-label`.
-- `--external-port` - **required in patch mode, and in ConfigMap mode when `--webhook-label` is set**; external port the target cluster uses to reach the labeled webhook callbacks. Distinct from `--admission-external-port`, which targets this controller's own admission endpoint.
-- Resources are never created — only existing labeled resources are reconciled. Resources that match the label but have no `Webhook` conversion strategy (CRDs only) or no `clientConfig` are skipped.
-- For each entry: `clientConfig.CABundle` is always updated. `clientConfig.URL` and `clientConfig.Service` are rewritten using `--external-host` + `--external-port` (see above).
-- **MWC/VWC/CRD convergence**: handled by `TargetWebhookReconciler`, which Watches the target cluster's labeled `MutatingWebhookConfiguration`, `ValidatingWebhookConfiguration`, and `CustomResourceDefinition` resources via a label-scoped cache and reconciles each event. Drift is corrected within seconds, not bounded by `--sync-period`. For MWC/VWC this is the *only* correct mechanism (kube-apiserver bypasses admission webhooks on those kinds via `rules.IsExemptAdmissionConfigurationResource`). For CRDs this is the drift-correction safety net behind the synchronous admission webhook below.
-- **Rotation propagation**: `WebhookReconciler` signals `TargetWebhookReconciler` on every detected cert rotation; the latter immediately re-stamps every labeled MWC/VWC/CRD with the new caBundle. Without this signal, on-cluster objects would keep stale caBundle until the target cluster cache `--sync-period` fires Update events.
-- **Admission-webhook bootstrap**: the controller bootstraps a `MutatingWebhookConfiguration` in the target cluster (named via `--admission-webhook-name`, default `webhook-injector-mutator`) that registers webhook-injector itself as an admission mutator on labeled **CRD** resources only. CREATE/UPDATE on labeled CRDs is mutated synchronously — `caBundle` is stamped and Service-form `clientConfig` is rewritten to URL form — so the desired state is in place at admission time. The bootstrap MWC has only one webhook entry (`crd.webhook-injector.sap.com`); MWC/VWC entries are intentionally absent because kube-apiserver bypasses admission webhooks on those kinds. The bootstrap MWC's `clientConfig.URL` uses **`--external-host`** combined with **`--admission-external-port`** (a separate port from `--external-port`, which targets the labeled webhook callbacks rather than this controller's admission endpoint). The bootstrapped MWC is unlabeled by design so its `objectSelector` cannot match it. `failurePolicy: Ignore` keeps target-cluster CRD updates working when webhook-injector is down — `TargetWebhookReconciler` is the safety net for drift in that window.
+**Optional — host-cluster ManagedResource reconciler:**
+- `--managed-resource-label` - label selector (`key=value`) used to scope `ManagedResourceReconciler` on the *hosting* cluster. When set, the controller watches labeled `ManagedResource`s, walks their referenced Secrets, finds embedded CRDs with `conversion.strategy=Webhook`, stamps `caBundle`, and (when `--external-host`/`--external-port` are set) rewrites Service-form `clientConfig` to URL-form. When unset, the controller is not registered.
+- `--external-host` - **required when `--managed-resource-label` is set**; DNS name or IP (no port — the port is `--external-port`) the target cluster uses to reach this controller. Combined with `--external-port` to rewrite Service-form conversion `clientConfig` inside MR-embedded CRDs to `clientConfig.URL = https://<external-host>:<external-port><Service.Path>` (path defaults to `/`); the `Service` field is then cleared. Entries that already use URL-form `clientConfig` are left untouched. `caBundle` patching is unchanged. Ignored (with a log line) when `--managed-resource-label` is unset.
+- `--external-port` - **required when `--managed-resource-label` is set**; external port the target cluster uses to reach the labeled webhook callbacks.
+- `--force-reconcile` - default `true`. When `--managed-resource-label` is set, the controller patches `gardener.cloud/operation=reconcile` on each `ManagedResource` after a successful Secret stamp. This kicks `gardener-resource-manager` out of any backoff or debounce state so the new caBundle reaches the shoot promptly. The annotation is set **only** on reconciles that actually wrote a Secret — idempotent no-op reconciles do not churn GRM. The reconciler also skips the patch when the annotation is already present (GRM clears it after consuming, per the documented Gardener contract). Set to `false` to rely solely on GRM's own Secret watch.
 
-When both `--webhook-config-name` and `--webhook-label` are set, webhook-injector runs ConfigMap mode and additionally refreshes `caBundle` on labeled CRDs and rewrites Service-form CRD-conversion `clientConfig` to URL-form (labeled admission webhooks are ignored). `--cert-sans` is optional in ConfigMap mode (entries are merged with SANs derived from the ConfigMap) and required in patch mode. `--external-host` / `--external-port` are required in patch mode and in ConfigMap mode when `--webhook-label` is set; in ConfigMap mode without `--webhook-label` they are ignored (logged).
+**Cert lifecycle:**
+- `--cert-sans` - comma-separated DNS names and/or IP addresses to include as additional certificate SANs (merged with SANs derived from the ConfigMap's webhook services/URLs). Each entry is auto-classified: parses as IP → IP SAN; otherwise → DNS SAN.
 
-Common flags:
-- `--namespace` - Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from env vars or pod's serviceaccount if not set
+**Common:**
+- `--namespace` - Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from env vars or pod's serviceaccount if not set.
   - Priority order: explicit flag → `NAMESPACE` env var → serviceaccount file → **fail**
-  - The program will exit with an error if namespace cannot be determined
+  - The program will exit with an error if namespace cannot be determined.
 - `--cert-secret-name` - Where to store certificates
 - `--cert-dir` - Where to write certificate files
 - `--cert-validity` - Certificate lifetime as duration (e.g., "2160h", "90d", "1y")
@@ -343,15 +327,6 @@ Common flags:
 - `--metrics-addr` - Metrics server bind address. Default `:8082`.
 - `--health-addr` - Health probe server bind address. Default `:8083`.
 - `--version` - Print version and exit. The binary exits 0 immediately after printing.
-
-Patch-mode-only flags:
-- `--admission-webhook-name` - name of the `MutatingWebhookConfiguration` the controller bootstraps in the target cluster to register itself as an admission mutator on labeled CRDs (default `webhook-injector-mutator`). Empty disables bootstrap; `TargetWebhookReconciler` continues to converge MWC/VWC/CRD via Watch, but CRDs lose synchronous stamping at admission time.
-- `--admission-webhook-port` - port the admission webhook server binds to inside the pod (default `9444`). Configure your Service / NodePort / LoadBalancer to forward `--admission-external-port` to this port.
-- `--admission-external-port` - **required when `--admission-webhook-name` is non-empty**; external port the target cluster uses to reach this controller's admission webhook server. Combined with `--external-host` to form the bootstrap MWC URL `https://<external-host>:<admission-external-port>/mutate-crd`. Distinct from `--external-port`, which targets the labeled webhook callbacks. No default — the value depends entirely on the user's Service / NodePort / LoadBalancer wiring, and a wrong default would silently produce a bootstrap MWC the apiserver cannot reach.
-
-Managed-resource flags (work in both patch mode and ConfigMap mode):
-- `--managed-resource-mode` - opt-in (default `false`). When `true`, registers `ManagedResourceReconciler`, which stamps the `caBundle` and rewrites Service-form conversion `clientConfig` on CRDs embedded inside Gardener `ManagedResource` Secrets on the hosting cluster. Works in both patch mode and ConfigMap mode; requires `--webhook-label` so the controller has a label selector. In patch mode the existing `--external-host`/`--external-port` requirements apply; in ConfigMap mode they are also required because `--webhook-label` triggers labeled-CRD refresh on the target cluster (CRDs that may carry Service-form `clientConfig` needing URL-form rewrite). The two modes target non-overlapping objects — host-cluster MR Secrets (this controller) versus target-cluster MWC/VWC/CRD (`WebhookReconciler` in ConfigMap mode, `TargetWebhookReconciler` in patch mode) — so they compose cleanly. Without this flag the controller is not registered; on a Gardener seed that means GRM would overwrite the shoot-side stamp on every sync.
-- `--managed-resource-force-reconcile` - default `true`. When `--managed-resource-mode` is set, the controller patches `gardener.cloud/operation=reconcile` on each `ManagedResource` after a successful Secret stamp. This kicks `gardener-resource-manager` out of any backoff or debounce state so the new caBundle reaches the shoot promptly. The annotation is set **only** on reconciles that actually wrote a Secret — idempotent no-op reconciles do not churn GRM. The reconciler also skips the patch when the annotation is already present (GRM clears it after consuming, per the documented Gardener contract). Set to `false` to rely solely on GRM's own Secret watch — appropriate when the Secret-watch propagation latency is acceptable and you want one fewer hosting-cluster write per rotation.
 
 ## Remote Cluster Support
 
@@ -371,16 +346,15 @@ All metrics are registered on controller-runtime's default Prometheus registry a
 - `webhook_injector_certificate_expiry_time_seconds` — gauge. Unix timestamp of the current cert's `NotAfter`. Use `(metric - time())` in alerts for "expires within N hours".
 - `webhook_injector_cert_files_written_total` — counter. Incremented by `CertificateReloader` on every disk write. Each replica exposes its own value; a spike means rotation is propagating to the sidecar filesystem.
 
-### Target-cluster stamping (patch mode)
+### Target-cluster stamping (ConfigMap mode)
 
-- `webhook_injector_target_stamps_total{kind, result}` — counter. Labels: `kind ∈ {MutatingWebhookConfiguration, ValidatingWebhookConfiguration, CustomResourceDefinition}`; `result ∈ {stamped, converged, error}`. Emitted by `TargetWebhookReconciler.reconcile{MWC,VWC,CRD}` via a deferred classifier. `stamped` = `Update` succeeded; `converged` = idempotency-skip (caBundle already current, no Service→URL rewrite needed); `error` = Get or Update failure. The `converged/stamped` ratio is the natural "is rotation actually changing anything" signal on a steady-state cluster.
-- `webhook_injector_admission_decisions_total{result}` — counter. Labels: `result ∈ {mutated, passthrough, error}`. Emitted by the admission mutator (`pkg/admission`) via a deferred classifier of the `admission.Response`. `mutated` = JSON patch returned; `passthrough` = `Allowed` without a patch (kind not handled, CA bundle unavailable/empty, CRD without Webhook conversion); `error` = `Errored` response.
+- `webhook_injector_target_stamps_total{kind, result}` — counter. Labels: `kind ∈ {MutatingWebhookConfiguration, ValidatingWebhookConfiguration}`; `result ∈ {stamped, converged, error}`. Emitted by `WebhookReconciler.applyWebhookConfigurations`. `stamped` = `Create` or `Update` succeeded; `converged` = idempotency-skip; `error` = Get/Create/Update failure. CRDs are intentionally absent — CRDs flow through `ManagedResource` Secrets and are accounted under the ManagedResource metrics below.
 
 ### Rotation fan-out
 
-- `webhook_injector_rotation_fanout_events_total{kind, outcome}` — counter. Labels: `kind ∈ {MutatingWebhookConfiguration, ValidatingWebhookConfiguration, CustomResourceDefinition, ManagedResource}`; `outcome ∈ {emitted, dropped}`. Emitted by `targetResyncTrigger.fanOut` and `managedResourceResyncTrigger.fanOut` for every per-kind event pushed to (or dropped from) the controller's reconcile channel on every cert rotation. A non-zero `dropped` rate is informational — the next rotation or the periodic `--sync-period` tick re-converges; alarming on it makes sense only if the rate is sustained.
+- `webhook_injector_rotation_fanout_events_total{kind, outcome}` — counter. Labels: `kind ∈ {ManagedResource}`; `outcome ∈ {emitted, dropped}`. Emitted by `managedResourceResyncTrigger.fanOut` for every per-kind event pushed to (or dropped from) the controller's reconcile channel on every cert rotation. A non-zero `dropped` rate is informational — the next rotation or the periodic `--sync-period` tick re-converges; alarming on it makes sense only if the rate is sustained.
 
-### ManagedResource stamping (`--managed-resource-mode` only)
+### ManagedResource stamping (`--managed-resource-label` only)
 
 - `webhook_injector_managed_resource_stamps_total{result}` — counter. Labels: `result ∈ {stamped, converged, error}`. Per-MR reconcile outcome. `stamped` = at least one referenced Secret was rewritten; `converged` = all Secrets already in desired state; `error` = Get / decode / Update failure.
 - `webhook_injector_managed_resource_crds_stamped_total` — counter (no labels). Per-CRD-document granularity, summed across all MRs and all Secrets. Distinct from the stamps counter because a single MR may carry multiple CRDs across multiple Secrets — this is the right signal for "how much work did the last rotation actually do".
@@ -391,7 +365,7 @@ All metrics are registered on controller-runtime's default Prometheus registry a
 
 ### Examples
 
-The `converged` paths dominate in steady state, so a useful "is rotation propagating" panel is:
+A useful "is rotation propagating" panel:
 
 ```
 sum by (kind) (rate(webhook_injector_target_stamps_total{result="stamped"}[5m]))
@@ -404,7 +378,5 @@ A useful "error budget" panel:
 ```
 sum by (job) (rate(webhook_injector_target_stamps_total{result="error"}[5m]))
 + sum by (job) (rate(webhook_injector_managed_resource_stamps_total{result="error"}[5m]))
-+ sum by (job) (rate(webhook_injector_admission_decisions_total{result="error"}[5m]))
 + sum by (job) (rate(webhook_injector_managed_resource_force_reconcile_total{result="error"}[5m]))
 ```
-
