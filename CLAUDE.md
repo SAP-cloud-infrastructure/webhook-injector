@@ -135,9 +135,6 @@ pkg/certificates/               Certificate generation using crypto/x509
   generator.go                  GenerateSelfSignedCert() with dynamic SANs
   types.go                      ServiceReference struct
 
-pkg/config/                     Environment variable configuration
-  config.go                     LoadFromEnv(), Validate()
-
 pkg/controllers/                Reconcilers
   reconciler.go                 WebhookReconciler (leader-only, manages certificates and target-cluster MWC/VWC)
   reloader.go                   CertificateReloader (all replicas, syncs certs to filesystem)
