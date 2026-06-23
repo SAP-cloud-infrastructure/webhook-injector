@@ -43,10 +43,10 @@ import (
 // Why this exists: when webhook-injector runs on a Gardener seed, the CRDs it
 // must stamp do not live directly in the shoot apiserver — they are wrapped
 // inside ManagedResource objects on the seed, and gardener-resource-manager
-// (GRM) reconciles them into the shoot. TargetWebhookReconciler stamps the
-// CRDs in the shoot, but GRM then overwrites those fields from the
-// ManagedResource Secret, producing a thrash loop. Stamping the *source*
-// (this reconciler) makes the stamp survive GRM's next sync.
+// (GRM) reconciles them into the shoot. Stamping the shoot-side CRD directly
+// would produce a thrash loop: GRM would overwrite our stamp from the
+// ManagedResource Secret on its next sync. Stamping the *source* (this
+// reconciler) makes the stamp survive GRM's next sync.
 //
 // Mechanism: for every labeled ManagedResource on the hosting cluster, walk
 // spec.secretRefs[*], decode each data key (handling brotli ".br"
@@ -57,14 +57,12 @@ import (
 // user-authored formatting is preserved.
 //
 // Idempotency: a no-op reconcile must produce zero Secret updates, otherwise
-// GRM re-applies the unchanged CRD to the shoot, which fires
-// TargetWebhookReconciler, which writes a no-op update — but writing back
-// the same Secret bytes still bumps resourceVersion and we'd loop on
-// ourselves at every sync period. The change detection here mirrors
-// TargetWebhookReconciler.reconcileCRD.
+// GRM re-applies the unchanged CRD to the shoot every cycle, burning
+// resourceVersion and noisy events for no behavioural reason. The change
+// detection here compares each doc's desired caBundle + URL against what's
+// already present and short-circuits when nothing changed.
 //
-// Leader election: leader-only (matches WebhookReconciler /
-// TargetWebhookReconciler).
+// Leader election: leader-only (matches WebhookReconciler).
 type ManagedResourceReconciler struct {
 	// HostingClient reads ManagedResources, the cert Secret, and the
 	// referenced resource Secrets — all on the hosting cluster.
@@ -118,9 +116,7 @@ const (
 // than waiting for the next --sync-period.
 //
 // A nil rotationTrigger disables the fan-out (the runnable still registers
-// but blocks forever), matching the no-op pattern in
-// TargetWebhookReconciler.SetupWithManager for tests that don't exercise
-// rotation signalling.
+// but blocks forever) for tests that don't exercise rotation signalling.
 func (r *ManagedResourceReconciler) SetupWithManager(mgr ctrl.Manager, rotationTrigger <-chan struct{}) error {
 	mrCh := make(chan event.GenericEvent, 64)
 
@@ -519,8 +515,7 @@ func (r *ManagedResourceReconciler) patchForceReconcile(ctx context.Context, mr 
 // signal into the ManagedResourceReconciler's GenericEvent channel. Each
 // receive on rotationTrigger lists every labeled ManagedResource currently
 // in the hosting cluster cache and emits one GenericEvent per object so the
-// controller enqueues a Reconcile.Request — mirrors targetResyncTrigger for
-// the TargetWebhookReconciler.
+// controller enqueues a Reconcile.Request.
 //
 // Runs on the leader only (matches the controller it feeds). A nil
 // rotationTrigger leaves the runnable idle — select blocks forever on a nil

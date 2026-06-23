@@ -13,28 +13,17 @@ import (
 // implicitly extends the set of series Prometheus stores.
 const (
 	// ResultStamped is the "we wrote a change" outcome — the reconciler
-	// or admission hook actually mutated the target object.
+	// actually mutated the target object.
 	ResultStamped = "stamped"
 	// ResultConverged is the "already in desired state" no-op outcome — the
-	// reconciler observed the object but did not need to write. Used by
-	// idempotency-skip paths in target_webhook_reconciler and
-	// managed_resource_reconciler.
+	// reconciler observed the object but did not need to write. Used by the
+	// idempotency-skip path in managed_resource_reconciler.
 	ResultConverged = "converged"
 	// ResultError is the "we tried and failed" outcome — used for both
 	// transient errors (Get failed, Update failed) and decoding failures
 	// inside an MR Secret. Lets a single panel show real failures without
 	// inflating the converged-path counter.
 	ResultError = "error"
-
-	// AdmissionMutated — the admission webhook returned a JSON patch.
-	AdmissionMutated = "mutated"
-	// AdmissionPassthrough — the admission webhook returned Allowed=true
-	// without mutating (object already converged, or not a CRD with a
-	// Webhook conversion strategy).
-	AdmissionPassthrough = "passthrough"
-	// AdmissionError — the admission webhook returned an error (decode
-	// failure, missing caBundle source, etc.).
-	AdmissionError = "error"
 
 	// FanOutEmitted — an event was successfully pushed onto the per-kind
 	// channel feeding the controller.
@@ -95,28 +84,17 @@ var (
 	)
 
 	// TargetStampsTotal counts reconcile outcomes on target-cluster
-	// MutatingWebhookConfiguration / ValidatingWebhookConfiguration /
-	// CustomResourceDefinition objects, partitioned by kind and outcome.
-	// "stamped" = we wrote caBundle/URL; "converged" = idempotency-skip
-	// path (already in desired state); "error" = Get/Update failure.
+	// MutatingWebhookConfiguration / ValidatingWebhookConfiguration objects
+	// authored by ConfigMap mode, partitioned by kind and outcome.
+	// "stamped" = we wrote caBundle/URL or otherwise reapplied the doc;
+	// "converged" = no-op (already in desired state); "error" = Get/Update
+	// failure.
 	TargetStampsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "webhook_injector_target_stamps_total",
-			Help: "Total reconcile outcomes for target-cluster MWC/VWC/CRD stamping, labeled by kind and result (stamped|converged|error).",
+			Help: "Total reconcile outcomes for target-cluster MWC/VWC stamping, labeled by kind and result (stamped|converged|error).",
 		},
 		[]string{"kind", "result"},
-	)
-
-	// AdmissionDecisionsTotal counts decisions made by the admission
-	// mutator, partitioned by outcome. "mutated" = returned a JSON patch;
-	// "passthrough" = Allowed without mutation (already converged or not
-	// a CRD with Webhook conversion); "error" = decode / cert-load failure.
-	AdmissionDecisionsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "webhook_injector_admission_decisions_total",
-			Help: "Total admission webhook decisions, labeled by result (mutated|passthrough|error).",
-		},
-		[]string{"result"},
 	)
 
 	// RotationFanOutEventsTotal counts per-kind events emitted (or dropped)
@@ -226,7 +204,6 @@ func init() {
 		CertificateExpiryTime,
 		CertFilesWrittenTotal,
 		TargetStampsTotal,
-		AdmissionDecisionsTotal,
 		RotationFanOutEventsTotal,
 		ManagedResourceStampsTotal,
 		ManagedResourceCRDsStampedTotal,

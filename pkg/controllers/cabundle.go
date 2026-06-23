@@ -18,9 +18,8 @@ import (
 // with backoff — the WebhookReconciler runs on a different reconcile loop
 // and will populate the Secret shortly after startup.
 //
-// Shared by TargetWebhookReconciler (target-cluster MWC/VWC/CRD stamping)
-// and ManagedResourceReconciler (hosting-cluster Gardener ManagedResource
-// stamping) — both read the same Secret on the hosting cluster.
+// Used by ManagedResourceReconciler when stamping CRDs embedded in
+// Gardener ManagedResource Secrets on the hosting cluster.
 func loadCABundle(ctx context.Context, hostingClient client.Client, namespace, secretName string) ([]byte, error) {
 	secret := &corev1.Secret{}
 	key := types.NamespacedName{Name: secretName, Namespace: namespace}

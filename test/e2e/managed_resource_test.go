@@ -62,12 +62,12 @@ import (
 //     manager.Runnable. Those are unit-tested in
 //     pkg/controllers/managed_resource_reconciler_test.go against a fake
 //     client, and they are pure controller-runtime glue.
-//   - A live patch-mode webhook-injector pod. Standing up a second
-//     deployment alongside the existing ConfigMap-mode skaffold deploy
-//     would add ~200 lines of new manifests for one test; the reconciler
-//     logic is identical whether driven by a manager or by Reconcile()
-//     directly. The cert Secret it reads is created by the ConfigMap-mode
-//     deployment already running.
+//   - A live webhook-injector pod with --managed-resource-label set.
+//     Standing up a second deployment alongside the existing skaffold
+//     deploy would add ~200 lines of new manifests for one test; the
+//     reconciler logic is identical whether driven by a manager or by
+//     Reconcile() directly. The cert Secret it reads is created by the
+//     existing deployment already running.
 //   - Prom metrics over the /metrics HTTP endpoint. Since the reconciler
 //     runs in-process here, we read the same counters directly from
 //     ctrlmetrics.Registry.
@@ -154,7 +154,7 @@ func TestManagedResourceFlow(t *testing.T) {
 		webhookLabelKey = "webhook-injector.sap.com/test"
 		webhookLabelVal = "true"
 		// Must match the external-host shape webhookhost.BuildExternalURL
-		// would produce in a real patch-mode deployment (host:port).
+		// would produce in a real deployment (host:port).
 		externalHost     = "webhook-injector-e2e.example.com:9443"
 		crdName          = "managedresourcewidgets.example.com"
 		convertPath      = "/convert"
