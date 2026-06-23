@@ -117,16 +117,17 @@ type WebhookReconciler struct {
 	Scheme                *runtime.Scheme
 
 	// RotationTrigger is signaled (non-blocking send) on every detected
-	// certificate rotation in patch mode. TargetWebhookReconciler reads
-	// from this channel and lists all labeled MWC/VWC/CRDs to force-stamp
-	// them with the new caBundle, instead of waiting for the target
-	// cluster cache --sync-period.
+	// certificate rotation. Downstream consumers (TargetWebhookReconciler in
+	// patch mode, ManagedResourceReconciler when --managed-resource-mode is
+	// set) read from this channel via a splitter goroutine in main.go and
+	// force-stamp every labeled object they own with the new caBundle,
+	// instead of waiting for their cache --sync-period to fire.
 	//
-	// Patch mode only. Nil in ConfigMap mode and in tests that don't
-	// exercise rotation. Should be created with a buffer of 1 so a
-	// missed send (because the receiver is mid-resync) is harmless —
-	// the next rotation will fire again, and a single signal is enough
-	// to trigger a full re-stamp pass.
+	// Nil when no downstream consumer is wired (e.g. ConfigMap mode without
+	// --managed-resource-mode, or in tests that don't exercise rotation).
+	// Should be created with a buffer of 1 so a missed send (because the
+	// receiver is mid-resync) is harmless — the next rotation will fire
+	// again, and a single signal is enough to trigger a full re-stamp pass.
 	RotationTrigger chan<- struct{}
 }
 
@@ -190,6 +191,22 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		if err := r.Client.Get(ctx, secretKey, secret); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to get generated secret: %w", err)
+		}
+
+		// Signal downstream consumers (ManagedResourceReconciler in ConfigMap
+		// mode; the splitter in main.go fans out to whichever reconcilers are
+		// registered). Same shape as the patch-mode signal site below: a
+		// non-blocking buffered-1 send so a missed signal is harmless. Without
+		// this, MR-mode + ConfigMap-mode would re-stamp host-cluster MR
+		// Secrets only on the periodic --sync-period tick, instead of within
+		// seconds of a rotation.
+		if r.RotationTrigger != nil {
+			select {
+			case r.RotationTrigger <- struct{}{}:
+				logger.Info("Signaled rotation downstream consumers", "reason", reason)
+			default:
+				logger.V(1).Info("Rotation signal channel full, skipping (already pending)")
+			}
 		}
 	}
 

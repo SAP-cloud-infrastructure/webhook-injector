@@ -66,7 +66,7 @@ reuse download Apache-2.0      # Download license file
 
 ### Controllers
 
-The application registers up to four independent controllers (the second and third are patch-mode only; the third is also opt-in via `--managed-resource-mode`) with different leader election behavior:
+The application registers up to four independent controllers (the second is patch-mode only; the third is opt-in via `--managed-resource-mode` and works in both patch mode and ConfigMap mode) with different leader election behavior:
 
 1. **WebhookReconciler** (runs on **leader only**)
    - Location: `pkg/controllers/reconciler.go`
@@ -90,7 +90,7 @@ The application registers up to four independent controllers (the second and thi
    - Why this exists for CRDs: the bootstrap MWC stamps CRDs synchronously at CREATE/UPDATE, but out-of-band edits (kubectl, GitOps, other controllers) bypass admission. The Watch is the drift-correction safety net.
    - Leader election: DEFAULT behavior (requires leader)
 
-3. **ManagedResourceReconciler** (patch mode + `--managed-resource-mode` only; runs on **leader only**)
+3. **ManagedResourceReconciler** (`--managed-resource-mode` only; runs on **leader only**)
    - Location: `pkg/controllers/managed_resource_reconciler.go`
    - Watches: labeled `ManagedResource` (`resources.gardener.cloud/v1alpha1`) objects on the **hosting** cluster (not the target cluster). Cache is label-scoped, cluster-wide.
    - Why this exists: on a Gardener seed, CRDs are not applied directly to the shoot — they live inside `ManagedResource` Secrets, and gardener-resource-manager (GRM) reconciles them into the shoot. `TargetWebhookReconciler` would stamp the shoot-side CRD, but GRM immediately overwrites it from the Secret. Stamping the *source* (this controller) makes the stamp survive GRM's next sync.
@@ -137,7 +137,7 @@ The application registers up to four independent controllers (the second and thi
 
 **Gardener seed support:**
 - On a Gardener seed, CRDs are wrapped inside `ManagedResource` Secrets and applied to the shoot by `gardener-resource-manager`. Stamping the shoot-side CRD alone produces a thrash loop because GRM re-applies the original Secret on every sync.
-- The opt-in `--managed-resource-mode` flag enables `ManagedResourceReconciler`, which stamps the *source* (the MR's referenced Secret on the seed). The shoot-side `TargetWebhookReconciler` still runs as a belt-and-suspenders convergence path for the brief window between Secret update and GRM sync, but the authoritative stamp lives in the Secret.
+- The opt-in `--managed-resource-mode` flag enables `ManagedResourceReconciler`, which stamps the *source* (the MR's referenced Secret on the seed). Works in both patch mode and ConfigMap mode (when `--webhook-label` is set). In patch mode, the shoot-side `TargetWebhookReconciler` runs as a belt-and-suspenders convergence path for the brief window between Secret update and GRM sync; in ConfigMap mode, `WebhookReconciler`'s labeled-CRD refresh path covers the equivalent role for target-cluster CRDs.
 - Brotli (`.br` suffix) compression is supported because GRM transparently compresses larger payloads.
 
 ## Code Structure
@@ -160,7 +160,7 @@ pkg/config/                     Environment variable configuration
 pkg/controllers/                Two independent controllers
   reconciler.go                 WebhookReconciler (leader-only, manages certificates and target cluster)
   reloader.go                   CertificateReloader (all replicas, syncs certs to filesystem)
-  managed_resource_reconciler.go ManagedResourceReconciler (patch mode + --managed-resource-mode, stamps CRDs inside Gardener ManagedResource Secrets)
+  managed_resource_reconciler.go ManagedResourceReconciler (--managed-resource-mode, stamps CRDs inside Gardener ManagedResource Secrets; works in both patch and ConfigMap mode)
   cabundle.go                    Shared loadCABundle helper used by TargetWebhookReconciler and ManagedResourceReconciler
 
 pkg/managedresource/            Helpers for decoding/re-encoding Gardener ManagedResource Secret data
@@ -348,7 +348,9 @@ Patch-mode-only flags:
 - `--admission-webhook-name` - name of the `MutatingWebhookConfiguration` the controller bootstraps in the target cluster to register itself as an admission mutator on labeled CRDs (default `webhook-injector-mutator`). Empty disables bootstrap; `TargetWebhookReconciler` continues to converge MWC/VWC/CRD via Watch, but CRDs lose synchronous stamping at admission time.
 - `--admission-webhook-port` - port the admission webhook server binds to inside the pod (default `9444`). Configure your Service / NodePort / LoadBalancer to forward `--admission-external-port` to this port.
 - `--admission-external-port` - **required when `--admission-webhook-name` is non-empty**; external port the target cluster uses to reach this controller's admission webhook server. Combined with `--external-host` to form the bootstrap MWC URL `https://<external-host>:<admission-external-port>/mutate-crd`. Distinct from `--external-port`, which targets the labeled webhook callbacks. No default — the value depends entirely on the user's Service / NodePort / LoadBalancer wiring, and a wrong default would silently produce a bootstrap MWC the apiserver cannot reach.
-- `--managed-resource-mode` - opt-in (default `false`). When `true` (patch mode only), registers `ManagedResourceReconciler`, which stamps the `caBundle` and rewrites Service-form conversion `clientConfig` on CRDs embedded inside Gardener `ManagedResource` Secrets on the hosting cluster. Required flags `--webhook-label`, `--external-host`, `--external-port` are already required by patch mode. Without this flag the controller is not registered and the existing `TargetWebhookReconciler` is the only path that touches CRDs (correct for non-Gardener targets; wrong for Gardener seeds, where GRM would overwrite the shoot-side stamp on every sync).
+
+Managed-resource flags (work in both patch mode and ConfigMap mode):
+- `--managed-resource-mode` - opt-in (default `false`). When `true`, registers `ManagedResourceReconciler`, which stamps the `caBundle` and rewrites Service-form conversion `clientConfig` on CRDs embedded inside Gardener `ManagedResource` Secrets on the hosting cluster. Works in both patch mode and ConfigMap mode; requires `--webhook-label` so the controller has a label selector. In patch mode the existing `--external-host`/`--external-port` requirements apply; in ConfigMap mode they are also required because `--webhook-label` triggers labeled-CRD refresh on the target cluster (CRDs that may carry Service-form `clientConfig` needing URL-form rewrite). The two modes target non-overlapping objects — host-cluster MR Secrets (this controller) versus target-cluster MWC/VWC/CRD (`WebhookReconciler` in ConfigMap mode, `TargetWebhookReconciler` in patch mode) — so they compose cleanly. Without this flag the controller is not registered; on a Gardener seed that means GRM would overwrite the shoot-side stamp on every sync.
 - `--managed-resource-force-reconcile` - default `true`. When `--managed-resource-mode` is set, the controller patches `gardener.cloud/operation=reconcile` on each `ManagedResource` after a successful Secret stamp. This kicks `gardener-resource-manager` out of any backoff or debounce state so the new caBundle reaches the shoot promptly. The annotation is set **only** on reconciles that actually wrote a Secret — idempotent no-op reconciles do not churn GRM. The reconciler also skips the patch when the annotation is already present (GRM clears it after consuming, per the documented Gardener contract). Set to `false` to rely solely on GRM's own Secret watch — appropriate when the Secret-watch propagation latency is acceptable and you want one fewer hosting-cluster write per rotation.
 
 ## Remote Cluster Support

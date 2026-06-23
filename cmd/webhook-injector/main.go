@@ -97,7 +97,7 @@ func init() {
 	flag.IntVar(&admissionWebhookPort, "admission-webhook-port", 9444, "Port the admission webhook server binds to inside the pod. Patch mode only. Configure your Service/NodePort/LoadBalancer to forward --admission-external-port to this port.")
 	flag.IntVar(&admissionExternalPort, "admission-external-port", 0, "External port (combined with --external-host) the target cluster uses to reach the admission webhook server. Required in patch mode when admission-webhook bootstrap is active. Distinct from --external-port, which targets the labeled webhook callbacks rather than this controller's admission endpoint.")
 	flag.BoolVar(&managedResourceMode, "managed-resource-mode", false,
-		"Enable the ManagedResource controller that stamps caBundle and rewrites Service-form conversion clientConfig directly inside Gardener ManagedResource Secrets on the hosting cluster. Patch mode only; requires --webhook-label, --external-host, and --external-port (already required in patch mode).")
+		"Enable the ManagedResource controller that stamps caBundle and rewrites Service-form conversion clientConfig directly inside Gardener ManagedResource Secrets on the hosting cluster. Works in both patch mode and ConfigMap mode; requires --webhook-label (the controller needs a label selector to know which MRs to watch). In ConfigMap mode, the ConfigMap continues to own target-cluster MWC/VWC authorship and labeled-CRD refresh on the target; this controller independently stamps host-cluster MR Secrets so GRM applies pre-stamped CRDs into the shoot.")
 	flag.BoolVar(&managedResourceForceReconcile, "managed-resource-force-reconcile", true,
 		"When --managed-resource-mode is set, patch gardener.cloud/operation=reconcile on each ManagedResource after a successful Secret stamp. This kicks gardener-resource-manager out of any backoff so the new caBundle reaches the shoot promptly. The annotation is set only on reconciles that actually wrote a Secret — no-op reconciles do not churn GRM. Default true; set to false to rely solely on GRM's own Secret watch.")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
@@ -190,8 +190,17 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if managedResourceMode && !patchModeActive {
-		setupLog.Error(nil, "--managed-resource-mode requires patch mode (--webhook-label set, --webhook-config-name unset)")
+	// --managed-resource-mode applies to host-cluster ManagedResources whose
+	// referenced Secrets ship CRDs. It requires --webhook-label (the controller
+	// needs a label selector to know which MRs to watch), but it does NOT
+	// require patch mode. In ConfigMap mode + --webhook-label, this combination
+	// is supported: ConfigMap mode authors MWC/VWC on the target cluster and
+	// refreshes caBundle on labeled CRDs there, while ManagedResourceReconciler
+	// independently stamps CRDs inside MR Secrets on the host cluster. The
+	// two paths are non-overlapping (different clusters, different object
+	// kinds), so they compose cleanly.
+	if managedResourceMode && !labelOK {
+		setupLog.Error(nil, "--managed-resource-mode requires --webhook-label")
 		os.Exit(1)
 	}
 
@@ -348,25 +357,30 @@ func main() {
 	// Runs on leader ONLY via default leader election behavior to prevent conflicts
 	//
 	// rotationTrigger is a buffered single-slot channel: WebhookReconciler signals
-	// it on every detected cert rotation in patch mode, and TargetWebhookReconciler
-	// reacts by force-stamping every labeled MWC/VWC/CRD currently in the target
-	// cache. Buffer 1 + non-blocking send means a missed signal (receiver still
-	// fanning out the previous one) is harmless — a single signal triggers a full
-	// re-stamp pass.
+	// it on every detected cert rotation, and downstream consumers
+	// (TargetWebhookReconciler in patch mode, ManagedResourceReconciler when
+	// --managed-resource-mode is set) react by force-stamping every labeled
+	// object they own. Buffer 1 + non-blocking send means a missed signal
+	// (receiver still fanning out the previous one) is harmless — a single
+	// signal triggers a full re-stamp pass.
 	//
-	// With ManagedResourceReconciler we have two consumers, so a tiny splitter
-	// goroutine fans the producer's signal out to each downstream channel
-	// independently (each non-blocking, each with its own 1-slot buffer).
+	// With multiple consumers a tiny splitter goroutine fans the producer's
+	// signal out to each downstream channel independently (each non-blocking,
+	// each with its own 1-slot buffer). The splitter activates whenever at
+	// least one consumer exists; both can be active simultaneously when
+	// patch mode AND --managed-resource-mode are set.
 	var (
 		rotationTrigger       chan struct{}   // WebhookReconciler → splitter
-		targetRotationTrigger <-chan struct{} // splitter → TargetWebhookReconciler
+		targetRotationTrigger <-chan struct{} // splitter → TargetWebhookReconciler (nil unless patch mode)
 		mrRotationTrigger     <-chan struct{} // splitter → ManagedResourceReconciler (nil unless managedResourceMode)
 	)
-	if patchModeActive {
+	if patchModeActive || managedResourceMode {
 		rotationTrigger = make(chan struct{}, 1)
-		targetCh := make(chan struct{}, 1)
-		targetRotationTrigger = targetCh
-		var mrCh chan struct{}
+		var targetCh, mrCh chan struct{}
+		if patchModeActive {
+			targetCh = make(chan struct{}, 1)
+			targetRotationTrigger = targetCh
+		}
 		if managedResourceMode {
 			mrCh = make(chan struct{}, 1)
 			mrRotationTrigger = mrCh
@@ -377,9 +391,11 @@ func main() {
 				// downstream channel means a previous signal is still being
 				// processed; dropping is safe because a single signal triggers
 				// a full re-stamp pass.
-				select {
-				case targetCh <- struct{}{}:
-				default:
+				if targetCh != nil {
+					select {
+					case targetCh <- struct{}{}:
+					default:
+					}
 				}
 				if mrCh != nil {
 					select {
@@ -487,10 +503,12 @@ func main() {
 		)
 	}
 
-	// In managed-resource mode (patch mode only — validated above), additionally
-	// reconcile Gardener ManagedResource objects on the hosting cluster so the
-	// embedded CRDs' clientConfig is stamped at the source, surviving GRM's
-	// next sync into the shoot.
+	// In managed-resource mode, additionally reconcile Gardener ManagedResource
+	// objects on the hosting cluster so the embedded CRDs' clientConfig is
+	// stamped at the source, surviving GRM's next sync into the shoot. Works
+	// in both patch mode and ConfigMap mode (when --webhook-label is set);
+	// the two modes target non-overlapping objects (host-cluster MR Secrets
+	// vs target-cluster MWC/VWC/CRD), so they compose cleanly.
 	if managedResourceMode {
 		mrReconciler := &controllers.ManagedResourceReconciler{
 			HostingClient:     mgr.GetClient(),
