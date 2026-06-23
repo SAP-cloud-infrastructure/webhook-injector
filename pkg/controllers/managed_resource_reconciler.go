@@ -438,7 +438,7 @@ func (r *ManagedResourceReconciler) maybeStampCRDDoc(doc, caCert []byte) (out []
 		// because GRM packed an unexpected blob in the Secret. Returning a
 		// nil error here is the deliberate contract of maybeStampCRDDoc:
 		// errors are reported only for docs we recognised as CRDs and
-		// failed to handle; an unparseable non-CRD doc is the non-CRD
+		// failed to handle; an unparsable non-CRD doc is the non-CRD
 		// case, not an error case.
 		return doc, false, false, nil //nolint:nilerr // intentional: see comment
 	}

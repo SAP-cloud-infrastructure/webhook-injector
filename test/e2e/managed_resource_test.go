@@ -6,7 +6,9 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	sigsyaml "sigs.k8s.io/yaml"
 
@@ -69,11 +72,13 @@ import (
 //     runs in-process here, we read the same counters directly from
 //     ctrlmetrics.Registry.
 //
-// Gating: the test requires kind clusters to be up. Like the other tests
-// in this directory, it uses ./setup.sh + ./teardown.sh unless
-// -test.reuse-clusters is set. It also waits for the existing webhook-server
-// Deployment because the cert Secret it reads (webhook-injector-certs) is
-// populated by the WebhookReconciler in that deployment.
+// Gating: the test requires kind clusters to be up. It detects whether the
+// kind-hosting and kind-target clusters from the shared e2e harness already
+// exist and reuses them — this matters for CI where running a fresh setup
+// for every test in this package exhausts Docker network/image budget on
+// the runner. Only when no clusters exist (e.g. running this test in
+// isolation locally) does it invoke ./setup.sh + skaffold + ./teardown.sh.
+// When -test.reuse-clusters is set, the same reuse path is taken regardless.
 func TestManagedResourceFlow(t *testing.T) {
 	kubeconfigPath, absErr := filepath.Abs(filepath.Join(".", "kubeconfig"))
 	if absErr != nil {
@@ -81,8 +86,20 @@ func TestManagedResourceFlow(t *testing.T) {
 	}
 	t.Setenv("KUBECONFIG", kubeconfigPath)
 
-	if !*reuseClusters {
-		logWithTimestamp(t, "Setting up clusters for managed-resource test...")
+	// Suppress controller-runtime's "log.SetLogger(...) was never called"
+	// stack-dump on the first FromContext call. We run Reconcile directly
+	// (no manager), so without this the test emits a multi-line stack-trace
+	// warning that hides the real test output in CI logs.
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+
+	// Decide cluster lifecycle: if the kind clusters from a previous test in
+	// this package (or a manual `make e2e-setup`) already exist, reuse them.
+	// This keeps the e2e suite within the Docker/CPU budget on CI runners
+	// that have to set up 3+ tests in sequence. Only do a full setup when
+	// no clusters exist AND -test.reuse-clusters isn't set.
+	clustersExist := kindClustersExist(t)
+	if !*reuseClusters && !clustersExist {
+		logWithTimestamp(t, "No existing kind clusters detected; setting up...")
 		if err := runCommand(t, "./setup.sh"); err != nil {
 			t.Fatalf("Setup failed: %v", err)
 		}
@@ -94,7 +111,8 @@ func TestManagedResourceFlow(t *testing.T) {
 			runCommand(t, "./teardown.sh") //nolint:errcheck // cleanup
 		})
 	} else {
-		logWithTimestamp(t, "Reusing existing clusters (skipping setup/teardown)")
+		logWithTimestamp(t, "Reusing existing kind clusters (clustersExist=%v, reuseClusters=%v)",
+			clustersExist, *reuseClusters)
 	}
 
 	hostingClient := getKubernetesClient(t, "kind-hosting")
@@ -354,6 +372,35 @@ data:
 // --- helpers -----------------------------------------------------------------
 
 const managedResourceCRDName = "managedresources.resources.gardener.cloud"
+
+// kindClustersExist reports whether both `hosting` and `target` kind clusters
+// are currently present. Used to decide between full setup and reuse when
+// this test runs in a package with other e2e tests — running ./setup.sh per
+// test exhausts CI runner Docker resources and produces flaky HTTP/2 hangs
+// in unrelated tests that come later in the random `go test -shuffle` order.
+func kindClustersExist(t *testing.T) bool {
+	t.Helper()
+	out, err := exec.Command("kind", "get", "clusters").Output()
+	if err != nil {
+		// `kind` not installed, or no clusters at all (kind exits 0 with empty
+		// output when there are none; exits non-zero only on real errors).
+		// Either way, conservative answer is "treat as absent" — the caller
+		// will do a full setup, and if `kind` is missing setup.sh will fail
+		// fast with a clear error.
+		return false
+	}
+	names := strings.Split(strings.TrimSpace(string(out)), "\n")
+	hostingFound, targetFound := false, false
+	for _, n := range names {
+		switch strings.TrimSpace(n) {
+		case "hosting":
+			hostingFound = true
+		case "target":
+			targetFound = true
+		}
+	}
+	return hostingFound && targetFound
+}
 
 // installManagedResourceCRD applies a minimal Gardener ManagedResource CRD to
 // the hosting cluster. We embed the schema rather than fetching from upstream
