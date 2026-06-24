@@ -196,6 +196,25 @@ var (
 		},
 		[]string{"condition", "status"},
 	)
+
+	// PhaseTransitionsTotal counts state-machine transitions of the
+	// certificate-rotation phase on the cert Secret. Labels follow the
+	// closed enum {absent, staged, active, pruned}. The pair (from, to)
+	// makes the legal transitions in normal operation explicit:
+	//   absent  → active  (initial bootstrap)
+	//   active  → staged  (rotation begins: append new cert to bundle)
+	//   staged  → active  (promote new key once shoot has both certs)
+	//   staged  → staged  (force-rotation re-triggered mid-stage)
+	//   active  → pruned  (overlap window elapsed; drop old cert)
+	// Any other pair indicates a bug. Counter, not gauge — phases are
+	// transient and rare; the rate over time is the meaningful signal.
+	PhaseTransitionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_certificate_rotation_phase_transitions_total",
+			Help: "Total certificate-rotation phase transitions, labeled by from→to (enum: absent|active|staged|pruned).",
+		},
+		[]string{"from", "to"},
+	)
 )
 
 func init() {
@@ -211,5 +230,6 @@ func init() {
 		ManagedResourceForceReconcileTotal,
 		ManagedResourceKeepObjectsViolationsTotal,
 		ManagedResourceUnhealthyTotal,
+		PhaseTransitionsTotal,
 	)
 }
