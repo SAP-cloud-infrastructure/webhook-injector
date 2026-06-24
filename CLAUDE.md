@@ -72,6 +72,8 @@ The application registers up to three independent controllers (the second is opt
    - Injects CA bundle into `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` parsed from the ConfigMap and applies them to the target cluster (creates if missing, otherwise updates).
    - Does **not** author CRDs. CRDs flow through `ManagedResource` objects on the hosting cluster and are stamped by `ManagedResourceReconciler`.
    - Signals `ManagedResourceReconciler` (when registered) on every detected cert rotation so the new caBundle reaches MR-embedded CRDs within seconds.
+   - **Staged certificate rotation** (zero-downtime): rotation does not flip the serving cert in one step. The controller writes the new cert into `tls.crt` as a concatenated PEM bundle (`old || new`) and sets `webhook-injector.sap.com/rotation-phase=staged` on the Secret. While in `staged`, `tls.key` still points at the OLD cert — the apiserver-side caBundle propagates the union via the MR Secret + GRM hop, so when the controller eventually switches `tls.key` to the staged key (the `active` transition), the new serving cert is already trusted everywhere. After `--rotation-overlap-window` (default 5m), the old cert is pruned from `tls.crt` and steady state resumes. Three flags shape the machine: `--rotation-gate-crds` (CRDs on the target cluster the controller polls before promoting), `--rotation-gate-timeout` (max wait before promoting anyway — we'd rather have a working webhook than a stuck rotation), `--rotation-overlap-window` (post-promote grace before prune). RBAC: requires `get,list,watch` on `customresourcedefinitions.apiextensions.k8s.io` on the target cluster (read-only).
+   - **Cert Secret schema** during rotation: `tls.crt` is a concatenated PEM bundle (1 cert in `pruned`, 2 in `staged`/`active`-with-overlap); `tls.key` is the single key for the LEAF being served; `tls.staged.key` holds the not-yet-promoted key during `staged` and is removed on promotion. Annotations: `webhook-injector.sap.com/rotation-phase` (`staged|active`, absent = steady) and `webhook-injector.sap.com/rotation-started-at` (RFC3339). Downstream consumers reading `tls.crt` MUST tolerate multiple PEM blocks — controller-runtime's certwatcher, openssl, and `pkg/certificates/bundle.go` parsers handle this; naive `pem.Decode(tlsCrtPEM)` callers that take only the first block will be fine in steady state but pick the OLD cert during overlap.
    - Leader election: DEFAULT behavior (requires leader).
 
 2. **ManagedResourceReconciler** (registered when `--managed-resource-label` is set; runs on **leader only**)
@@ -178,6 +180,16 @@ test/e2e/                       E2E integration tests with kind clusters
 2. CertificateReloader watches Secret → writes to `/tmp/webhook-certs/`
 3. Webhook server watches filesystem → reloads certificates (controller-runtime v0.17+ does this automatically)
 
+**Certificate rotation phases (zero-downtime):**
+
+Rotation is a staged→active→pruned phase machine on the cert Secret, not a single-step swap. The phase is recorded in `webhook-injector.sap.com/rotation-phase` (absent = steady state); `webhook-injector.sap.com/rotation-started-at` carries the RFC3339 start time.
+
+- `staged`: new keypair generated; `tls.crt` becomes `old || new` (concatenated PEM bundle); `tls.key` still points at the OLD cert; the new private key lives in `tls.staged.key`. The union caBundle reaches the target cluster via MR Secret + GRM. The controller polls each `--rotation-gate-crds` entry on the target cluster, waiting for the union to appear in `spec.conversion.webhook.clientConfig.caBundle`. Empty `--rotation-gate-crds` skips the gate; `--rotation-gate-timeout` (default 2m) is the hard upper bound after which the controller promotes anyway.
+- `active`: `tls.key` flipped to the staged key, `tls.staged.key` removed. `tls.crt` keeps the union for `--rotation-overlap-window` (default 5m) so in-flight TLS sessions on the old cert continue to validate.
+- `pruned` (transient state, then phase annotation drops): overlap window elapsed; `tls.crt` is reduced back to the single active cert.
+
+The five legal transitions are `absent→active` (initial bootstrap), `active→staged` (rotation begins), `staged→staged` (force-rotation re-triggered mid-stage), `staged→active` (promotion), `active→pruned` (overlap elapsed). There is also a package-private `webhook-injector.sap.com/rotation-promoted-at` marker the controller uses to schedule pruning — internal, do not key on it externally.
+
 ## Important Implementation Details
 
 **ForceRotationAnnotation constant:**
@@ -239,6 +251,9 @@ Gardener `ManagedResource` reconciler on the hosting cluster.
 
 **Cert lifecycle:**
 - `--cert-sans` - comma-separated DNS names and/or IP addresses to include as additional certificate SANs (merged with SANs derived from the ConfigMap's webhook services/URLs). Each entry is auto-classified: parses as IP → IP SAN; otherwise → DNS SAN.
+- `--rotation-gate-crds` - comma-separated CRD names on the target cluster the controller polls during the staged rotation phase. Each gated CRD's `spec.conversion.webhook.clientConfig.caBundle` must contain BOTH the current leaf and the staged cert before the controller promotes the new serving cert. Empty disables the gate; the time-based fallback (`--rotation-gate-timeout`) still applies.
+- `--rotation-overlap-window` - duration (default `5m`) the controller keeps the old cert in `tls.crt` after promoting the new serving cert. Set this ≥ longest expected in-flight TLS session.
+- `--rotation-gate-timeout` - duration (default `2m`) the controller waits for shoot CRDs to show the union bundle during the staged phase. On timeout the controller promotes anyway — the alternative is a stuck rotation.
 
 **Common:**
 - `--namespace` - Namespace for all resources (ConfigMap, Secret, Lease). Auto-detects from env vars or pod's serviceaccount if not set.
@@ -273,6 +288,7 @@ All metrics are registered on controller-runtime's default Prometheus registry a
 - `webhook_injector_certificate_rotations_total{reason}` — counter. Labels: `reason ∈ {initial, expired, san_mismatch, force_rotation}`. Incremented by `WebhookReconciler` when a fresh cert is generated. The `force_rotation` value corresponds to the `webhook-injector.sap.com/force-rotation` annotation on the cert Secret.
 - `webhook_injector_certificate_expiry_time_seconds` — gauge. Unix timestamp of the current cert's `NotAfter`. Use `(metric - time())` in alerts for "expires within N hours".
 - `webhook_injector_cert_files_written_total` — counter. Incremented by `CertificateReloader` on every disk write. Each replica exposes its own value; a spike means rotation is propagating to the sidecar filesystem.
+- `webhook_injector_certificate_rotation_phase_transitions_total{from, to}` — counter. Labels: `from,to ∈ {absent, active, staged, pruned}`. Increments on every state-machine transition. Five legal pairs: `absent→active` (initial bootstrap), `active→staged` (rotation begins), `staged→staged` (force-rotation re-triggered mid-stage), `staged→active` (new cert promoted), `active→pruned` (overlap window elapsed, old cert dropped). Any other observed pair indicates a controller bug.
 
 ### Target-cluster stamping (ConfigMap mode)
 

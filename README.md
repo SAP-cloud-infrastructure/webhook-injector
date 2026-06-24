@@ -15,6 +15,7 @@ A Kubernetes controller that runs as a sidecar to webhook servers, managing webh
 - **Remote Cluster Support**: Manage webhooks in clusters where the webhook server doesn't run.
 - **Language Agnostic**: Works with any webhook server that can watch certificate files for changes.
 - **High Availability**: Leader election with multi-replica support, zero-downtime rotation.
+- **Zero-downtime certificate rotation**: staged overlap — both old and new certs trusted on the target cluster before the new one is served, then the old cert is pruned after a configurable grace window.
 - **Gardener Seed Support**: Stamps CRDs at the source — inside Gardener `ManagedResource` Secrets on the seed — so the stamp survives `gardener-resource-manager`'s next sync into the shoot.
 
 ## Architecture
@@ -176,10 +177,12 @@ data:
 3. Manual: Annotate Secret with `webhook-injector.sap.com/force-rotation: "true"`
 
 **Certificate output** (`/tmp/webhook-certs`):
-- `tls.crt`: Self-signed certificate with SANs from service/URL references
-- `tls.key`: Private key
+- `tls.crt`: Self-signed certificate with SANs from service/URL references. During rotation this is a concatenated PEM bundle of the old + new certs (`old || new`) — consumers must tolerate multiple PEM blocks. After the overlap window elapses it reduces back to a single cert.
+- `tls.key`: Private key for the leaf currently being served. Flipped to the new key at the `staged→active` transition.
 
 The same certificate serves as both server cert and CA bundle. Your webhook server must reload these files when they change — controller-runtime webhook servers (v0.17+) handle this automatically via fsnotify.
+
+**Zero-downtime rotation (staged→active→pruned).** Rotation is a phase machine recorded on the cert Secret via `webhook-injector.sap.com/rotation-phase` (`staged|active`, absent = steady) and `webhook-injector.sap.com/rotation-started-at` (RFC3339). In `staged`, the new cert is appended to `tls.crt` while `tls.key` still serves the old cert; the new key lives in `tls.staged.key`. The controller polls each `--rotation-gate-crds` entry on the target cluster (or waits up to `--rotation-gate-timeout`) for the union caBundle to land, then flips `tls.key` to the staged key (`active`). After `--rotation-overlap-window` the old cert is pruned. RBAC: the target-cluster ClusterRole grants `get,list,watch` on `customresourcedefinitions.apiextensions.k8s.io` to drive the gate.
 
 ## Configuration
 
@@ -193,6 +196,9 @@ Configure via command-line flags. `--webhook-config-name` is **required**; names
 | `--external-port` | **Required when `--managed-resource-label` is set.** External port the target cluster uses to reach the labeled webhook callbacks. | unset |
 | `--force-reconcile` | When `--managed-resource-label` is set, patch `gardener.cloud/operation=reconcile` on each ManagedResource after a successful Secret stamp so `gardener-resource-manager` picks up the change promptly. The annotation is set only on reconciles that actually wrote a Secret. | `true` |
 | `--cert-sans` | Comma-separated DNS names and/or IP addresses to include as additional certificate SANs (merged with SANs derived from the ConfigMap). | unset |
+| `--rotation-gate-crds` | Comma-separated CRD names on the target cluster the controller polls during the staged rotation phase. Each gated CRD's conversion `caBundle` must contain BOTH the current leaf and the staged cert before promotion. Empty disables the gate; `--rotation-gate-timeout` still applies. | unset |
+| `--rotation-overlap-window` | Duration the controller keeps the old cert in `tls.crt` after promoting the new serving cert. Set ≥ longest expected in-flight TLS session. | `5m` |
+| `--rotation-gate-timeout` | Max time to wait for shoot CRDs to show the union bundle during the staged phase. On timeout the controller promotes anyway (working webhook beats stuck rotation). | `2m` |
 | `--namespace` | Namespace for ConfigMap / Secret / Lease | auto-detect |
 | `--cert-secret-name` | Secret for certificates | `webhook-injector-certs` |
 | `--cert-dir` | Certificate output directory | `/tmp/webhook-certs` |
@@ -268,6 +274,7 @@ webhook-injector exposes Prometheus metrics at `<metrics-addr>/metrics` (default
 | `certificate_rotations_total` | Counter | Certificate rotations by `reason` label: `initial`, `expired`, `san_mismatch`, `force_rotation` |
 | `certificate_expiry_time_seconds` | Gauge | Unix timestamp when the current TLS certificate expires |
 | `cert_files_written_total` | Counter | Times certificate files were written to disk by the reloader |
+| `certificate_rotation_phase_transitions_total{from,to}` | Counter | Rotation phase-machine transitions; labels drawn from {absent, active, staged, pruned}. Five legal pairs (absent→active, active→staged, staged→staged, staged→active, active→pruned); any other pair indicates a controller bug |
 | `target_stamps_total{kind,result}` | Counter | Target-cluster MWC/VWC apply outcomes by `kind` (MutatingWebhookConfiguration, ValidatingWebhookConfiguration) and `result` (stamped, converged, error) |
 | `rotation_fanout_events_total{kind,outcome}` | Counter | Rotation fan-out events to the ManagedResource reconciler, by `kind=ManagedResource` and `outcome` (emitted, dropped) |
 | `managed_resource_stamps_total{result}` | Counter | Per-MR reconcile outcomes (stamped, converged, error) |

@@ -51,6 +51,9 @@ var (
 	certDir               string
 	certValidity          time.Duration
 	certRotationThreshold float64
+	rotationGateCRDsRaw   string
+	rotationOverlapWindow time.Duration
+	rotationGateTimeout   time.Duration
 	targetKubeconfig      string
 	enableLeaderElection  bool
 	leaderElectionID      string
@@ -73,6 +76,12 @@ func init() {
 	flag.StringVar(&certDir, "cert-dir", "/tmp/webhook-certs", "Directory to write certificate files")
 	flag.DurationVar(&certValidity, "cert-validity", 90*24*time.Hour, "Certificate validity duration")
 	flag.Float64Var(&certRotationThreshold, "cert-rotation-threshold", 0.2, "Certificate rotation threshold (0-1), rotate when remaining validity falls below this fraction")
+	flag.StringVar(&rotationGateCRDsRaw, "rotation-gate-crds", "",
+		"Comma-separated CRD names on the target cluster to poll for caBundle propagation before promoting the new serving cert during a rotation. Empty disables the gate (time-based fallback via --rotation-gate-timeout).")
+	flag.DurationVar(&rotationOverlapWindow, "rotation-overlap-window", 5*time.Minute,
+		"Grace duration after a new cert is promoted to serving before the old cert is pruned from the trust bundle. Must be long enough for in-flight TLS connections to drain.")
+	flag.DurationVar(&rotationGateTimeout, "rotation-gate-timeout", 2*time.Minute,
+		"Maximum duration to wait for shoot CRDs to show the staged union bundle before promoting the new serving cert anyway. The controller would rather have a working webhook than a stuck rotation.")
 	flag.StringVar(&targetKubeconfig, "target-kubeconfig", "", "Path to target cluster kubeconfig")
 	flag.BoolVar(&enableLeaderElection, "enable-leader-election", true, "Enable leader election for HA")
 	flag.StringVar(&leaderElectionID, "leader-election-id", "webhook-injector-leader", "Leader election lease name")
@@ -126,6 +135,7 @@ func main() {
 	}
 
 	certSANsList := splitAndTrim(certSANs)
+	rotationGateCRDs := splitAndTrim(rotationGateCRDsRaw)
 
 	// When --managed-resource-label is set the MR reconciler is wired and
 	// needs --external-host / --external-port to rewrite Service-form
@@ -289,6 +299,9 @@ func main() {
 		CertSecretName:        certSecretName,
 		CertValidity:          certValidity,
 		CertRotationThreshold: certRotationThreshold,
+		RotationGateCRDs:      rotationGateCRDs,
+		RotationOverlapWindow: rotationOverlapWindow,
+		RotationGateTimeout:   rotationGateTimeout,
 		Scheme:                mgr.GetScheme(),
 		RotationTrigger:       rotationTrigger,
 	}
