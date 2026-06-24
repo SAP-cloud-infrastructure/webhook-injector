@@ -459,7 +459,7 @@ func leafFromSecret(secret *corev1.Secret) (*x509.Certificate, error) {
 // rotationPhase reads the rotation phase from the Secret's annotations.
 // An absent annotation means PhaseActive (steady state). Returns the
 // started-at timestamp alongside; a zero time means "annotation absent
-// or unparseable."
+// or unparsable."
 func rotationPhase(secret *corev1.Secret) (phase RotationPhase, startedAt time.Time) {
 	phase = PhaseActive
 	if secret == nil || secret.Annotations == nil {
@@ -642,7 +642,7 @@ func (r *WebhookReconciler) stageCertificate(ctx context.Context, services []cer
 
 	// We have an existing Secret. Determine the current leaf cert so we
 	// can pair it with the new cert in the bundle. If the existing
-	// Secret is unparseable (corrupt or never-populated), fall back to a
+	// Secret is unparsable (corrupt or never-populated), fall back to a
 	// single-cert active-phase write — there's nothing useful to keep.
 	leaf, err := leafFromSecret(existing)
 	if err != nil {
@@ -848,7 +848,7 @@ func (r *WebhookReconciler) checkPropagation(ctx context.Context, secret *corev1
 		}
 		got, err := certificates.ParseChain(crd.Spec.Conversion.Webhook.ClientConfig.CABundle)
 		if err != nil {
-			logger.V(1).Info("checkPropagation: target CRD caBundle unparseable", "crd", name, "err", err.Error())
+			logger.V(1).Info("checkPropagation: target CRD caBundle unparsable", "crd", name, "err", err.Error())
 			return false, nil
 		}
 		gotFPs := make(map[[32]byte]struct{}, len(got))
