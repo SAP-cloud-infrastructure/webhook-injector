@@ -268,13 +268,20 @@ var trackedConditions = []string{conditionResourcesApplied, conditionResourcesHe
 
 // observeConditionHealth inspects mr.Status.Conditions for ResourcesApplied
 // and ResourcesHealthy. For each condition that is present but not
-// Status=True it logs an error-level message and increments
-// ManagedResourceUnhealthyTotal{condition,status}.
+// Status=True it logs a warning (Info level with a "WARNING:" prefix — not
+// Error, so no stack trace) and increments
+// ManagedResourceUnhealthyTotal{condition,status}. The counter is the
+// alertable signal; the log is its human-readable companion.
 //
 // Missing conditions are intentionally ignored: a freshly created MR may
 // not have status populated yet, and counting that as unhealthy would
 // generate noise during normal MR creation. GRM populates conditions
 // within seconds, and subsequent reconciles will then observe them.
+//
+// This is purely observational — the reconcile is never aborted on an
+// unhealthy condition. Status=Unknown with reason=ChecksPending is a
+// normal transient state right after GRM applies resources, and even a
+// chronic Status=False is something we want to surface, not act on.
 func (r *ManagedResourceReconciler) observeConditionHealth(mr *resourcesv1alpha1.ManagedResource, logger logr.Logger) {
 	for _, wantType := range trackedConditions {
 		cond := findCondition(mr.Status.Conditions, wantType)
@@ -286,7 +293,7 @@ func (r *ManagedResourceReconciler) observeConditionHealth(mr *resourcesv1alpha1
 			continue
 		}
 		metrics.ManagedResourceUnhealthyTotal.WithLabelValues(wantType, string(cond.Status)).Inc()
-		logger.Error(nil, "ManagedResource condition is not True",
+		logger.Info("WARNING: ManagedResource condition is not True",
 			"condition", wantType,
 			"status", cond.Status,
 			"reason", cond.Reason,
