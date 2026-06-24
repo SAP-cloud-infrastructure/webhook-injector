@@ -304,6 +304,7 @@ func main() {
 	if mrLabelOK {
 		mrReconciler := &controllers.ManagedResourceReconciler{
 			HostingClient:     mgr.GetClient(),
+			CertSecretReader:  mgr.GetAPIReader(),
 			Namespace:         namespace,
 			CertSecretName:    certSecretName,
 			WebhookLabelKey:   mrLabelKey,

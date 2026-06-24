@@ -18,12 +18,23 @@ import (
 // with backoff — the WebhookReconciler runs on a different reconcile loop
 // and will populate the Secret shortly after startup.
 //
+// The reader is intentionally `client.Reader` (the read-only subset of
+// `client.Client`) so the caller can choose between the manager's cached
+// client and `mgr.GetAPIReader()`. ManagedResourceReconciler uses the
+// APIReader path for this specific read to dodge the rotation propagation
+// race: after WebhookReconciler writes a fresh cert Secret it immediately
+// fans the rotation signal out to MR reconciles, but the shared informer
+// cache often has not yet absorbed the write — a cached Get would return
+// the stale tls.crt, the MR-embedded CRD's caBundle would compare equal,
+// and the re-stamp would silently no-op. Reading directly from the
+// apiserver removes the race at the cost of one extra Get per reconcile.
+//
 // Used by ManagedResourceReconciler when stamping CRDs embedded in
 // Gardener ManagedResource Secrets on the hosting cluster.
-func loadCABundle(ctx context.Context, hostingClient client.Client, namespace, secretName string) ([]byte, error) {
+func loadCABundle(ctx context.Context, reader client.Reader, namespace, secretName string) ([]byte, error) {
 	secret := &corev1.Secret{}
 	key := types.NamespacedName{Name: secretName, Namespace: namespace}
-	if err := hostingClient.Get(ctx, key, secret); err != nil {
+	if err := reader.Get(ctx, key, secret); err != nil {
 		return nil, fmt.Errorf("failed to get cert Secret %s: %w", key, err)
 	}
 	caCert := secret.Data[tlsCrtKey]

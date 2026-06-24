@@ -64,9 +64,30 @@ import (
 //
 // Leader election: leader-only (matches WebhookReconciler).
 type ManagedResourceReconciler struct {
-	// HostingClient reads ManagedResources, the cert Secret, and the
-	// referenced resource Secrets — all on the hosting cluster.
+	// HostingClient reads ManagedResources and the referenced resource
+	// Secrets on the hosting cluster. Cached via the manager — fine for
+	// everything except the cert Secret, see CertSecretReader.
 	HostingClient client.Client
+
+	// CertSecretReader reads the hosting-cluster cert Secret. In production
+	// this is `mgr.GetAPIReader()` so the read bypasses the controller-
+	// runtime informer cache and goes straight to the apiserver.
+	//
+	// Why a dedicated, uncached reader for this one Secret: WebhookReconciler
+	// writes a fresh cert Secret and immediately signals a rotation, which
+	// fans out as GenericEvents to this reconciler. The triggered reconcile
+	// almost always runs before the shared informer cache has absorbed the
+	// new write — a cached Get would return the stale tls.crt, the
+	// MR-embedded CRD's caBundle would compare equal, and the re-stamp
+	// would silently no-op until the cache catches up (~minutes) or the
+	// next `--sync-period` tick. The APIReader path removes the race for
+	// the cost of one extra Get per reconcile pass. Every other read
+	// (ManagedResources, MR-referenced Secrets) stays on the cached
+	// HostingClient.
+	//
+	// Nil falls back to HostingClient so test code can keep using a single
+	// fake client; production code in main.go always sets this.
+	CertSecretReader client.Reader
 
 	// Namespace / CertSecretName locate the hosting-cluster Secret holding
 	// the freshly minted tls.crt that becomes the embedded CRDs' caBundle.
@@ -487,10 +508,16 @@ func (r *ManagedResourceReconciler) maybeStampCRDDoc(doc, caCert []byte) (out []
 }
 
 // loadCABundle reads tls.crt from the hosting-cluster certificate Secret via
-// the shared package-private helper. Kept as a thin method so the reconcile
-// body doesn't need to thread Namespace/CertSecretName explicitly.
+// the shared package-private helper. Routes through CertSecretReader when
+// set (typically mgr.GetAPIReader() in production, dodging the rotation
+// propagation race documented on the field), and falls back to
+// HostingClient when nil so test code can keep using a single fake client.
 func (r *ManagedResourceReconciler) loadCABundle(ctx context.Context) ([]byte, error) {
-	return loadCABundle(ctx, r.HostingClient, r.Namespace, r.CertSecretName)
+	reader := client.Reader(r.HostingClient)
+	if r.CertSecretReader != nil {
+		reader = r.CertSecretReader
+	}
+	return loadCABundle(ctx, reader, r.Namespace, r.CertSecretName)
 }
 
 // patchForceReconcile stamps `gardener.cloud/operation=reconcile` on the MR

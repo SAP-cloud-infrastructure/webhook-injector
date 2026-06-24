@@ -1076,3 +1076,90 @@ func counterValue(t *testing.T, c prometheus.Collector) float64 {
 	}
 	return pb.Counter.GetValue()
 }
+
+// TestRotationRaceCertSecretReaderWins exercises the rotation-propagation race
+// fix end-to-end: when WebhookReconciler has just written a fresh cert Secret
+// and signals the rotation fan-out, the informer cache that backs HostingClient
+// often has not yet absorbed the write. The reconciler must read tls.crt via
+// CertSecretReader (mgr.GetAPIReader() in production) so it observes the
+// FRESH cert and re-stamps the MR's CRD with the new caBundle inside the same
+// reconcile pass — not after the next --sync-period tick.
+//
+// Test shape: two separately-built fake clients hold different versions of the
+// cert Secret in the same namespace/name. The CRD inside the MR's referenced
+// Secret embeds the STALE caBundle. After Reconcile we expect:
+//   - the MR Secret's CRD has been re-stamped with the FRESH caBundle, and
+//   - the staleClient (HostingClient) was NOT used to read the cert Secret
+//     (asserted by the value of the caBundle written — if HostingClient had
+//     been consulted, the result would compare-equal to the stale bytes and
+//     the stamp would no-op).
+func TestRotationRaceCertSecretReaderWins(t *testing.T) {
+	s := testScheme(t)
+
+	stale := []byte("stale-ca-cert-bytes")
+	fresh := []byte("fresh-ca-cert-bytes")
+
+	// CRD inside MR Secret carries the stale caBundle — exactly what
+	// happens in production before a force-rotation reconcile.
+	convertPath := "/convert"
+	crd := crdDocStamped(t, "widgets.example.com",
+		webhookhost.BuildExternalURL(externalHost, &convertPath), stale)
+	resourceSecret := makeResourceSecret(map[string][]byte{"objects.yaml": crd})
+	mr := makeMR(map[string]string{webhookLabelKey: webhookLabelValue})
+
+	// HostingClient holds the STALE cert Secret + MR + resource Secret.
+	// CertSecretReader holds the FRESH cert Secret only. Two independent
+	// fake clients, same scheme.
+	staleCertSecret := makeCertSecret() // tls.crt = testCABundle, irrelevant — we override below
+	staleCertSecret.Data[tlsCrtKey] = stale
+	hostingClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(mr, resourceSecret, staleCertSecret).
+		Build()
+	cc := &countingClient{Client: hostingClient}
+
+	freshCertSecret := makeCertSecret()
+	freshCertSecret.Data[tlsCrtKey] = fresh
+	freshReader := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(freshCertSecret).
+		Build()
+
+	r := &ManagedResourceReconciler{
+		HostingClient:     cc,
+		CertSecretReader:  freshReader,
+		Namespace:         mrNamespace,
+		CertSecretName:    certSecretName,
+		WebhookLabelKey:   webhookLabelKey,
+		WebhookLabelValue: webhookLabelValue,
+		ExternalHost:      externalHost,
+		ForceReconcile:    true,
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: mrName, Namespace: mrNamespace},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// The MR Secret should have been Updated exactly once — the stamp.
+	if cc.updates != 1 {
+		t.Fatalf("expected exactly 1 Secret Update (stamp with fresh caBundle), got %d", cc.updates)
+	}
+
+	// Read the stamped MR Secret back and verify the CRD now carries the
+	// FRESH caBundle (not the stale one).
+	docs, compressed := extractDocsFromSecret(t, cc, "objects.yaml")
+	if compressed {
+		t.Fatalf("unexpected brotli compression in test payload")
+	}
+	stamped := findCRD(t, docs)
+	got := stamped.Spec.Conversion.Webhook.ClientConfig.CABundle
+	switch {
+	case bytes.Equal(got, fresh):
+		// success — APIReader path was consulted and won
+	case bytes.Equal(got, stale):
+		t.Fatalf("CRD caBundle still has STALE bytes; CertSecretReader was not consulted (or its value was discarded)")
+	default:
+		t.Fatalf("CRD caBundle is neither stale nor fresh: %q", got)
+	}
+}
