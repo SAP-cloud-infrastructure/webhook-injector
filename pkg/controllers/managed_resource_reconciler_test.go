@@ -23,6 +23,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/managedresource"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
@@ -1075,4 +1076,112 @@ func counterValue(t *testing.T, c prometheus.Collector) float64 {
 		t.Fatalf("not a counter: %+v", &pb)
 	}
 	return pb.Counter.GetValue()
+}
+
+// TestLabelPredicate covers every branch of the watch predicate that
+// gates ManagedResource events into the reconciler. The four cases that
+// must pass: Create/Delete/Generic of a labeled MR, and Update where
+// `spec.generation` actually changed. The cases that must be filtered:
+// Update of a labeled MR where only `status` or `metadata` (annotations)
+// changed — these are the noisy GRM status flips and our own
+// force-reconcile annotation echo that motivated the predicate. Plus
+// two compositional cases: an MR newly entering scope (label added) is
+// admitted even without a generation bump; an MR leaving scope (label
+// removed) is filtered.
+func TestLabelPredicate(t *testing.T) {
+	r := &ManagedResourceReconciler{
+		WebhookLabelKey:   "k",
+		WebhookLabelValue: "v",
+	}
+	p := r.labelPredicate()
+
+	labeled := func(name string, gen int64, annotations map[string]string) *resourcesv1alpha1.ManagedResource {
+		return &resourcesv1alpha1.ManagedResource{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        name,
+				Namespace:   "ns",
+				Labels:      map[string]string{"k": "v"},
+				Annotations: annotations,
+				Generation:  gen,
+			},
+		}
+	}
+	unlabeled := func(name string, gen int64) *resourcesv1alpha1.ManagedResource {
+		return &resourcesv1alpha1.ManagedResource{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       name,
+				Namespace:  "ns",
+				Generation: gen,
+			},
+		}
+	}
+
+	t.Run("CreateOfLabeledPasses", func(t *testing.T) {
+		if !p.Create(event.CreateEvent{Object: labeled("mr", 1, nil)}) {
+			t.Fatal("Create of labeled MR was filtered")
+		}
+	})
+	t.Run("CreateOfUnlabeledFiltered", func(t *testing.T) {
+		if p.Create(event.CreateEvent{Object: unlabeled("mr", 1)}) {
+			t.Fatal("Create of unlabeled MR leaked through")
+		}
+	})
+	t.Run("DeleteOfLabeledPasses", func(t *testing.T) {
+		if !p.Delete(event.DeleteEvent{Object: labeled("mr", 1, nil)}) {
+			t.Fatal("Delete of labeled MR was filtered")
+		}
+	})
+	t.Run("GenericOfLabeledPasses", func(t *testing.T) {
+		if !p.Generic(event.GenericEvent{Object: labeled("mr", 1, nil)}) {
+			t.Fatal("Generic of labeled MR was filtered")
+		}
+	})
+
+	t.Run("UpdateWithGenerationChangePasses", func(t *testing.T) {
+		old := labeled("mr", 1, nil)
+		nw := labeled("mr", 2, nil)
+		if !p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: nw}) {
+			t.Fatal("Update with generation bump was filtered")
+		}
+	})
+
+	t.Run("UpdateStatusOnlyFiltered", func(t *testing.T) {
+		// Same generation, same labels, same annotations — GRM rewrote
+		// status. This is the noisy case the predicate exists to suppress.
+		old := labeled("mr", 5, nil)
+		nw := labeled("mr", 5, nil)
+		if p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: nw}) {
+			t.Fatal("status-only Update leaked through")
+		}
+	})
+
+	t.Run("UpdateAnnotationOnlyFiltered", func(t *testing.T) {
+		// Same generation; our own force-reconcile annotation patch
+		// arrives back as a watch event. Must not retrigger reconcile.
+		old := labeled("mr", 5, nil)
+		nw := labeled("mr", 5, map[string]string{"gardener.cloud/operation": "reconcile"})
+		if p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: nw}) {
+			t.Fatal("annotation-only Update leaked through")
+		}
+	})
+
+	t.Run("UpdateLabelAddedPasses", func(t *testing.T) {
+		// The MR was outside our scope and just acquired our label.
+		// Functionally a Create — admit even without a generation bump.
+		old := unlabeled("mr", 5)
+		nw := labeled("mr", 5, nil)
+		if !p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: nw}) {
+			t.Fatal("label-added Update was filtered")
+		}
+	})
+
+	t.Run("UpdateLabelRemovedFiltered", func(t *testing.T) {
+		// The reverse: MR left our scope. Filter — the new object
+		// fails the label check, so we don't care what's in it.
+		old := labeled("mr", 5, nil)
+		nw := unlabeled("mr", 5)
+		if p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: nw}) {
+			t.Fatal("label-removed Update leaked through")
+		}
+	})
 }

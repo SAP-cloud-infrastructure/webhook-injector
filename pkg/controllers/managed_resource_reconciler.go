@@ -147,15 +147,59 @@ func (r *ManagedResourceReconciler) SetupWithManager(mgr ctrl.Manager, rotationT
 }
 
 // labelPredicate filters ManagedResource events down to those carrying the
-// configured webhook label. Belt-and-suspenders against the hosting-cluster
-// cache also being label-scoped in main.go.
+// configured webhook label, and additionally suppresses no-op Update events
+// whose `spec` did not change.
+//
+// Why the generation gate. controller-runtime delivers an Update event for
+// every write to the object — including status flips and metadata-only
+// writes. GRM rewrites `mr.Status.Conditions` repeatedly as conditions
+// transition `Unknown → Progressing → True`, and our own
+// `gardener.cloud/operation=reconcile` annotation patch is itself a
+// metadata write that the watch sees back. Without this gate the
+// controller wakes up several times per second during normal MR
+// activity, each pass emitting another set of GRM-health warning logs.
+//
+// `metadata.generation` is bumped by the apiserver only on `spec`
+// writes. Filtering Update by generation change collapses those
+// status/annotation echoes to zero extra reconciles while preserving
+// every signal we actually care about:
+//   - Create / Delete still pass (no Old object to compare against).
+//   - Updates whose `spec` changed (real intent changes — new secretRefs,
+//     keepObjects flip, etc.) still pass.
+//   - The MR newly acquiring our label (old didn't match, new does) is
+//     functionally a Create for our scope and is allowed through even
+//     without a generation bump.
+//   - The rotation fan-out path is on a separate `WatchesRawSource`
+//     channel and is not affected by this predicate.
+//   - The periodic `--sync-period` tick is unaffected — it's a manager-
+//     level resync, not a watch event.
+//
+// `gardener-resource-manager` itself uses `GenerationChangedPredicate`
+// on its own controllers for the same reason.
 func (r *ManagedResourceReconciler) labelPredicate() predicate.Predicate {
-	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		if obj == nil {
-			return false
-		}
-		return obj.GetLabels()[r.WebhookLabelKey] == r.WebhookLabelValue
-	})
+	matches := func(obj client.Object) bool {
+		return obj != nil && obj.GetLabels()[r.WebhookLabelKey] == r.WebhookLabelValue
+	}
+	return predicate.Funcs{
+		CreateFunc:  func(e event.CreateEvent) bool { return matches(e.Object) },
+		DeleteFunc:  func(e event.DeleteEvent) bool { return matches(e.Object) },
+		GenericFunc: func(e event.GenericEvent) bool { return matches(e.Object) },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			// New must carry our label for any path through here.
+			if !matches(e.ObjectNew) {
+				return false
+			}
+			// Newly entered our scope (label just added) — treat as Create.
+			if !matches(e.ObjectOld) {
+				return true
+			}
+			// Same labeled MR before and after: spec change only.
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return true
+			}
+			return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration()
+		},
+	}
 }
 
 // Reconcile stamps every CRD embedded in the ManagedResource's referenced
