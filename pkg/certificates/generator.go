@@ -73,12 +73,12 @@ func GenerateSelfSignedCert(services []ServiceReference, validity time.Duration)
 
 	// Encode to PEM
 	certPEM = pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
+		Type:  pemBlockCertificate,
 		Bytes: certDER,
 	})
 
 	keyPEM = pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
+		Type:  pemBlockRSAPrivateKey,
 		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
 	})
 
