@@ -1139,9 +1139,11 @@ func TestPruneCertificate(t *testing.T) {
 	}
 }
 
-// TestCheckPropagation_EmptyGate confirms that when --rotation-gate-crds
-// is unset (empty list), checkPropagation returns true immediately —
-// the time-based gate timeout is the only constraint in that mode.
+// TestCheckPropagation_EmptyGate confirms that when the shared
+// rotation Gate has no published CRDs (no MR reconciler running, or
+// no labeled MRs shipping CRDs), checkPropagation returns true
+// immediately — the time-based gate timeout is the only constraint
+// in that mode.
 func TestCheckPropagation_EmptyGate(t *testing.T) {
 	oldCert, oldKey := mintCert(t)
 	newCert, _ := mintCert(t)
@@ -1226,8 +1228,8 @@ func TestCheckPropagation_OnlyOldCert(t *testing.T) {
 	}
 }
 
-// TestCheckPropagation_MissingCRD covers the bootstrap edge case: the
-// CRD listed in --rotation-gate-crds is not (yet) present on the target.
+// TestCheckPropagation_MissingCRD covers the bootstrap edge case: a
+// CRD published on the gate is not (yet) present on the target.
 // Must return false (NOT error) so the staged loop waits it out.
 func TestCheckPropagation_MissingCRD(t *testing.T) {
 	oldCert, oldKey := mintCert(t)

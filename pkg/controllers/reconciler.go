@@ -786,8 +786,8 @@ func preservedAnnotations(src map[string]string) map[string]string {
 // shouldn't need to see it.
 const rotationPromotedAtAnnotation = "webhook-injector.sap.com/rotation-promoted-at"
 
-// checkPropagation returns true if every CRD listed in RotationGateCRDs
-// on the target cluster has BOTH the current leaf and the staged cert in
+// checkPropagation returns true if every CRD published on the shared
+// rotation Gate has BOTH the current leaf and the staged cert in
 // its conversion webhook caBundle. The gate set is derived at call
 // time from the shared rotationgate.Gate snapshot — every CRD that
 // ManagedResourceReconciler has published is gated automatically. An
