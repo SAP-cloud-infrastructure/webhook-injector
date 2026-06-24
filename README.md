@@ -235,7 +235,7 @@ When webhook-injector runs on a Gardener seed, the CRDs it must stamp don't live
 - Only writes the Secret back when a CRD actually changed — no-op reconciles do not bump `resourceVersion`, otherwise GRM would re-apply on every sync and re-trigger this loop.
 - By default also patches `gardener.cloud/operation=reconcile` on the ManagedResource (controlled by `--force-reconcile`, default `true`) so GRM picks up the change promptly even if it is in backoff. The annotation is set only on reconciles that actually wrote a Secret.
 - Observes the GRM-maintained `ResourcesApplied` and `ResourcesHealthy` conditions on each ManagedResource and logs/counts when either is not `True`, surfacing MR health on dashboards without gating the stamp on it.
-- Enforces a `spec.keepObjects: true` invariant on MRs that ship CRDs and emits an error-level log plus a counter when it's missing. Without `keepObjects`, deleting the ManagedResource would cascade-delete the shoot's CRDs and every custom resource of those kinds.
+- Enforces a `spec.keepObjects: true` invariant on MRs that ship CRDs and emits a warning-level log (no stack trace) plus a counter when it's missing — the counter is the alertable signal. Without `keepObjects`, deleting the ManagedResource would cascade-delete the shoot's CRDs and every custom resource of those kinds.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐

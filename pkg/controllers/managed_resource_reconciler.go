@@ -217,11 +217,13 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// shoot's CRDs, taking every custom resource with them. We do not block
 	// the reconcile when the flag is missing — the CRD still needs the
 	// fresh caBundle and we'd rather have a working webhook than refuse to
-	// stamp — but we surface the misconfiguration as an error-level log and
-	// a counter so an operator dashboard catches it.
+	// stamp — but we surface the misconfiguration as a warning-level log
+	// and a counter so an operator dashboard catches it. Emitted via
+	// logger.Info (not Error) so it does not carry a stack trace; the
+	// "WARNING:" prefix keeps it visually distinct from informational lines.
 	if totalObserved > 0 && !keepObjectsTrue(mr) {
 		metrics.ManagedResourceKeepObjectsViolationsTotal.Inc()
-		logger.Error(nil, "ManagedResource ships CRDs but spec.keepObjects is not true — deleting this MR would cascade-delete the shoot CRDs and every custom resource of those kinds. Set spec.keepObjects: true on the ManagedResource.",
+		logger.Info("WARNING: ManagedResource ships CRDs but spec.keepObjects is not true — deleting this MR would cascade-delete the shoot CRDs and every custom resource of those kinds. Set spec.keepObjects: true on the ManagedResource.",
 			"crdsObserved", totalObserved,
 		)
 	}
