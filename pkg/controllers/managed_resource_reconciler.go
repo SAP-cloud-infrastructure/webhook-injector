@@ -31,6 +31,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers/rotationgate"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/managedresource"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/webhookhost"
@@ -117,6 +118,18 @@ type ManagedResourceReconciler struct {
 	// GRM removes the annotation itself after consuming it (well-defined
 	// Gardener behaviour), so we don't need to clean it up.
 	ForceReconcile bool
+
+	// Gate publishes the set of CRDs this reconciler is responsible for,
+	// keyed by ManagedResource. WebhookReconciler reads the union of all
+	// MRs' contributions during the staged rotation phase to decide
+	// which target-cluster CRDs to poll for caBundle propagation before
+	// promoting the new serving cert.
+	//
+	// Nil disables publishing (the gate's snapshot stays empty for this
+	// reconciler) — fine for tests that don't exercise rotation, and a
+	// no-op for production deployments without a WebhookReconciler
+	// wired to the same Gate.
+	Gate *rotationgate.Gate
 }
 
 // Gardener annotation contract for "kick this object to reconcile". The
@@ -190,9 +203,20 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	result := metrics.ResultConverged
 	defer func() { metrics.ManagedResourceStampsTotal.WithLabelValues(result).Inc() }()
 
+	// gateKey is the per-MR identity used for rotation-gate publishing.
+	// We compute it once up front so Forget and Publish below share the
+	// same shape.
+	gateKey := rotationgate.Key(req.String())
+
 	mr := &resourcesv1alpha1.ManagedResource{}
 	if err := r.HostingClient.Get(ctx, req.NamespacedName, mr); err != nil {
 		if apierrors.IsNotFound(err) {
+			// MR was deleted (or never existed). Drop its contribution to
+			// the rotation gate so a future rotation doesn't wait on a
+			// CRD that's no longer under our control.
+			if r.Gate != nil {
+				r.Gate.Forget(gateKey)
+			}
 			return ctrl.Result{}, nil
 		}
 		result = metrics.ResultError
@@ -203,6 +227,11 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// delete-then-recreate without the label could still leak a stale entry
 	// through if we trusted the predicate alone.
 	if mr.Labels[r.WebhookLabelKey] != r.WebhookLabelValue {
+		// MR left our label scope. Same treatment as deletion for the gate:
+		// stop publishing its CRDs so the gate doesn't wait on them.
+		if r.Gate != nil {
+			r.Gate.Forget(gateKey)
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -223,14 +252,25 @@ func (r *ManagedResourceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	totalStamped := 0
 	totalObserved := 0
+	var publishedCRDs []string
 	for _, ref := range mr.Spec.SecretRefs {
-		stamped, observed, err := r.stampSecret(ctx, mr.Namespace, ref.Name, caCert, logger)
+		stamped, observed, crds, err := r.stampSecret(ctx, mr.Namespace, ref.Name, caCert, logger)
 		if err != nil {
 			result = metrics.ResultError
 			return ctrl.Result{}, err
 		}
 		totalStamped += stamped
 		totalObserved += observed
+		publishedCRDs = append(publishedCRDs, crds...)
+	}
+
+	// Publish the gate set for this MR on every reconcile (including
+	// idempotent no-ops): even when the Secret didn't change, the set of
+	// CRDs the controller is responsible for stays stable, and the
+	// rotation gate should reflect that. Gate.Publish canonicalises the
+	// input, so duplicates across secretRefs are handled.
+	if r.Gate != nil {
+		r.Gate.Publish(gateKey, publishedCRDs)
 	}
 
 	// Enforce the spec.keepObjects=true invariant on MRs that ship CRDs:
@@ -344,7 +384,7 @@ func findCondition(conds []gardencorev1beta1.Condition, condType string) *garden
 // observed count is what drives the spec.keepObjects=true check in the
 // caller — a CRD with conversion.strategy=None still counts as a CRD that
 // the MR is shipping into the shoot, even though we don't rewrite it.
-func (r *ManagedResourceReconciler) stampSecret(ctx context.Context, namespace, name string, caCert []byte, logger logr.Logger) (stamped, observed int, err error) {
+func (r *ManagedResourceReconciler) stampSecret(ctx context.Context, namespace, name string, caCert []byte, logger logr.Logger) (stamped, observed int, crdNames []string, err error) {
 	secret := &corev1.Secret{}
 	key := types.NamespacedName{Name: name, Namespace: namespace}
 	if err := r.HostingClient.Get(ctx, key, secret); err != nil {
@@ -353,9 +393,9 @@ func (r *ManagedResourceReconciler) stampSecret(ctx context.Context, namespace, 
 			// either create the Secret (and we get a fresh MR event) or
 			// remove the ref.
 			logger.V(1).Info("Referenced Secret not found, skipping", "secret", key)
-			return 0, 0, nil
+			return 0, 0, nil, nil
 		}
-		return 0, 0, fmt.Errorf("failed to get Secret %s: %w", key, err)
+		return 0, 0, nil, fmt.Errorf("failed to get Secret %s: %w", key, err)
 	}
 
 	stampedTotal := 0
@@ -373,22 +413,28 @@ func (r *ManagedResourceReconciler) stampSecret(ctx context.Context, namespace, 
 		}
 		plain, compressed, err := managedresource.Decode(compressedKey, raw)
 		if err != nil {
-			return 0, 0, fmt.Errorf("decode %s/%s[%s]: %w", namespace, name, dataKey, err)
+			return 0, 0, nil, fmt.Errorf("decode %s/%s[%s]: %w", namespace, name, dataKey, err)
 		}
 
 		docs, err := managedresource.SplitDocs(plain)
 		if err != nil {
-			return 0, 0, fmt.Errorf("split %s/%s[%s]: %w", namespace, name, dataKey, err)
+			return 0, 0, nil, fmt.Errorf("split %s/%s[%s]: %w", namespace, name, dataKey, err)
 		}
 
 		keyChanged := false
 		for i, doc := range docs {
-			rewritten, changed, wasCRD, err := r.maybeStampCRDDoc(doc, caCert)
+			rewritten, changed, wasCRD, crdName, err := r.maybeStampCRDDoc(doc, caCert)
 			if err != nil {
-				return 0, 0, fmt.Errorf("stamp %s/%s[%s] doc#%d: %w", namespace, name, dataKey, i, err)
+				return 0, 0, nil, fmt.Errorf("stamp %s/%s[%s] doc#%d: %w", namespace, name, dataKey, i, err)
 			}
 			if wasCRD {
 				observedTotal++
+			}
+			if crdName != "" {
+				// We publish every CRD we're responsible for, whether or
+				// not we wrote it this pass. That gives the rotation gate
+				// a stable view across idempotent reconciles.
+				crdNames = append(crdNames, crdName)
 			}
 			if changed {
 				docs[i] = rewritten
@@ -403,21 +449,21 @@ func (r *ManagedResourceReconciler) stampSecret(ctx context.Context, namespace, 
 		newPlain := managedresource.JoinDocs(docs)
 		newRaw, err := managedresource.Encode(newPlain, compressed)
 		if err != nil {
-			return 0, 0, fmt.Errorf("encode %s/%s[%s]: %w", namespace, name, dataKey, err)
+			return 0, 0, nil, fmt.Errorf("encode %s/%s[%s]: %w", namespace, name, dataKey, err)
 		}
 		secret.Data[dataKey] = newRaw
 		secretChanged = true
 	}
 
 	if !secretChanged {
-		return 0, observedTotal, nil
+		return 0, observedTotal, crdNames, nil
 	}
 
 	if err := r.HostingClient.Update(ctx, secret); err != nil {
-		return 0, observedTotal, fmt.Errorf("failed to update Secret %s: %w", key, err)
+		return 0, observedTotal, crdNames, fmt.Errorf("failed to update Secret %s: %w", key, err)
 	}
 	logger.Info("Updated ManagedResource resource Secret", "secret", key, "crdsStamped", stampedTotal)
-	return stampedTotal, observedTotal, nil
+	return stampedTotal, observedTotal, crdNames, nil
 }
 
 // crdKind is the Kind name we match when scanning multi-doc YAML for CRDs.
@@ -453,7 +499,13 @@ var crdGVK = schema.GroupVersionKind{
 // `spec.keepObjects=true` invariant on MRs that ship CRDs — a CRD with
 // `conversion.strategy=None` still counts as a CRD for that purpose, so
 // `observed` is set independently of `changed`.
-func (r *ManagedResourceReconciler) maybeStampCRDDoc(doc, caCert []byte) (out []byte, changed, observed bool, err error) {
+//
+// `crdName` is the apiextensions metadata.name of the observed CRD, or
+// the empty string when the doc isn't a CRD. The caller publishes this
+// name on the shared rotation-gate snapshot regardless of whether we
+// rewrote the doc, because gating is about which CRDs the controller
+// is *responsible* for — not which it has just changed.
+func (r *ManagedResourceReconciler) maybeStampCRDDoc(doc, caCert []byte) (out []byte, changed, observed bool, crdName string, err error) {
 	// Cheap GVK gate: parse just TypeMeta first so we don't pay the full
 	// CRD JSON deserializer cost on every ConfigMap / Deployment / etc. in
 	// the same Secret.
@@ -466,22 +518,24 @@ func (r *ManagedResourceReconciler) maybeStampCRDDoc(doc, caCert []byte) (out []
 		// errors are reported only for docs we recognised as CRDs and
 		// failed to handle; an unparsable non-CRD doc is the non-CRD
 		// case, not an error case.
-		return doc, false, false, nil //nolint:nilerr // intentional: see comment
+		return doc, false, false, "", nil //nolint:nilerr // intentional: see comment
 	}
 	if typeOnly.APIVersion != crdGVK.GroupVersion().String() || typeOnly.Kind != crdGVK.Kind {
-		return doc, false, false, nil
+		return doc, false, false, "", nil
 	}
 
 	crd := &apiextensionsv1.CustomResourceDefinition{}
 	if err := sigsyaml.Unmarshal(doc, crd); err != nil {
-		return nil, false, true, fmt.Errorf("decode CRD: %w", err)
+		return nil, false, true, "", fmt.Errorf("decode CRD: %w", err)
 	}
 
 	conv := crd.Spec.Conversion
 	if conv == nil || conv.Strategy != apiextensionsv1.WebhookConverter || conv.Webhook == nil || conv.Webhook.ClientConfig == nil {
 		// CRD with strategy=None or a missing clientConfig — nothing to
 		// stamp. Still counts as observed because the MR ships a CRD.
-		return doc, false, true, nil
+		// We do NOT publish this CRD's name on the rotation gate: gating
+		// only matters for CRDs whose caBundle we control.
+		return doc, false, true, "", nil
 	}
 
 	cc := conv.Webhook.ClientConfig
@@ -495,16 +549,18 @@ func (r *ManagedResourceReconciler) maybeStampCRDDoc(doc, caCert []byte) (out []
 	}
 	if !caChanged && !urlChanged {
 		// Already converged — preserve the original bytes so we don't
-		// trigger a Secret update for this doc.
-		return doc, false, true, nil
+		// trigger a Secret update for this doc. We still return the CRD
+		// name so the caller can publish it on the gate (we're
+		// responsible for keeping it stamped on rotation).
+		return doc, false, true, crd.Name, nil
 	}
 	cc.CABundle = caCert
 
 	rewritten, err := sigsyaml.Marshal(crd)
 	if err != nil {
-		return nil, false, true, fmt.Errorf("encode CRD: %w", err)
+		return nil, false, true, crd.Name, fmt.Errorf("encode CRD: %w", err)
 	}
-	return rewritten, true, true, nil
+	return rewritten, true, true, crd.Name, nil
 }
 
 // loadCABundle reads tls.crt from the hosting-cluster certificate Secret via

@@ -30,6 +30,7 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers/rotationgate"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/webhooks"
 )
@@ -131,12 +132,22 @@ type WebhookReconciler struct {
 	// signal is enough to trigger a full re-stamp pass.
 	RotationTrigger chan<- struct{}
 
-	// RotationGateCRDs is the list of CRD names on the TARGET cluster that
-	// the reconciler polls during the staged phase to confirm caBundle
-	// propagation. Empty disables the gate — staged → active is then
-	// driven by RotationGateTimeout alone (time-based fallback). Set via
-	// --rotation-gate-crds.
-	RotationGateCRDs []string
+	// Gate is the shared rotation-gate snapshot. WebhookReconciler reads
+	// it during the staged rotation phase to learn which CRDs on the
+	// target cluster need their caBundle to show the union bundle before
+	// the new serving cert is promoted. The set is populated by
+	// ManagedResourceReconciler at stamp time — every CRD that
+	// reconciler is currently responsible for is published, and the
+	// union across all MRs becomes the gate.
+	//
+	// Nil disables the gate entirely (snapshot is always empty, gate
+	// check returns propagated=true immediately, and the time-based
+	// fallback via RotationGateTimeout is the only constraint). Pure-
+	// ConfigMap deployments (no --managed-resource-label) leave this
+	// nil, which is correct: they have no GRM hop to wait on; MWC/VWC
+	// reach the target via synchronous Apply inside the same reconcile
+	// pass.
+	Gate *rotationgate.Gate
 
 	// RotationOverlapWindow is the grace duration after the new cert is
 	// promoted (active phase) before the old cert is pruned from the
@@ -168,6 +179,17 @@ func (r *WebhookReconciler) rotationGateTimeout() time.Duration {
 		return r.RotationGateTimeout
 	}
 	return defaultRotationGateTimeout
+}
+
+// gateSnapshot returns the current rotation-gate CRD set. Nil-safe: if
+// no Gate is wired (a deployment without --managed-resource-label, or
+// a test that doesn't exercise rotation), it returns nil and
+// checkPropagation falls through to the empty-gate fast path.
+func (r *WebhookReconciler) gateSnapshot() []string {
+	if r.Gate == nil {
+		return nil
+	}
+	return r.Gate.Snapshot()
 }
 
 // Reconcile handles ConfigMap changes and certificate rotation
@@ -766,16 +788,22 @@ const rotationPromotedAtAnnotation = "webhook-injector.sap.com/rotation-promoted
 
 // checkPropagation returns true if every CRD listed in RotationGateCRDs
 // on the target cluster has BOTH the current leaf and the staged cert in
-// its conversion webhook caBundle. Empty RotationGateCRDs is treated as
-// "no gate" — we return true immediately and let the staged→active
-// transition happen on the next reconcile.
+// its conversion webhook caBundle. The gate set is derived at call
+// time from the shared rotationgate.Gate snapshot — every CRD that
+// ManagedResourceReconciler has published is gated automatically. An
+// empty snapshot (no Gate wired, or no MR reconciler running, or no
+// labeled MRs shipping CRDs yet) is treated as "no gate"; we return
+// true immediately and let the staged→active transition happen on the
+// next reconcile. The time-based fallback via --rotation-gate-timeout
+// then applies if the caller still wants to wait.
 //
 // Errors fetching individual CRDs (NotFound, Forbidden) are logged and
 // treated as "not propagated yet" so they don't poison the gate check.
 // The caller falls back to the time-based gate timeout if propagation
 // can't be confirmed.
 func (r *WebhookReconciler) checkPropagation(ctx context.Context, secret *corev1.Secret) (bool, error) {
-	if len(r.RotationGateCRDs) == 0 {
+	gateCRDs := r.gateSnapshot()
+	if len(gateCRDs) == 0 {
 		return true, nil
 	}
 	logger := log.FromContext(ctx)
@@ -805,7 +833,7 @@ func (r *WebhookReconciler) checkPropagation(ctx context.Context, secret *corev1
 		return false, nil
 	}
 
-	for _, name := range r.RotationGateCRDs {
+	for _, name := range gateCRDs {
 		crd := &apiextensionsv1.CustomResourceDefinition{}
 		if err := r.TargetClient.Get(ctx, types.NamespacedName{Name: name}, crd); err != nil {
 			logger.V(1).Info("checkPropagation: target CRD not (yet) readable",

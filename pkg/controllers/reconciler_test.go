@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers/rotationgate"
 )
 
 func TestWebhookReconciler_ReconcileConfigMap(t *testing.T) {
@@ -871,6 +872,7 @@ func makeRotationReconciler(t *testing.T, objects, targetObjects []client.Object
 		Namespace:      "default",
 		CertValidity:   time.Hour,
 		Scheme:         s,
+		Gate:           rotationgate.New(),
 	}
 }
 
@@ -1147,7 +1149,7 @@ func TestCheckPropagation_EmptyGate(t *testing.T) {
 	secret := &corev1.Secret{
 		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: oldKey},
 	}
-	r := makeRotationReconciler(t, nil, nil) // RotationGateCRDs is unset
+	r := makeRotationReconciler(t, nil, nil) // r.Gate is set by the helper but Replace was never called; Snapshot returns nil.
 	propagated, err := r.checkPropagation(context.Background(), secret)
 	if err != nil {
 		t.Fatalf("checkPropagation: %v", err)
@@ -1179,7 +1181,7 @@ func TestCheckPropagation_BothCertsPresent(t *testing.T) {
 		},
 	}
 	r := makeRotationReconciler(t, nil, []client.Object{crd})
-	r.RotationGateCRDs = []string{"widgets.example.com"}
+	r.Gate.Publish("test", []string{"widgets.example.com"})
 
 	propagated, err := r.checkPropagation(context.Background(), secret)
 	if err != nil {
@@ -1213,7 +1215,7 @@ func TestCheckPropagation_OnlyOldCert(t *testing.T) {
 		},
 	}
 	r := makeRotationReconciler(t, nil, []client.Object{crd})
-	r.RotationGateCRDs = []string{"widgets.example.com"}
+	r.Gate.Publish("test", []string{"widgets.example.com"})
 
 	propagated, err := r.checkPropagation(context.Background(), secret)
 	if err != nil {
@@ -1235,7 +1237,7 @@ func TestCheckPropagation_MissingCRD(t *testing.T) {
 		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: oldKey},
 	}
 	r := makeRotationReconciler(t, nil, nil) // no CRDs on target
-	r.RotationGateCRDs = []string{"missing.example.com"}
+	r.Gate.Publish("test", []string{"missing.example.com"})
 
 	propagated, err := r.checkPropagation(context.Background(), secret)
 	if err != nil {

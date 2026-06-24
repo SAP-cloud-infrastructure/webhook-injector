@@ -31,6 +31,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers"
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers/rotationgate"
 
 	resourcesv1alpha1 "github.com/gardener/gardener/pkg/apis/resources/v1alpha1"
 )
@@ -51,7 +52,6 @@ var (
 	certDir               string
 	certValidity          time.Duration
 	certRotationThreshold float64
-	rotationGateCRDsRaw   string
 	rotationOverlapWindow time.Duration
 	rotationGateTimeout   time.Duration
 	targetKubeconfig      string
@@ -76,12 +76,10 @@ func init() {
 	flag.StringVar(&certDir, "cert-dir", "/tmp/webhook-certs", "Directory to write certificate files")
 	flag.DurationVar(&certValidity, "cert-validity", 90*24*time.Hour, "Certificate validity duration")
 	flag.Float64Var(&certRotationThreshold, "cert-rotation-threshold", 0.2, "Certificate rotation threshold (0-1), rotate when remaining validity falls below this fraction")
-	flag.StringVar(&rotationGateCRDsRaw, "rotation-gate-crds", "",
-		"Comma-separated CRD names on the target cluster to poll for caBundle propagation before promoting the new serving cert during a rotation. Empty disables the gate (time-based fallback via --rotation-gate-timeout).")
 	flag.DurationVar(&rotationOverlapWindow, "rotation-overlap-window", 5*time.Minute,
 		"Grace duration after a new cert is promoted to serving before the old cert is pruned from the trust bundle. Must be long enough for in-flight TLS connections to drain.")
 	flag.DurationVar(&rotationGateTimeout, "rotation-gate-timeout", 2*time.Minute,
-		"Maximum duration to wait for shoot CRDs to show the staged union bundle before promoting the new serving cert anyway. The controller would rather have a working webhook than a stuck rotation.")
+		"Maximum duration to wait for shoot CRDs to show the staged union bundle before promoting the new serving cert anyway. The controller would rather have a working webhook than a stuck rotation. The gated CRD set is auto-discovered from ManagedResourceReconciler's most recent reconcile pass (see pkg/controllers/rotationgate); an empty snapshot collapses the gate to this timeout alone.")
 	flag.StringVar(&targetKubeconfig, "target-kubeconfig", "", "Path to target cluster kubeconfig")
 	flag.BoolVar(&enableLeaderElection, "enable-leader-election", true, "Enable leader election for HA")
 	flag.StringVar(&leaderElectionID, "leader-election-id", "webhook-injector-leader", "Leader election lease name")
@@ -135,7 +133,18 @@ func main() {
 	}
 
 	certSANsList := splitAndTrim(certSANs)
-	rotationGateCRDs := splitAndTrim(rotationGateCRDsRaw)
+
+	// Shared rotation-gate snapshot bridging ManagedResourceReconciler
+	// (publisher) and WebhookReconciler (consumer). Both reconcilers
+	// hold the same *Gate; the MR reconciler calls Publish/Forget at
+	// stamp time, the WebhookReconciler calls Snapshot during the
+	// staged-rotation propagation check. When --managed-resource-label
+	// is unset (pure-ConfigMap deployments) the MR reconciler isn't
+	// registered and nobody publishes — the Snapshot stays empty and
+	// the gate collapses to the time-based --rotation-gate-timeout
+	// fallback, which is correct for those deployments (no GRM hop to
+	// wait on).
+	gate := rotationgate.New()
 
 	// When --managed-resource-label is set the MR reconciler is wired and
 	// needs --external-host / --external-port to rewrite Service-form
@@ -299,7 +308,7 @@ func main() {
 		CertSecretName:        certSecretName,
 		CertValidity:          certValidity,
 		CertRotationThreshold: certRotationThreshold,
-		RotationGateCRDs:      rotationGateCRDs,
+		Gate:                  gate,
 		RotationOverlapWindow: rotationOverlapWindow,
 		RotationGateTimeout:   rotationGateTimeout,
 		Scheme:                mgr.GetScheme(),
@@ -324,6 +333,7 @@ func main() {
 			WebhookLabelValue: mrLabelValue,
 			ExternalHost:      effectiveExternalHost,
 			ForceReconcile:    forceReconcile,
+			Gate:              gate,
 		}
 		if err := mrReconciler.SetupWithManager(mgr, rotationTrigger); err != nil {
 			setupLog.Error(err, "Unable to create ManagedResourceReconciler controller")

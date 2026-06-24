@@ -33,6 +33,7 @@ import (
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers"
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers/rotationgate"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/managedresource"
 )
 
@@ -369,7 +370,7 @@ data:
 	}
 
 	// In-process WebhookReconciler with deterministic phase-machine knobs:
-	//   - RotationGateCRDs empty => checkPropagation returns true immediately,
+	//   - Gate empty => checkPropagation returns true immediately,
 	//     so staged → active happens on the next Reconcile pass.
 	//   - RotationOverlapWindow stays at the default for stages (b)–(d); we
 	//     shrink it just before the prune assertion in (e).
@@ -382,6 +383,7 @@ data:
 		CertValidity:          1 * time.Hour,
 		CertRotationThreshold: 0.5,
 		Scheme:                scheme,
+		Gate:                  rotationgate.New(),
 	}
 	webhookReq := ctrl.Request{NamespacedName: types.NamespacedName{
 		Namespace: "default",
@@ -409,7 +411,7 @@ data:
 	//
 	// IMPORTANT: stageCertificate inside Reconcile re-reads the Secret AFTER
 	// promotion-or-stage to decide which phase branch to dispatch. With an
-	// empty RotationGateCRDs the staged branch promotes in the same pass.
+	// empty Gate the staged branch promotes in the same pass.
 	// So we want to inspect the Secret BEFORE the next Reconcile call, not
 	// after — which means: trigger, Reconcile once (yields staged on disk
 	// transiently and then promoted, all in one pass). To actually observe
@@ -418,7 +420,7 @@ data:
 	// reading the Secret right after stageCertificate runs, which happens at
 	// the top of Reconcile, by using a Reconcile that promotes-but-leaves-
 	// the-bundle. We accept that on disk the Secret transitions to active
-	// in the SAME Reconcile pass when RotationGateCRDs is empty.
+	// in the SAME Reconcile pass when the Gate is empty.
 	//
 	// To observe staged distinctly we set a single non-existent gate CRD
 	// for the first pass: checkPropagation returns false (the gate CRD is
@@ -431,7 +433,7 @@ data:
 
 	// Insert a sentinel gate that doesn't exist on the target cluster so the
 	// first Reconcile lands in staged and requeues without promoting.
-	webhookRec.RotationGateCRDs = []string{"does-not-exist-on-target.example.com"}
+	webhookRec.Gate.Publish("test", []string{"does-not-exist-on-target.example.com"})
 	if _, err := webhookRec.Reconcile(ctx, webhookReq); err != nil {
 		t.Fatalf("Reconcile (stage phase): %v", err)
 	}
@@ -465,7 +467,7 @@ data:
 	// (c) Drive Reconcile again to advance staged → active. Clear the
 	// sentinel gate first so propagation returns true and promote runs.
 	logWithTimestamp(t, "Step (c): Clearing gate and driving Reconcile to promote staged → active...")
-	webhookRec.RotationGateCRDs = nil
+	webhookRec.Gate.Forget("test")
 	if _, err := webhookRec.Reconcile(ctx, webhookReq); err != nil {
 		t.Fatalf("Reconcile (promote phase): %v", err)
 	}
