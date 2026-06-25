@@ -372,8 +372,13 @@ data:
 	// In-process WebhookReconciler with deterministic phase-machine knobs:
 	//   - Gate empty => checkPropagation returns true immediately,
 	//     so staged → active happens on the next Reconcile pass.
-	//   - RotationOverlapWindow stays at the default for stages (b)–(d); we
-	//     shrink it just before the prune assertion in (e).
+	//   - RotationOverlapWindow = 100ms so the prior rotation cycle's
+	//     overlap elapses essentially instantly. We need this even before
+	//     step (e) because the force-rotation gate (isRotationInFlight)
+	//     defers any new force annotation while rotation-promoted-at is
+	//     still within the overlap window. With a 5m default the deferral
+	//     would extend past the test timeout; with 100ms the prior cycle
+	//     prunes on our first Reconcile and the gate clears.
 	webhookRec := &controllers.WebhookReconciler{
 		Client:                crClient,
 		TargetClient:          targetCRClient,
@@ -384,11 +389,30 @@ data:
 		CertRotationThreshold: 0.5,
 		Scheme:                scheme,
 		Gate:                  rotationgate.New(),
+		// Tiny overlap window: the prior rotation block (lines 326-338) just
+		// drove the deployed reconciler into post-promote active with
+		// rotation-promoted-at fresh. The force-rotation gate
+		// (isRotationInFlight in pkg/controllers/reconciler.go) defers any
+		// new force annotation until that overlap elapses and the cycle
+		// prunes back to steady-state active. We shrink the window to ms so
+		// the in-process Reconcile below can prune the prior cycle and clear
+		// the gate before step (a) triggers a fresh force-rotation.
+		RotationOverlapWindow: 100 * time.Millisecond,
 	}
 	webhookReq := ctrl.Request{NamespacedName: types.NamespacedName{
 		Namespace: "default",
 		Name:      "webhook-config",
 	}}
+
+	// Drain the prior rotation cycle: wait for the (tiny) overlap window to
+	// elapse, then drive Reconcile so the in-process reconciler observes the
+	// active-with-promoted-at state, runs handleActivePhase, and prunes back
+	// to steady-state active. After this point isRotationInFlight returns
+	// false and the force-rotation gate in step (a) will not defer.
+	time.Sleep(200 * time.Millisecond)
+	if _, err := webhookRec.Reconcile(ctx, webhookReq); err != nil {
+		t.Fatalf("Reconcile (drain prior cycle): %v", err)
+	}
 
 	// Capture the pre-rotation leaf key. The promote step must change tls.key.
 	// We do NOT assert a specific cert count here: the prior rotation block
@@ -404,10 +428,8 @@ data:
 
 	// (a) Trigger force-rotation again, then drive Reconcile once. The
 	// deployed reconciler is at 0 replicas, so only our in-process pass moves
-	// the Secret. With RotationOverlapWindow defaulting to 5m, the promote
-	// happens on the SECOND Reconcile (the first call lands in PhaseStaged
-	// and returns immediately after checkPropagation, leaving the staged
-	// state visible on the apiserver).
+	// the Secret. The prior cycle was just pruned by the drain Reconcile
+	// above, so the force-rotation gate will not defer.
 	//
 	// IMPORTANT: stageCertificate inside Reconcile re-reads the Secret AFTER
 	// promotion-or-stage to decide which phase branch to dispatch. With an
@@ -498,10 +520,10 @@ data:
 		t.Errorf("active: tls.staged.key must be removed")
 	}
 
-	// (e) Shrink overlap window so the prune fires within budget, wait it
-	// out, and Reconcile to prune.
-	logWithTimestamp(t, "Step (e): Shrinking overlap window to 100ms, waiting 200ms, driving Reconcile to prune...")
-	webhookRec.RotationOverlapWindow = 100 * time.Millisecond
+	// (e) The overlap window is already 100ms (set at construction so the
+	// gate-clearing drain Reconcile above could run). Wait it out and
+	// Reconcile to prune.
+	logWithTimestamp(t, "Step (e): Waiting 200ms for overlap window, driving Reconcile to prune...")
 	time.Sleep(200 * time.Millisecond)
 	if _, err := webhookRec.Reconcile(ctx, webhookReq); err != nil {
 		t.Fatalf("Reconcile (prune phase): %v", err)
