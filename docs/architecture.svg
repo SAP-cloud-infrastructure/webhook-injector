@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1180" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1700 1320" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L0,6 L9,3 z" fill="#374151"/>
@@ -22,246 +22,292 @@
   </defs>
 
   <!-- TITLE -->
-  <text x="800" y="38" text-anchor="middle" font-size="24" font-weight="700" fill="#111">webhook-injector — two-cluster rotation &amp; propagation</text>
-  <text x="800" y="62" text-anchor="middle" font-size="13" fill="#666">staged → active → pruned phase machine · force-rotation gate · MWC / VWC / CRD propagation</text>
+  <text x="850" y="38" text-anchor="middle" font-size="24" font-weight="700" fill="#111">webhook-injector — two-cluster rotation &amp; propagation</text>
+  <text x="850" y="62" text-anchor="middle" font-size="13" fill="#666">staged → active → pruned phase machine · force-rotation gate · MWC / VWC / CRD propagation</text>
+
+  <!-- =========================================================
+       LAYOUT (column-stack inside hosting; clean right edge faces the channel):
+         hosting: x= 30..720  (width 690)
+         channel: x=720..900  (180px reserved, no boxes here ever)
+         target : x=900..1670 (width 770)
+       Inside hosting the boxes use the full inner width (x=60..690) so the
+       right edge of each reconciler box is a clean line to the channel.
+       ========================================================= -->
 
   <!-- ===================== HOSTING CLUSTER ===================== -->
-  <rect x="30" y="90" width="760" height="820" rx="16" fill="#eff6ff" stroke="#1d4ed8" stroke-width="2.5"/>
+  <rect x="30" y="90" width="690" height="1200" rx="16" fill="#eff6ff" stroke="#1d4ed8" stroke-width="2.5"/>
   <text x="50" y="120" font-size="17" font-weight="700" fill="#1d4ed8">Hosting cluster (Gardener seed)</text>
   <text x="50" y="138" font-size="11" fill="#1d4ed8">webhook-injector + webhook-server pod live here</text>
 
-  <!-- Row 1: Inputs (ConfigMap + MR + Secrets) -->
-  <!-- ConfigMap -->
-  <rect x="60" y="160" width="220" height="80" rx="8" fill="#fff" stroke="#374151" stroke-width="1.5"/>
-  <text x="170" y="184" text-anchor="middle" font-size="13" font-weight="700">ConfigMap</text>
-  <text x="170" y="202" text-anchor="middle" font-size="10" fill="#555" font-family="monospace">--webhook-config-name</text>
-  <text x="170" y="220" text-anchor="middle" font-size="10" fill="#555">webhooks.yaml:</text>
-  <text x="170" y="234" text-anchor="middle" font-size="10" fill="#555" font-style="italic">MWC + VWC documents</text>
+  <!-- ====== Hosting Row 1 (y=160..240): Inputs ====== -->
+  <rect x="60" y="160" width="190" height="80" rx="8" fill="#fff" stroke="#374151" stroke-width="1.5"/>
+  <text x="155" y="184" text-anchor="middle" font-size="13" font-weight="700">ConfigMap</text>
+  <text x="155" y="202" text-anchor="middle" font-size="10" fill="#555" font-family="monospace">--webhook-config-name</text>
+  <text x="155" y="220" text-anchor="middle" font-size="10" fill="#555">webhooks.yaml:</text>
+  <text x="155" y="234" text-anchor="middle" font-size="10" fill="#555" font-style="italic">MWC + VWC documents</text>
 
-  <!-- ManagedResources -->
-  <rect x="320" y="160" width="220" height="80" rx="8" fill="#fff" stroke="#374151" stroke-width="1.5"/>
-  <text x="430" y="184" text-anchor="middle" font-size="13" font-weight="700">ManagedResources</text>
-  <text x="430" y="202" text-anchor="middle" font-size="10" fill="#555" font-family="monospace">label=k=v selector</text>
-  <text x="430" y="220" text-anchor="middle" font-size="10" fill="#555">spec.secretRefs[] →</text>
-  <text x="430" y="234" text-anchor="middle" font-size="10" fill="#555" font-style="italic">refs to MR Secrets</text>
+  <rect x="280" y="160" width="190" height="80" rx="8" fill="#fff" stroke="#374151" stroke-width="1.5"/>
+  <text x="375" y="184" text-anchor="middle" font-size="13" font-weight="700">ManagedResources</text>
+  <text x="375" y="202" text-anchor="middle" font-size="10" fill="#555" font-family="monospace">label=k=v selector</text>
+  <text x="375" y="220" text-anchor="middle" font-size="10" fill="#555">spec.secretRefs[] →</text>
+  <text x="375" y="234" text-anchor="middle" font-size="10" fill="#555" font-style="italic">refs to MR Secrets</text>
 
-  <!-- MR Secrets -->
-  <rect x="570" y="160" width="200" height="80" rx="8" fill="#fff" stroke="#374151" stroke-width="1.5"/>
-  <text x="670" y="184" text-anchor="middle" font-size="13" font-weight="700">MR Secrets</text>
-  <text x="670" y="202" text-anchor="middle" font-size="10" fill="#555" font-family="monospace">data[*.yaml(.br)]</text>
-  <text x="670" y="220" text-anchor="middle" font-size="10" fill="#555">embedded CRD YAML</text>
-  <text x="670" y="234" text-anchor="middle" font-size="10" fill="#555" font-style="italic">brotli supported</text>
+  <rect x="500" y="160" width="190" height="80" rx="8" fill="#fff" stroke="#374151" stroke-width="1.5"/>
+  <text x="595" y="184" text-anchor="middle" font-size="13" font-weight="700">MR Secrets</text>
+  <text x="595" y="202" text-anchor="middle" font-size="10" fill="#555" font-family="monospace">data[*.yaml(.br)]</text>
+  <text x="595" y="220" text-anchor="middle" font-size="10" fill="#555">embedded CRD YAML</text>
+  <text x="595" y="234" text-anchor="middle" font-size="10" fill="#555" font-style="italic">brotli supported</text>
 
-  <!-- Row 2: Two reconcilers -->
-  <rect x="60" y="290" width="340" height="170" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="2.5"/>
-  <text x="230" y="316" text-anchor="middle" font-size="15" font-weight="700" fill="#1d4ed8">WebhookReconciler</text>
-  <text x="230" y="334" text-anchor="middle" font-size="10" fill="#666">leader-only · always-on</text>
-  <text x="80" y="358" font-size="11" fill="#222">• Parse MWC/VWC, inject caBundle</text>
-  <text x="80" y="378" font-size="11" fill="#222">• Generate &amp; rotate self-signed cert</text>
-  <text x="80" y="398" font-size="11" fill="#222">• Drive staged → active → pruned</text>
-  <text x="80" y="418" font-size="11" fill="#222">• Apply MWC/VWC to target cluster</text>
-  <text x="80" y="438" font-size="11" fill="#b91c1c" font-weight="600">• Force-rotation gate (deferred if in-flight)</text>
+  <!-- ====== Hosting Row 2 (y=290..460): WebhookReconciler full width ====== -->
+  <rect x="60" y="290" width="630" height="170" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="2.5"/>
+  <text x="375" y="316" text-anchor="middle" font-size="15" font-weight="700" fill="#1d4ed8">WebhookReconciler</text>
+  <text x="375" y="334" text-anchor="middle" font-size="10" fill="#666">leader-only · always-on</text>
+  <text x="80" y="360" font-size="11" fill="#222">• Parse MWC/VWC YAML, inject caBundle</text>
+  <text x="80" y="380" font-size="11" fill="#222">• Generate &amp; rotate self-signed cert</text>
+  <text x="80" y="400" font-size="11" fill="#222">• Drive staged → active → pruned phase machine</text>
+  <text x="80" y="420" font-size="11" fill="#222">• Apply MWC + VWC to the target cluster (synchronous)</text>
+  <text x="80" y="442" font-size="11" fill="#b91c1c" font-weight="600">• Force-rotation gate — deferred if a prior cycle is still in flight</text>
 
-  <rect x="430" y="290" width="340" height="170" rx="10" fill="#fff" stroke="#15803d" stroke-width="2.5"/>
-  <text x="600" y="316" text-anchor="middle" font-size="15" font-weight="700" fill="#15803d">ManagedResourceReconciler</text>
-  <text x="600" y="334" text-anchor="middle" font-size="10" fill="#666">leader-only · opt-in (--managed-resource-label)</text>
-  <text x="450" y="358" font-size="11" fill="#222">• Watch labeled MRs (label-scoped)</text>
-  <text x="450" y="378" font-size="11" fill="#222">• Walk spec.secretRefs, decode .br</text>
-  <text x="450" y="398" font-size="11" fill="#222">• Stamp caBundle on conv=Webhook CRDs</text>
-  <text x="450" y="418" font-size="11" fill="#222">• Rewrite Service → URL (--external-host)</text>
-  <text x="450" y="438" font-size="11" fill="#222">• Patch gardener.cloud/operation=reconcile</text>
+  <!-- ====== Hosting Row 3 (y=490..650): ManagedResourceReconciler full width ====== -->
+  <rect x="60" y="490" width="630" height="160" rx="10" fill="#fff" stroke="#15803d" stroke-width="2.5"/>
+  <text x="375" y="516" text-anchor="middle" font-size="15" font-weight="700" fill="#15803d">ManagedResourceReconciler</text>
+  <text x="375" y="534" text-anchor="middle" font-size="10" fill="#666">leader-only · opt-in via --managed-resource-label</text>
+  <text x="80" y="560" font-size="11" fill="#222">• Watch labeled MRs on hosting (label-scoped, cluster-wide)</text>
+  <text x="80" y="580" font-size="11" fill="#222">• Walk spec.secretRefs, decode brotli .br, stamp caBundle on conv=Webhook CRDs</text>
+  <text x="80" y="600" font-size="11" fill="#222">• Rewrite Service → URL form (--external-host / --external-port)</text>
+  <text x="80" y="620" font-size="11" fill="#222">• Patch gardener.cloud/operation=reconcile after stamp</text>
 
-  <!-- Row 3: Cert Secret -->
-  <rect x="60" y="500" width="340" height="180" rx="10" fill="#fff7ed" stroke="#b45309" stroke-width="2.5"/>
-  <text x="230" y="526" text-anchor="middle" font-size="15" font-weight="700" fill="#b45309">Cert Secret</text>
-  <text x="230" y="543" text-anchor="middle" font-size="10" fill="#666" font-family="monospace">--cert-secret-name</text>
-  <text x="80" y="568" font-size="11" fill="#222" font-family="monospace">tls.crt:    leaf | union (A‖B)</text>
-  <text x="80" y="586" font-size="11" fill="#222" font-family="monospace">tls.key:    served-leaf private key</text>
-  <text x="80" y="604" font-size="11" fill="#222" font-family="monospace">tls.staged.key  (transient, staged only)</text>
-  <text x="80" y="628" font-size="10" fill="#666" font-style="italic">annotations: rotation-phase, started-at,</text>
-  <text x="80" y="642" font-size="10" fill="#666" font-style="italic">promoted-at, force-rotation</text>
-  <text x="80" y="666" font-size="10" fill="#b91c1c" font-weight="600">Five legal phase transitions only.</text>
+  <!-- ====== Hosting Row 4 (y=680..880): Cert Secret + Reloader + server ====== -->
+  <!-- Cert Secret (left half) -->
+  <rect x="60" y="680" width="305" height="200" rx="10" fill="#fff7ed" stroke="#b45309" stroke-width="2.5"/>
+  <text x="212" y="706" text-anchor="middle" font-size="15" font-weight="700" fill="#b45309">Cert Secret</text>
+  <text x="212" y="723" text-anchor="middle" font-size="10" fill="#666" font-family="monospace">--cert-secret-name</text>
+  <text x="80" y="748" font-size="11" fill="#222" font-family="monospace">tls.crt:  leaf | union (A‖B)</text>
+  <text x="80" y="766" font-size="11" fill="#222" font-family="monospace">tls.key:  served-leaf priv key</text>
+  <text x="80" y="784" font-size="11" fill="#222" font-family="monospace">tls.staged.key</text>
+  <text x="190" y="784" font-size="10" fill="#666" font-style="italic">(staged only)</text>
+  <text x="80" y="810" font-size="10" fill="#666" font-style="italic">annotations:</text>
+  <text x="80" y="824" font-size="10" fill="#666" font-style="italic">  rotation-phase, started-at,</text>
+  <text x="80" y="838" font-size="10" fill="#666" font-style="italic">  promoted-at, force-rotation</text>
+  <text x="80" y="864" font-size="10" fill="#b91c1c" font-weight="600">Four legal phase transitions only.</text>
 
-  <!-- Row 3 right: CertificateReloader -->
-  <rect x="430" y="500" width="340" height="80" rx="10" fill="#fff" stroke="#6d28d9" stroke-width="2"/>
-  <text x="600" y="526" text-anchor="middle" font-size="14" font-weight="700" fill="#6d28d9">CertificateReloader</text>
-  <text x="600" y="543" text-anchor="middle" font-size="10" fill="#666">runs on every replica · no leader election</text>
-  <text x="600" y="565" text-anchor="middle" font-size="11" fill="#222">watches Secret → writes tls.crt/tls.key to disk</text>
+  <!-- CertificateReloader (top of right half) -->
+  <rect x="385" y="680" width="305" height="90" rx="10" fill="#fff" stroke="#6d28d9" stroke-width="2"/>
+  <text x="537" y="706" text-anchor="middle" font-size="14" font-weight="700" fill="#6d28d9">CertificateReloader</text>
+  <text x="537" y="723" text-anchor="middle" font-size="10" fill="#666">runs on every replica · no leader election</text>
+  <text x="537" y="746" text-anchor="middle" font-size="11" fill="#222">watches Secret →</text>
+  <text x="537" y="762" text-anchor="middle" font-size="11" fill="#222">writes tls.crt / tls.key to disk</text>
 
-  <!-- webhook-server -->
-  <rect x="430" y="600" width="340" height="80" rx="10" fill="#fff" stroke="#374151" stroke-width="1.5" stroke-dasharray="5 3"/>
-  <text x="600" y="626" text-anchor="middle" font-size="14" font-weight="700">webhook-server pod (sidecar host)</text>
-  <text x="600" y="644" text-anchor="middle" font-size="11" fill="#555">controller-runtime certwatcher · fsnotify reload</text>
-  <text x="600" y="662" text-anchor="middle" font-size="10" fill="#555" font-style="italic">serves https://...-remote-webhook-service:443</text>
+  <!-- webhook-server (bottom of right half) -->
+  <rect x="385" y="790" width="305" height="90" rx="10" fill="#fff" stroke="#374151" stroke-width="1.5" stroke-dasharray="5 3"/>
+  <text x="537" y="816" text-anchor="middle" font-size="14" font-weight="700">webhook-server pod</text>
+  <text x="537" y="834" text-anchor="middle" font-size="10" fill="#555">controller-runtime certwatcher · fsnotify reload</text>
+  <text x="537" y="852" text-anchor="middle" font-size="10" fill="#555" font-style="italic">serves HTTPS on :443</text>
+  <text x="537" y="870" text-anchor="middle" font-size="10" fill="#555">(sidecar with webhook-injector)</text>
 
-  <!-- Phase machine inset, bottom -->
-  <rect x="60" y="710" width="710" height="180" rx="10" fill="#f9fafb" stroke="#374151" stroke-width="1.5"/>
-  <text x="80" y="734" font-size="13" font-weight="700" fill="#111">Rotation phase machine</text>
-  <text x="80" y="752" font-size="10" fill="#666">tracked via webhook-injector.sap.com/rotation-phase on the Cert Secret</text>
+  <!-- ====== Hosting Row 5 (y=910..1040): Phase machine inset ====== -->
+  <rect x="60" y="910" width="630" height="130" rx="10" fill="#f9fafb" stroke="#374151" stroke-width="1.5"/>
+  <text x="80" y="934" font-size="13" font-weight="700" fill="#111">Rotation phase machine</text>
+  <text x="80" y="952" font-size="10" fill="#666">tracked via webhook-injector.sap.com/rotation-phase on the Cert Secret</text>
 
-  <rect x="80" y="775" width="100" height="50" rx="8" fill="#fff" stroke="#9ca3af"/>
-  <text x="130" y="797" text-anchor="middle" font-size="12" font-weight="700">absent</text>
-  <text x="130" y="813" text-anchor="middle" font-size="9" fill="#666">no Secret yet</text>
+  <rect x="80" y="970" width="100" height="50" rx="8" fill="#fff" stroke="#9ca3af"/>
+  <text x="130" y="992" text-anchor="middle" font-size="12" font-weight="700">absent</text>
+  <text x="130" y="1008" text-anchor="middle" font-size="9" fill="#666">no Secret yet</text>
 
-  <rect x="240" y="775" width="100" height="50" rx="8" fill="#fff" stroke="#9ca3af"/>
-  <text x="290" y="797" text-anchor="middle" font-size="12" font-weight="700">staged</text>
-  <text x="290" y="813" text-anchor="middle" font-size="9" fill="#666">A‖B, key=A</text>
+  <rect x="230" y="970" width="100" height="50" rx="8" fill="#fff" stroke="#9ca3af"/>
+  <text x="280" y="992" text-anchor="middle" font-size="12" font-weight="700">staged</text>
+  <text x="280" y="1008" text-anchor="middle" font-size="9" fill="#666">A‖B, key=A</text>
 
-  <rect x="400" y="775" width="100" height="50" rx="8" fill="#fff" stroke="#9ca3af"/>
-  <text x="450" y="797" text-anchor="middle" font-size="12" font-weight="700">active</text>
-  <text x="450" y="813" text-anchor="middle" font-size="9" fill="#666">A‖B, key=B</text>
+  <rect x="380" y="970" width="100" height="50" rx="8" fill="#fff" stroke="#9ca3af"/>
+  <text x="430" y="992" text-anchor="middle" font-size="12" font-weight="700">active</text>
+  <text x="430" y="1008" text-anchor="middle" font-size="9" fill="#666">A‖B, key=B</text>
 
-  <rect x="560" y="775" width="100" height="50" rx="8" fill="#fff" stroke="#9ca3af"/>
-  <text x="610" y="797" text-anchor="middle" font-size="12" font-weight="700">pruned</text>
-  <text x="610" y="813" text-anchor="middle" font-size="9" fill="#666">B (steady)</text>
+  <rect x="530" y="970" width="100" height="50" rx="8" fill="#fff" stroke="#9ca3af"/>
+  <text x="580" y="992" text-anchor="middle" font-size="12" font-weight="700">pruned</text>
+  <text x="580" y="1008" text-anchor="middle" font-size="9" fill="#666">B (steady)</text>
 
-  <line x1="180" y1="800" x2="240" y2="800" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="210" y="793" text-anchor="middle" font-size="9" fill="#374151">rotate</text>
+  <line x1="180" y1="995" x2="230" y2="995" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="205" y="987" text-anchor="middle" font-size="9" fill="#374151">rotate</text>
 
-  <line x1="340" y1="800" x2="400" y2="800" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="370" y="793" text-anchor="middle" font-size="9" fill="#374151">propagated</text>
+  <line x1="330" y1="995" x2="380" y2="995" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="355" y="987" text-anchor="middle" font-size="9" fill="#374151">propagated</text>
 
-  <line x1="500" y1="800" x2="560" y2="800" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="530" y="793" text-anchor="middle" font-size="9" fill="#374151">overlap</text>
+  <line x1="480" y1="995" x2="530" y2="995" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="505" y="987" text-anchor="middle" font-size="9" fill="#374151">overlap</text>
 
-  <!-- Force-rotation gate callout -->
-  <rect x="80" y="845" width="660" height="35" rx="6" fill="#fef3c7" stroke="#b91c1c" stroke-width="1.5"/>
-  <text x="95" y="867" font-size="11" font-weight="700" fill="#b91c1c">force-rotation gate:</text>
-  <text x="225" y="867" font-size="11" fill="#7c2d12">annotation observed while staged or active+overlap is</text>
-  <text x="558" y="867" font-size="11" font-weight="700" fill="#b91c1c">deferred</text>
-  <text x="610" y="867" font-size="11" fill="#7c2d12">(no chain).</text>
+  <!-- ====== Hosting Row 6 (y=1060..1102): Force-rotation gate callout ====== -->
+  <rect x="60" y="1060" width="630" height="42" rx="6" fill="#fef3c7" stroke="#b91c1c" stroke-width="1.5"/>
+  <text x="78" y="1078" font-size="11" font-weight="700" fill="#b91c1c">force-rotation gate:</text>
+  <text x="78" y="1094" font-size="11" fill="#7c2d12">annotation observed while staged or active+overlap is</text>
+  <text x="403" y="1094" font-size="11" font-weight="700" fill="#b91c1c">deferred</text>
+  <text x="453" y="1094" font-size="11" fill="#7c2d12">(no chain rotation; prevents downtime).</text>
 
-  <!-- gardener-resource-manager -->
-  <rect x="800" y="710" width="280" height="180" rx="10" fill="#fff" stroke="#b91c1c" stroke-width="2.5"/>
-  <text x="940" y="738" text-anchor="middle" font-size="15" font-weight="700" fill="#b91c1c">gardener-resource-manager</text>
-  <text x="940" y="756" text-anchor="middle" font-size="11" fill="#666">(runs on hosting, writes to target)</text>
-  <text x="820" y="782" font-size="11" fill="#222">• Reads MR Secrets on hosting</text>
-  <text x="820" y="800" font-size="11" fill="#222">• Decompresses, applies to shoot</text>
-  <text x="820" y="818" font-size="11" fill="#222">• Honours gardener.cloud/</text>
-  <text x="838" y="832" font-size="11" fill="#222">operation=reconcile annotation</text>
-  <text x="820" y="858" font-size="10" fill="#9a3412" font-style="italic">"DO NOT EDIT — managed by GRM"</text>
-  <text x="820" y="874" font-size="10" fill="#9a3412" font-style="italic">on every shoot-side resource</text>
+  <!-- ====== Hosting Row 7 (y=1120..1280): GRM ====== -->
+  <rect x="60" y="1120" width="630" height="160" rx="10" fill="#fff" stroke="#b91c1c" stroke-width="2.5"/>
+  <text x="375" y="1148" text-anchor="middle" font-size="15" font-weight="700" fill="#b91c1c">gardener-resource-manager (GRM)</text>
+  <text x="375" y="1166" text-anchor="middle" font-size="11" fill="#666">runs on hosting, writes to target</text>
+  <text x="90" y="1192" font-size="11" fill="#222">• Reads MR Secrets on the hosting cluster</text>
+  <text x="90" y="1212" font-size="11" fill="#222">• Decompresses (brotli .br supported), validates</text>
+  <text x="90" y="1232" font-size="11" fill="#222">• Applies the unpacked CRDs to the target shoot</text>
+  <text x="90" y="1252" font-size="11" fill="#222">• Honours gardener.cloud/operation=reconcile annotation</text>
+  <text x="90" y="1274" font-size="10" fill="#9a3412" font-style="italic">stamps "DO NOT EDIT — managed by GRM" on shoot resources</text>
 
   <!-- ===================== TARGET CLUSTER ===================== -->
-  <rect x="810" y="90" width="760" height="600" rx="16" fill="#fff7ed" stroke="#b45309" stroke-width="2.5"/>
-  <text x="830" y="120" font-size="17" font-weight="700" fill="#b45309">Target cluster (shoot)</text>
-  <text x="830" y="138" font-size="11" fill="#b45309">where webhook configs are enforced — may be a different cluster</text>
+  <rect x="900" y="90" width="770" height="780" rx="16" fill="#fff7ed" stroke="#b45309" stroke-width="2.5"/>
+  <text x="920" y="120" font-size="17" font-weight="700" fill="#b45309">Target cluster (shoot)</text>
+  <text x="920" y="138" font-size="11" fill="#b45309">where webhook configs are enforced — may be a remote cluster</text>
 
-  <!-- MWC -->
-  <rect x="840" y="170" width="350" height="100" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="2.5"/>
-  <text x="1015" y="196" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">MutatingWebhookConfiguration</text>
-  <text x="1015" y="214" text-anchor="middle" font-size="11" fill="#666">cluster-scoped</text>
-  <text x="855" y="236" font-size="10" fill="#222" font-family="monospace">.webhooks[].clientConfig.caBundle  ← stamped</text>
-  <text x="855" y="254" font-size="10" fill="#222" font-family="monospace">.webhooks[].clientConfig.url        (or .service)</text>
+  <!-- MWC (top-left) -->
+  <rect x="930" y="170" width="350" height="100" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="2.5"/>
+  <text x="1105" y="196" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">MutatingWebhookConfiguration</text>
+  <text x="1105" y="214" text-anchor="middle" font-size="11" fill="#666">cluster-scoped</text>
+  <text x="945" y="236" font-size="10" fill="#222" font-family="monospace">.webhooks[].clientConfig.caBundle  ← stamped</text>
+  <text x="945" y="254" font-size="10" fill="#222" font-family="monospace">.webhooks[].clientConfig.url        (or .service)</text>
 
-  <!-- VWC -->
-  <rect x="1210" y="170" width="350" height="100" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="2.5"/>
-  <text x="1385" y="196" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">ValidatingWebhookConfiguration</text>
-  <text x="1385" y="214" text-anchor="middle" font-size="11" fill="#666">cluster-scoped</text>
-  <text x="1225" y="236" font-size="10" fill="#222" font-family="monospace">.webhooks[].clientConfig.caBundle  ← stamped</text>
-  <text x="1225" y="254" font-size="10" fill="#222" font-family="monospace">.webhooks[].clientConfig.url        (or .service)</text>
+  <!-- VWC (top-right) -->
+  <rect x="1300" y="170" width="350" height="100" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="2.5"/>
+  <text x="1475" y="196" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">ValidatingWebhookConfiguration</text>
+  <text x="1475" y="214" text-anchor="middle" font-size="11" fill="#666">cluster-scoped</text>
+  <text x="1315" y="236" font-size="10" fill="#222" font-family="monospace">.webhooks[].clientConfig.caBundle  ← stamped</text>
+  <text x="1315" y="254" font-size="10" fill="#222" font-family="monospace">.webhooks[].clientConfig.url        (or .service)</text>
 
-  <!-- CRDs -->
-  <rect x="840" y="300" width="720" height="120" rx="10" fill="#fff" stroke="#15803d" stroke-width="2.5"/>
-  <text x="1200" y="326" text-anchor="middle" font-size="14" font-weight="700" fill="#15803d">CustomResourceDefinition</text>
-  <text x="1200" y="344" text-anchor="middle" font-size="11" fill="#666">spec.conversion.strategy = Webhook</text>
-  <text x="860" y="368" font-size="10" fill="#222" font-family="monospace">.spec.conversion.webhook.clientConfig.caBundle  ← stamped via MR → GRM</text>
-  <text x="860" y="386" font-size="10" fill="#222" font-family="monospace">.spec.conversion.webhook.clientConfig.url       ← Service → URL rewrite</text>
-  <text x="860" y="408" font-size="10" fill="#666" font-style="italic">conversion=None CRDs and unlabeled MRs: untouched</text>
+  <!-- CRD (middle) -->
+  <rect x="930" y="350" width="720" height="120" rx="10" fill="#fff" stroke="#15803d" stroke-width="2.5"/>
+  <text x="1290" y="376" text-anchor="middle" font-size="14" font-weight="700" fill="#15803d">CustomResourceDefinition</text>
+  <text x="1290" y="394" text-anchor="middle" font-size="11" fill="#666">spec.conversion.strategy = Webhook</text>
+  <text x="950" y="418" font-size="10" fill="#222" font-family="monospace">.spec.conversion.webhook.clientConfig.caBundle  ← stamped via MR → GRM</text>
+  <text x="950" y="436" font-size="10" fill="#222" font-family="monospace">.spec.conversion.webhook.clientConfig.url       ← Service → URL rewrite</text>
+  <text x="950" y="458" font-size="10" fill="#666" font-style="italic">conversion=None CRDs and unlabeled MRs: untouched</text>
 
   <!-- apiserver -->
-  <rect x="840" y="450" width="720" height="100" rx="10" fill="#fff" stroke="#374151" stroke-width="1.5" stroke-dasharray="5 3"/>
-  <text x="1200" y="478" text-anchor="middle" font-size="14" font-weight="700">target apiserver</text>
-  <text x="1200" y="498" text-anchor="middle" font-size="11" fill="#555">admission chain: invokes MWC/VWC on every CR write</text>
-  <text x="1200" y="516" text-anchor="middle" font-size="11" fill="#555">conversion: invokes CRD webhook on read across versions</text>
-  <text x="1200" y="538" text-anchor="middle" font-size="10" fill="#9ca3af" font-style="italic">caBundle must match the leaf the webhook server is currently serving</text>
+  <rect x="930" y="550" width="720" height="100" rx="10" fill="#fff" stroke="#374151" stroke-width="1.5" stroke-dasharray="5 3"/>
+  <text x="1290" y="578" text-anchor="middle" font-size="14" font-weight="700">target apiserver</text>
+  <text x="1290" y="598" text-anchor="middle" font-size="11" fill="#555">admission chain: invokes MWC/VWC on every CR write</text>
+  <text x="1290" y="616" text-anchor="middle" font-size="11" fill="#555">conversion: invokes CRD webhook on read across versions</text>
+  <text x="1290" y="638" text-anchor="middle" font-size="10" fill="#9ca3af" font-style="italic">caBundle must match the leaf the webhook server is currently serving</text>
 
-  <!-- Verification result panel -->
-  <rect x="840" y="580" width="720" height="100" rx="10" fill="#f0fdf4" stroke="#15803d" stroke-width="2"/>
-  <text x="1200" y="606" text-anchor="middle" font-size="13" font-weight="700" fill="#15803d">Real-cluster verification (a-qa-de-200 / m-qa-de-200)</text>
-  <text x="860" y="628" font-size="11" fill="#0a4a25"><tspan font-weight="700">Admission loop:</tspan> 178/178 expected validation rejections — 0 errors</text>
-  <text x="860" y="646" font-size="11" fill="#0a4a25"><tspan font-weight="700">Conversion loop:</tspan> 238/238 successful v1alpha2 → v1alpha1 conversions — 0 errors</text>
-  <text x="860" y="664" font-size="11" fill="#15803d" font-weight="700">416 webhook calls across full staged→active→pruned cycle · zero downtime</text>
+  <!-- ===================== ARROWS =====================
+       Hosting-internal arrows are vertical between stacked boxes.
+       Cross-cluster arrows exit the hosting box through its clean right edge
+       (x=720) into the empty channel and enter target boxes from the left.
+       ===================== -->
 
-  <!-- ====================== ARROWS ====================== -->
   <!-- ConfigMap → WebhookReconciler -->
-  <line x1="170" y1="240" x2="170" y2="290" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrow-blue)"/>
-  <text x="180" y="272" font-size="10" fill="#1d4ed8">watch</text>
+  <line x1="155" y1="240" x2="155" y2="290" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <text x="165" y="270" font-size="10" fill="#1d4ed8">watch</text>
 
-  <!-- ManagedResources → MRReconciler -->
-  <line x1="430" y1="240" x2="500" y2="290" stroke="#15803d" stroke-width="2" marker-end="url(#arrow-green)"/>
-  <text x="475" y="270" font-size="10" fill="#15803d">watch (label-scoped)</text>
+  <!-- ManagedResources → MRReconciler: route through the corridor x=700..712
+       which is OUTSIDE the WebhookReconciler box (which ends at x=690) and
+       INSIDE the hosting cluster boundary (which ends at x=720). -->
+  <polyline points="470,240 700,240 700,520 691,520" stroke="#15803d" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+  <text x="500" y="262" font-size="10" fill="#15803d">watch (label-scoped)</text>
 
-  <!-- MR Secrets ← MRReconciler (read + write) -->
-  <line x1="670" y1="240" x2="670" y2="290" stroke="#15803d" stroke-width="2" marker-end="url(#arrow-green)"/>
-  <text x="680" y="265" font-size="10" fill="#15803d">read</text>
-  <line x1="690" y1="290" x2="690" y2="240" stroke="#15803d" stroke-width="2" marker-end="url(#arrow-green)" stroke-dasharray="4 3"/>
-  <text x="700" y="280" font-size="10" fill="#15803d" font-style="italic">stamp</text>
+  <!-- MR Secrets → MRReconciler (read): same corridor, x=706 -->
+  <polyline points="595,240 706,240 706,525 691,525" stroke="#15803d" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+  <text x="610" y="262" font-size="10" fill="#15803d">read</text>
 
-  <!-- WebhookReconciler → Cert Secret -->
-  <line x1="230" y1="460" x2="230" y2="500" stroke="#b45309" stroke-width="2" marker-end="url(#arrow-orange)"/>
-  <text x="240" y="485" font-size="10" fill="#b45309">generate / rotate</text>
+  <!-- MRReconciler → MR Secrets (stamp): same corridor, x=712, dashed.
+       Note: the arrow ENTERS MR Secrets from below (its bottom edge y=240). -->
+  <polyline points="691,545 712,545 712,260 595,260" stroke="#15803d" stroke-width="2" fill="none" marker-end="url(#arrow-green)" stroke-dasharray="4 3"/>
+  <text x="540" y="278" font-size="10" fill="#15803d" font-style="italic">stamp</text>
 
-  <!-- Cert Secret → CertificateReloader -->
-  <line x1="400" y1="540" x2="430" y2="540" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow-purple)"/>
-  <text x="415" y="533" text-anchor="middle" font-size="9" fill="#6d28d9">watch</text>
+  <!-- WebhookReconciler → MRReconciler (rotation signal, vertical between the stacked reconciler boxes) -->
+  <line x1="375" y1="460" x2="375" y2="490" stroke="#b91c1c" stroke-width="1.5" stroke-dasharray="3 2" marker-end="url(#arrow-red)"/>
+  <text x="385" y="479" font-size="9" fill="#b91c1c" font-weight="600">rotation signal</text>
 
-  <!-- CertificateReloader → webhook-server (disk) -->
-  <line x1="600" y1="580" x2="600" y2="600" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow-purple)"/>
-  <text x="610" y="595" font-size="9" fill="#6d28d9">disk + fsnotify</text>
+  <!-- WebhookReconciler → Cert Secret: route through the left-side corridor
+       (x=45) between the hosting cluster boundary (x=30) and the reconciler
+       boxes (x=60). This avoids crossing the MRReconciler box, which spans
+       x=60..690 at y=490..650. Path: exit WebhookReconciler at its
+       bottom-left (60, 440), go left to x=45, down to y=750 (mid-CertSecret),
+       right to Cert Secret left edge (60, 750). -->
+  <polyline points="60,440 45,440 45,750 60,750" stroke="#b45309" stroke-width="2" fill="none" marker-end="url(#arrow-orange)"/>
+  <text x="52" y="595" font-size="10" fill="#b45309" transform="rotate(-90 52 595)">generate / rotate</text>
 
-  <!-- WebhookReconciler → MRReconciler (rotation signal) -->
-  <line x1="400" y1="320" x2="430" y2="320" stroke="#b91c1c" stroke-width="1.5" stroke-dasharray="3 2" marker-end="url(#arrow-red)"/>
-  <text x="415" y="312" text-anchor="middle" font-size="9" fill="#b91c1c" font-weight="600">rotation signal</text>
+  <!-- Cert Secret → CertificateReloader (horizontal between the two halves of row 4) -->
+  <line x1="365" y1="725" x2="385" y2="725" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow-purple)"/>
+  <text x="375" y="718" text-anchor="middle" font-size="9" fill="#6d28d9">watch</text>
 
-  <!-- MR Secrets (top) → GRM (bottom) — long but stays inside hosting box -->
-  <path d="M 670 240 Q 800 240 800 800" stroke="#b91c1c" stroke-width="2.5" fill="none" marker-end="url(#arrow-red)"/>
-  <text x="780" y="700" font-size="10" fill="#b91c1c">GRM reads MR Secrets</text>
+  <!-- CertificateReloader → webhook-server (straight down within the right half) -->
+  <line x1="537" y1="770" x2="537" y2="790" stroke="#6d28d9" stroke-width="2" marker-end="url(#arrow-purple)"/>
+  <text x="547" y="785" font-size="9" fill="#6d28d9">disk + fsnotify</text>
 
-  <!-- Cross-cluster: WebhookReconciler → target MWC -->
-  <path d="M 400 370 Q 700 270 840 220" stroke="#1d4ed8" stroke-width="2.5" fill="none" marker-end="url(#arrow-blue)"/>
-  <text x="620" y="280" font-size="11" font-weight="700" fill="#1d4ed8">apply MWC + caBundle</text>
-  <text x="620" y="295" font-size="10" fill="#1d4ed8" font-style="italic">--target-kubeconfig</text>
+  <!-- MR Secrets read path also covered above; MRReconciler reads Cert Secret too — via the in-process gate signal we already render. -->
 
-  <!-- Cross-cluster: WebhookReconciler → target VWC -->
-  <path d="M 400 400 Q 850 360 1210 230" stroke="#1d4ed8" stroke-width="2.5" fill="none" marker-end="url(#arrow-blue)"/>
-  <text x="1100" y="320" font-size="11" font-weight="700" fill="#1d4ed8">apply VWC + caBundle</text>
+  <!-- ===== Cross-cluster MWC apply (blue) =====
+       Exit WebhookReconciler RIGHT edge (x=690) at y=355.
+       Travel east through the channel (x=720..900) at y=220 (MWC vertical center).
+       Vertical segment at x=750 from y=355 up to y=220.
+       Enter MWC at (930, 220). -->
+  <polyline points="690,355 750,355 750,220 930,220" stroke="#1d4ed8" stroke-width="2.5" fill="none" marker-end="url(#arrow-blue)"/>
+  <text x="760" y="300" font-size="11" font-weight="700" fill="#1d4ed8">apply MWC</text>
+  <text x="760" y="316" font-size="10" fill="#1d4ed8" font-style="italic">+ inject caBundle</text>
 
-  <!-- Cross-cluster: GRM → target CRDs -->
-  <path d="M 1080 770 Q 1300 600 1200 420" stroke="#b91c1c" stroke-width="2.5" fill="none" marker-end="url(#arrow-red)"/>
-  <text x="1280" y="600" font-size="11" font-weight="700" fill="#b91c1c">GRM sync → CRDs</text>
-  <text x="1280" y="615" font-size="10" fill="#b91c1c" font-style="italic">unpack &amp; apply</text>
+  <!-- ===== Cross-cluster VWC apply (blue) =====
+       Exit WebhookReconciler RIGHT edge (x=690) at y=395.
+       Travel east through the channel (x=720..900) at y=220 (VWC vertical center).
+       Vertical segment at x=820 from y=395 up to y=220.
+       Enter VWC at (1300, 220).
+       Note: this vertical at x=820 is well separated from the MWC vertical at x=750. -->
+  <polyline points="690,395 820,395 820,220 1300,220" stroke="#1d4ed8" stroke-width="2.5" fill="none" marker-end="url(#arrow-blue)"/>
+  <text x="830" y="340" font-size="11" font-weight="700" fill="#1d4ed8">apply VWC</text>
+  <text x="830" y="356" font-size="10" fill="#1d4ed8" font-style="italic">+ inject caBundle</text>
+  <text x="760" y="465" font-size="9" fill="#1d4ed8" font-style="italic">via --target-kubeconfig</text>
 
-  <!-- webhook-server → target apiserver (admission/conversion calls) -->
-  <path d="M 770 640 Q 850 580 840 500" stroke="#6d28d9" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
-  <text x="810" y="595" font-size="10" font-weight="700" fill="#6d28d9">HTTPS</text>
-  <text x="810" y="610" font-size="9" fill="#6d28d9" font-style="italic">apiserver→webhook</text>
+  <!-- ===== Cross-cluster GRM → CRD (red) =====
+       Exit GRM RIGHT edge (x=690) at y=1190 (mid-GRM).
+       Travel east through the channel at x=860 (well separated from blue at 820).
+       Up from y=1190 to y=410 (mid-CRD).
+       Enter CRD at (930, 410). -->
+  <polyline points="690,1190 860,1190 860,410 930,410" stroke="#b91c1c" stroke-width="2.5" fill="none" marker-end="url(#arrow-red)"/>
+  <text x="870" y="800" font-size="12" font-weight="700" fill="#b91c1c">GRM sync</text>
+  <text x="870" y="816" font-size="10" fill="#b91c1c" font-style="italic">unpack &amp; apply</text>
+  <text x="870" y="830" font-size="10" fill="#b91c1c" font-style="italic">to shoot</text>
 
-  <!-- target apiserver → verification box -->
-  <line x1="1200" y1="550" x2="1200" y2="580" stroke="#15803d" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <!-- ===== Cross-cluster webhook-server → target apiserver (purple) =====
+       Exit webhook-server RIGHT edge (x=690) at y=835.
+       Vertical at x=780 to y=600 (mid-apiserver).
+       Enter apiserver at (930, 600).
+       x=780 is in the channel and well separated from blue at 750/820 and red at 860. -->
+  <polyline points="690,835 780,835 780,600 930,600" stroke="#6d28d9" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
+  <text x="790" y="700" font-size="11" font-weight="700" fill="#6d28d9">HTTPS</text>
+  <text x="790" y="716" font-size="10" fill="#6d28d9" font-style="italic">apiserver→webhook</text>
 
-  <!-- ====================== LEGEND ====================== -->
-  <rect x="810" y="920" width="760" height="240" rx="10" fill="#fafafa" stroke="#9ca3af" stroke-width="1"/>
-  <text x="830" y="945" font-size="13" font-weight="700" fill="#111">Legend</text>
+  <!-- MWC/VWC → apiserver (target-internal, the apiserver dispatches to them) -->
+  <line x1="1105" y1="270" x2="1105" y2="550" stroke="#374151" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="1475" y1="270" x2="1475" y2="550" stroke="#374151" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="1115" y="510" font-size="9" fill="#9ca3af" font-style="italic">admission dispatch</text>
+  <text x="1485" y="510" font-size="9" fill="#9ca3af" font-style="italic">admission dispatch</text>
 
-  <line x1="830" y1="970" x2="880" y2="970" stroke="#1d4ed8" stroke-width="2.5"/>
-  <text x="895" y="974" font-size="11" fill="#222"><tspan font-weight="600">MWC/VWC path</tspan> — synchronous apply from WebhookReconciler to target apiserver</text>
+  <!-- CRD → apiserver (conversion dispatch) -->
+  <line x1="1290" y1="470" x2="1290" y2="550" stroke="#374151" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="1300" y="515" font-size="9" fill="#9ca3af" font-style="italic">conversion dispatch</text>
 
-  <line x1="830" y1="995" x2="880" y2="995" stroke="#15803d" stroke-width="2.5"/>
-  <text x="895" y="999" font-size="11" fill="#222"><tspan font-weight="600">ManagedResource path</tspan> — label-scoped watch + Secret stamp on hosting</text>
+  <!-- ===================== LEGEND ===================== -->
+  <rect x="900" y="900" width="770" height="320" rx="10" fill="#fafafa" stroke="#9ca3af" stroke-width="1"/>
+  <text x="920" y="928" font-size="14" font-weight="700" fill="#111">Legend</text>
 
-  <line x1="830" y1="1020" x2="880" y2="1020" stroke="#b45309" stroke-width="2.5"/>
-  <text x="895" y="1024" font-size="11" fill="#222"><tspan font-weight="600">Certificate writes</tspan> — generate / stage / promote / prune the Cert Secret</text>
+  <line x1="920" y1="955" x2="975" y2="955" stroke="#1d4ed8" stroke-width="2.5" marker-end="url(#arrow-blue)"/>
+  <text x="990" y="960" font-size="12" fill="#222"><tspan font-weight="600">MWC/VWC path</tspan> — synchronous apply from WebhookReconciler to the target apiserver</text>
 
-  <line x1="830" y1="1045" x2="880" y2="1045" stroke="#6d28d9" stroke-width="2.5"/>
-  <text x="895" y="1049" font-size="11" fill="#222"><tspan font-weight="600">Disk + serving</tspan> — reloader writes files, webhook server answers HTTPS</text>
+  <line x1="920" y1="985" x2="975" y2="985" stroke="#15803d" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="990" y="990" font-size="12" fill="#222"><tspan font-weight="600">ManagedResource path</tspan> — label-scoped watch + read/stamp of MR Secrets on hosting</text>
 
-  <line x1="830" y1="1070" x2="880" y2="1070" stroke="#b91c1c" stroke-width="2.5"/>
-  <text x="895" y="1074" font-size="11" fill="#222"><tspan font-weight="600">GRM path</tspan> — gardener-resource-manager bridges hosting Secrets to target CRDs</text>
+  <line x1="920" y1="1015" x2="975" y2="1015" stroke="#b45309" stroke-width="2.5" marker-end="url(#arrow-orange)"/>
+  <text x="990" y="1020" font-size="12" fill="#222"><tspan font-weight="600">Certificate writes</tspan> — generate / stage / promote / prune the Cert Secret</text>
 
-  <line x1="830" y1="1095" x2="880" y2="1095" stroke="#b91c1c" stroke-width="1.5" stroke-dasharray="3 2"/>
-  <text x="895" y="1099" font-size="11" fill="#222"><tspan font-weight="600">Async signal</tspan> — non-blocking rotation fan-out from WebhookReconciler to MR reconciler</text>
+  <line x1="920" y1="1045" x2="975" y2="1045" stroke="#6d28d9" stroke-width="2.5" marker-end="url(#arrow-purple)"/>
+  <text x="990" y="1050" font-size="12" fill="#222"><tspan font-weight="600">Disk + serving</tspan> — reloader writes files, webhook server answers HTTPS calls from target</text>
 
-  <text x="830" y="1130" font-size="10" fill="#666" font-style="italic">Solid arrows are reconcile reads/writes. Dashed are async signals or "DO NOT EDIT" reminders.</text>
-  <text x="830" y="1148" font-size="10" fill="#666" font-style="italic">All four target-cluster resources (MWC, VWC, CRD via MR/GRM) converge on the same caBundle within one reconcile cycle.</text>
+  <line x1="920" y1="1075" x2="975" y2="1075" stroke="#b91c1c" stroke-width="2.5" marker-end="url(#arrow-red)"/>
+  <text x="990" y="1080" font-size="12" fill="#222"><tspan font-weight="600">GRM path</tspan> — gardener-resource-manager bridges hosting Secrets to target CRDs</text>
+
+  <line x1="920" y1="1105" x2="975" y2="1105" stroke="#b91c1c" stroke-width="1.5" stroke-dasharray="3 2" marker-end="url(#arrow-red)"/>
+  <text x="990" y="1110" font-size="12" fill="#222"><tspan font-weight="600">Async signal</tspan> — non-blocking rotation fan-out between reconcilers</text>
+
+  <line x1="920" y1="1135" x2="975" y2="1135" stroke="#374151" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="990" y="1140" font-size="12" fill="#222"><tspan font-weight="600">Target-internal</tspan> — apiserver dispatches to MWC/VWC/CRD webhooks during requests</text>
+
+  <text x="920" y="1180" font-size="11" fill="#666" font-style="italic">All cross-cluster arrows route through the empty corridor between the two cluster boxes.</text>
+  <text x="920" y="1198" font-size="11" fill="#666" font-style="italic">No arrow crosses any box; vertical segments in the corridor are at distinct x-coordinates per path.</text>
 </svg>
