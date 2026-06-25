@@ -233,6 +233,8 @@ webhook-injector \
 
 ### Gardener Seed Deployment
 
+![Deployment shape on a Gardener seed](docs/deployment-shape.svg)
+
 When webhook-injector runs on a Gardener seed, the CRDs it must stamp don't live directly in the shoot apiserver — they are wrapped inside `ManagedResource` objects on the seed, and `gardener-resource-manager` (GRM) reconciles them into the shoot. Stamping the shoot-side CRD directly would produce a thrash loop: GRM would overwrite the stamp on its next sync from the (unstamped) Secret on the seed.
 
 `--managed-resource-label` enables `ManagedResourceReconciler`, which stamps the CRDs at the source — the `ManagedResource`'s referenced Secret on the hosting cluster — so the stamp survives GRM's next sync. The reconciler:
