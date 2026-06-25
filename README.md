@@ -277,7 +277,8 @@ webhook-injector exposes Prometheus metrics at `<metrics-addr>/metrics` (default
 | `certificate_rotations_total` | Counter | Certificate rotations by `reason` label: `initial`, `expired`, `san_mismatch`, `force_rotation` |
 | `certificate_expiry_time_seconds` | Gauge | Unix timestamp when the current TLS certificate expires |
 | `cert_files_written_total` | Counter | Times certificate files were written to disk by the reloader |
-| `certificate_rotation_phase_transitions_total{from,to}` | Counter | Rotation phase-machine transitions; labels drawn from {absent, active, staged, pruned}. Five legal pairs (absent→active, active→staged, staged→staged, staged→active, active→pruned); any other pair indicates a controller bug |
+| `certificate_rotation_phase_transitions_total{from,to}` | Counter | Rotation phase-machine transitions; labels drawn from {absent, active, staged, pruned}. Four legal pairs (absent→active, active→staged, staged→active, active→pruned); any other pair indicates a controller bug |
+| `certificate_force_rotation_deferred_total` | Counter | Reconcile passes in which a force-rotation annotation was held back because a prior rotation cycle was still in flight (phase=staged, or phase=active with `rotation-promoted-at` still set). The annotation stays on the Secret and is consumed once the cycle reaches steady state |
 | `target_stamps_total{kind,result}` | Counter | Target-cluster MWC/VWC apply outcomes by `kind` (MutatingWebhookConfiguration, ValidatingWebhookConfiguration) and `result` (stamped, converged, error) |
 | `rotation_fanout_events_total{kind,outcome}` | Counter | Rotation fan-out events to the ManagedResource reconciler, by `kind=ManagedResource` and `outcome` (emitted, dropped) |
 | `managed_resource_stamps_total{result}` | Counter | Per-MR reconcile outcomes (stamped, converged, error) |
@@ -288,6 +289,36 @@ webhook-injector exposes Prometheus metrics at `<metrics-addr>/metrics` (default
 | `managed_resource_unhealthy_total{condition,status}` | Counter | MRs whose `ResourcesApplied`/`ResourcesHealthy` is present and not `True` |
 
 Standard controller-runtime metrics (reconcile latency, queue depth, etc.) are also included.
+
+## Alerts
+
+Prometheus alert rules consuming the metrics above are maintained as a Helm chart in the [`cloudoperators/controlplane-operations`](https://github.com/cloudoperators/controlplane-operations) repository, under [`charts/controlplane-operations/alerts/controlplane-remote.yaml`](https://github.com/cloudoperators/controlplane-operations/blob/main/charts/controlplane-operations/alerts/controlplane-remote.yaml). They are shipped as part of the `controlplane-operations` Greenhouse plugin and rendered into a `PrometheusRule` named `release-name-alerts-controlplane-remote`, group `controlplane-remote`.
+
+Each alert can be independently disabled or have its `for`, `severity`, `service`, and `support_group` overridden via the Helm values pattern `prometheusRules.<AlertName>.<field>` (with `prometheusRules.disabled.<AlertName>: true` to disable).
+
+### Certificate expiry (alertable signal: time-to-expiry of the live cert)
+
+| Alert | Severity | Triggers when |
+|---|---|---|
+| `WebhookCertificateNearExpiry` | warning | `(certificate_expiry_time_seconds - time()) < 90d × 0.2` — rotation threshold crossed without a rotation having happened |
+| `WebhookCertificateAboutToExpire` | critical | `(certificate_expiry_time_seconds - time()) < 3d` — certificate expires within 3 days |
+
+### Propagation chain (alertable signal: caBundle is not reaching the consumer)
+
+| Alert | Severity | Triggers when |
+|---|---|---|
+| `WebhookTargetStampErrors` | critical | `rate(target_stamps_total{result="error"}[10m]) > 0` — MWC/VWC apply on the target cluster is failing |
+| `WebhookManagedResourceStampErrors` | critical | `rate(managed_resource_stamps_total{result="error"}[10m]) > 0` — MR Secret stamping on the hosting cluster is failing |
+| `WebhookManagedResourceUnhealthy` | warning | `rate(managed_resource_unhealthy_total[15m]) > 0` — GRM reports a labeled MR with `ResourcesApplied` / `ResourcesHealthy` not `True` |
+| `WebhookManagedResourceForceReconcilePatchErrors` | warning | `rate(managed_resource_force_reconcile_total{result="error"}[15m]) > 0` — patching `gardener.cloud/operation=reconcile` on the MR failed (GRM-kick degraded; propagation will rely on GRM's own watch/sync cadence) |
+
+### Configuration safety
+
+| Alert | Severity | Triggers when |
+|---|---|---|
+| `WebhookManagedResourceKeepObjectsViolation` | warning | `rate(managed_resource_keep_objects_violations_total[15m]) > 0` — a labeled MR ships CRDs without `spec.keepObjects=true`; deleting that MR would cascade-delete shoot-side CRDs and every custom resource of those kinds |
+
+To add a new alert, follow the convention already in `controlplane-remote.yaml`: Helm `dig` templating for `for`/`severity`/`service`/`support_group`, an `enabled` toggle via `prometheusRules.disabled.<AlertName>`, the shared `controlplane-operations.additionalRuleLabels` include, and a `#TODO: add playbook` placeholder if no playbook URL exists yet.
 
 ## Testing
 
