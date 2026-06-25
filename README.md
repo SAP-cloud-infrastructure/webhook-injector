@@ -20,6 +20,8 @@ A Kubernetes controller that runs as a sidecar to webhook servers, managing webh
 
 ## Architecture
 
+![Architecture diagram](docs/architecture.svg)
+
 webhook-injector runs as a sidecar with up to three controllers:
 
 - **WebhookReconciler** (leader only): Watches a user-authored ConfigMap that carries `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` YAML, manages the certificate Secret on the hosting cluster, injects the CA bundle, and applies the resulting MWC/VWC to the target cluster (creating if missing). Does not author CRDs — those flow through `ManagedResource` objects.
