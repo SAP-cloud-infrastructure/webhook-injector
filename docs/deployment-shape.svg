@@ -144,10 +144,12 @@
   <rect x="460" y="565" width="220" height="130" rx="10" fill="#fff" stroke="#15803d" stroke-width="2"/>
   <text x="570" y="589" text-anchor="middle" font-size="13" font-weight="700" fill="#15803d">ManagedResource + Secret</text>
   <text x="570" y="604" text-anchor="middle" font-size="9" fill="#666">labeled selector</text>
-  <text x="472" y="626" font-size="10" font-family="monospace">spec.secretRefs[] →</text>
-  <text x="472" y="644" font-size="10" font-family="monospace">data[*.yaml(.br)]</text>
-  <text x="472" y="660" font-size="9" fill="#444">embedded CRDs with</text>
-  <text x="472" y="674" font-size="9" fill="#444">caBundle stamped in</text>
+  <text x="472" y="624" font-size="10" font-family="monospace">spec.secretRefs[] →</text>
+  <text x="472" y="640" font-size="10" font-family="monospace">data[*.yaml(.br)]</text>
+  <text x="472" y="654" font-size="9" fill="#444">embedded CRDs +</text>
+  <text x="472" y="666" font-size="9" fill="#444">stamped caBundle</text>
+  <text x="472" y="684" font-size="10" font-family="monospace" fill="#b91c1c">spec.keepObjects: true</text>
+  <text x="619" y="684" font-size="9" fill="#b91c1c" font-style="italic">required</text>
 
   <!-- Service: lives in the "between Pods" corridor, x=730..900 ish, vertically aligned to span row 2 -->
   <rect x="730" y="565" width="200" height="130" rx="10" fill="#fff" stroke="#0891b2" stroke-width="2.5"/>
