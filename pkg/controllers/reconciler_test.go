@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers/rotationgate"
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
 )
 
 func TestWebhookReconciler_ReconcileConfigMap(t *testing.T) {
@@ -437,7 +440,7 @@ func TestWebhookReconciler_CheckCertificates_ForceRotation_Annotation(t *testing
 			Name:      "test-certs",
 			Namespace: "default",
 			Annotations: map[string]string{
-				ForceRotationAnnotation: "true",
+				ForceRotationAnnotation: annotationTrue,
 			},
 		},
 		Type: corev1.SecretTypeTLS,
@@ -488,7 +491,7 @@ func TestWebhookReconciler_RemovesAnnotationAfterRotation(t *testing.T) {
 			Name:      "test-certs",
 			Namespace: "default",
 			Annotations: map[string]string{
-				ForceRotationAnnotation: "true",
+				ForceRotationAnnotation: annotationTrue,
 			},
 		},
 		Type: corev1.SecretTypeTLS,
@@ -960,9 +963,14 @@ func TestStageCertificate_InitialBootstrap(t *testing.T) {
 	}
 }
 
-// TestStageCertificate_ReStage covers force-rotation re-triggered during
-// the staged phase. The previously-staged candidate is replaced with a
-// fresh one, NOT chained on top — the bundle stays at 2 certs.
+// TestStageCertificate_ReStage covers the low-level contract of
+// stageCertificate when called from a staged-phase Secret: the
+// previously-staged candidate is replaced with a fresh one, NOT chained
+// on top — the bundle stays at 2 certs. The Reconcile-level
+// force-rotation gate (isRotationInFlight) prevents this path from
+// firing in normal operation; the test exists to lock the helper's
+// behaviour in case the gate is bypassed (controller restart racing a
+// hand-edited Secret, etc.).
 func TestStageCertificate_ReStage(t *testing.T) {
 	oldCert, oldKey := mintCert(t)
 	candidateCert, candidateKey := mintCert(t)
@@ -1007,7 +1015,7 @@ func TestStageCertificate_PreservesNonControllerAnnotations(t *testing.T) {
 			Name:      "test-certs",
 			Namespace: "default",
 			Annotations: map[string]string{
-				ForceRotationAnnotation:                     "true", // must be cleared
+				ForceRotationAnnotation:                     annotationTrue, // must be cleared
 				"meta.helm.sh/release-name":                 "ipam-capi-remote",
 				"kubectl.kubernetes.io/last-applied-config": "{...}",
 			},
@@ -1263,4 +1271,250 @@ func bytesContains(haystack, needle []byte) bool {
 		}
 	}
 	return false
+}
+
+// TestIsRotationInFlight covers the four shapes the predicate has to
+// distinguish: absent (initial bootstrap), steady-state active (no
+// promoted-at), post-promote pre-prune active (promoted-at recent),
+// post-prune-overdue active (promoted-at + overlap elapsed), and
+// staged. Steady and absent must return false; everything else must
+// return true so the force-rotation gate engages.
+func TestIsRotationInFlight(t *testing.T) {
+	overlap := 5 * time.Minute
+	cases := []struct {
+		name         string
+		annotations  map[string]string
+		wantInFlight bool
+	}{
+		{
+			name:         "absent (initial bootstrap)",
+			annotations:  nil,
+			wantInFlight: false,
+		},
+		{
+			name: "steady-state active (no promoted-at)",
+			annotations: map[string]string{
+				RotationPhaseAnnotation: string(PhaseActive),
+			},
+			wantInFlight: false,
+		},
+		{
+			name: "post-promote pre-prune (overlap window still open)",
+			annotations: map[string]string{
+				RotationPhaseAnnotation:      string(PhaseActive),
+				rotationPromotedAtAnnotation: time.Now().UTC().Add(-1 * time.Minute).Format(time.RFC3339),
+			},
+			wantInFlight: true,
+		},
+		{
+			name: "post-promote overlap elapsed (one more pass before prune)",
+			annotations: map[string]string{
+				RotationPhaseAnnotation:      string(PhaseActive),
+				rotationPromotedAtAnnotation: time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339),
+			},
+			wantInFlight: true,
+		},
+		{
+			name: "staged",
+			annotations: map[string]string{
+				RotationPhaseAnnotation:     string(PhaseStaged),
+				RotationStartedAtAnnotation: time.Now().UTC().Format(time.RFC3339),
+			},
+			wantInFlight: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Annotations: tc.annotations}}
+			got, _ := isRotationInFlight(secret, overlap)
+			if got != tc.wantInFlight {
+				t.Errorf("isRotationInFlight: got %v, want %v", got, tc.wantInFlight)
+			}
+		})
+	}
+}
+
+// reconcileWith builds a configmap+secret pair, wires a reconciler around
+// them, runs one Reconcile pass, and returns the post-reconcile cert
+// Secret. Centralises the boilerplate the three deferral tests share so
+// each test body can focus on its specific assertion.
+func reconcileWith(t *testing.T, secret *corev1.Secret) (*WebhookReconciler, *corev1.Secret) {
+	t.Helper()
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+    admissionReviewVersions: ["v1"]
+    sideEffects: None`,
+		},
+	}
+	r := makeRotationReconciler(t, []client.Object{secret, configMap}, nil)
+	r.WebhookConfigName = "webhook-config"
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	return r, readSecret(t, r)
+}
+
+// TestForceRotationGate_DeferredDuringStaged covers the case where the
+// operator sets force-rotation while a previous rotation is still in
+// the staged phase. Expected: no re-stage (the staged candidate is
+// preserved in the bundle and not replaced with a fresh one), the
+// annotation stays on the Secret so the request is visibly pending,
+// and the deferred metric ticks up. Note that the in-flight rotation
+// itself keeps progressing during the same Reconcile pass — the gate
+// only suppresses NEW rotation starts; it does NOT halt the current
+// state machine. Whether the secret ends this pass in staged or active
+// depends on whether the propagation gate collapsed, so we don't pin
+// the phase here — we pin the cert content (the original candidate
+// must still be present, no fresh material).
+func TestForceRotationGate_DeferredDuringStaged(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	candidateCert, candidateKey := mintCert(t)
+	bundle := append(append([]byte{}, oldCert...), candidateCert...)
+	startedAt := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				ForceRotationAnnotation:     annotationTrue,
+				RotationPhaseAnnotation:     string(PhaseStaged),
+				RotationStartedAtAnnotation: startedAt,
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: oldKey, tlsStagedKeyKey: candidateKey},
+	}
+	before := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
+
+	_, got := reconcileWith(t, secret)
+
+	if got.Annotations[ForceRotationAnnotation] != annotationTrue {
+		t.Errorf("force-rotation annotation: expected to be preserved while deferred, got %q", got.Annotations[ForceRotationAnnotation])
+	}
+	// The candidate cert (whose key was tls.staged.key) MUST still be in
+	// the bundle. If the gate had failed to engage, stageCertificate
+	// would have minted a fresh candidate and the old one would be gone.
+	if !bytesContains(got.Data[tlsCrtKey], candidateCert) {
+		t.Errorf("tls.crt: original candidate cert must still be in the bundle (no re-stage during gate)")
+	}
+	after := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
+	if after != before+1 {
+		t.Errorf("ForceRotationDeferredTotal: got %v→%v, want +1", before, after)
+	}
+}
+
+// TestForceRotationGate_DeferredDuringActiveOverlap covers the more
+// dangerous case: operator sets force-rotation during the post-promote
+// pre-prune window. Without the gate this would drop the old cert
+// before its in-flight TLS sessions migrated — real downtime. With the
+// gate: no re-stage, annotation preserved, metric ticks, and the
+// promoted-at marker is left intact so the prune still happens on
+// schedule.
+func TestForceRotationGate_DeferredDuringActiveOverlap(t *testing.T) {
+	oldCert, _ := mintCert(t)
+	newCert, newKey := mintCert(t)
+	bundle := append(append([]byte{}, oldCert...), newCert...)
+	promotedAt := time.Now().UTC().Add(-1 * time.Minute).Format(time.RFC3339)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				ForceRotationAnnotation:      annotationTrue,
+				RotationPhaseAnnotation:      string(PhaseActive),
+				rotationPromotedAtAnnotation: promotedAt,
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: newKey},
+	}
+	before := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
+
+	r, got := reconcileWith(t, secret)
+	// Make sure the test reconciler's overlap window is long enough that
+	// the prune doesn't run during this single Reconcile pass.
+	r.RotationOverlapWindow = 10 * time.Minute
+	_ = r
+
+	if got.Annotations[ForceRotationAnnotation] != annotationTrue {
+		t.Errorf("force-rotation annotation: expected to be preserved while deferred, got %q", got.Annotations[ForceRotationAnnotation])
+	}
+	if got.Annotations[rotationPromotedAtAnnotation] != promotedAt {
+		t.Errorf("rotation-promoted-at: expected unchanged %q, got %q", promotedAt, got.Annotations[rotationPromotedAtAnnotation])
+	}
+	if n := countPEMCerts(t, got.Data[tlsCrtKey]); n != 2 {
+		t.Errorf("tls.crt: expected 2 cert blocks (overlap bundle preserved), got %d", n)
+	}
+	if !bytesContains(got.Data[tlsCrtKey], oldCert) {
+		t.Errorf("tls.crt: old cert must still be in the bundle (no premature prune)")
+	}
+	after := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
+	if after != before+1 {
+		t.Errorf("ForceRotationDeferredTotal: got %v→%v, want +1", before, after)
+	}
+}
+
+// TestForceRotationGate_AllowedFromSteadyActive is the regression guard
+// for the happy path: force-rotation observed in steady-state active
+// (no rotation annotations beyond phase=active and no promoted-at) must
+// proceed — the leaf must change. The reconcile may drive the cycle
+// all the way through staged→active in a single pass when the
+// propagation gate is empty (no CRDs published), so we don't pin the
+// phase; we pin the observable outcome: the original cert is gone,
+// the force annotation was consumed, and the deferred counter did NOT
+// tick.
+func TestForceRotationGate_AllowedFromSteadyActive(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				ForceRotationAnnotation: annotationTrue,
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: oldCert, tlsKeyKey: oldKey},
+	}
+	before := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
+
+	_, got := reconcileWith(t, secret)
+
+	if _, present := got.Annotations[ForceRotationAnnotation]; present {
+		t.Errorf("force-rotation annotation: expected to be cleared after a real rotation, still present")
+	}
+	if bytesContains(got.Data[tlsCrtKey], oldCert) && len(got.Data[tlsCrtKey]) == len(oldCert) {
+		t.Errorf("tls.crt: leaf must have rotated — bundle still equals the original cert verbatim")
+	}
+	after := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
+	if after != before {
+		t.Errorf("ForceRotationDeferredTotal: must NOT increment on the allowed path, got %v→%v", before, after)
+	}
+}
+
+// testutilCounterValue reads the current value of a prometheus.Counter
+// for delta assertions. Pulled out as a one-line helper so each test
+// body reads as a single before/after comparison.
+func testutilCounterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	if err := c.Write(m); err != nil {
+		t.Fatalf("counter Write: %v", err)
+	}
+	return m.GetCounter().GetValue()
 }

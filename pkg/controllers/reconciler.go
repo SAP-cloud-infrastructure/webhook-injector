@@ -49,20 +49,33 @@ type rotationReason string
 //	active   + rotate ──►  staged  (cert=A||B, key=A)         ← apiserver trusts both
 //	staged   + propagated ──► active (cert=A||B, key=B)       ← serve new cert
 //	active   + window elapsed ──► active (cert=B, key=B)      ← prune old cert
-//	staged   + force-rotation ──► staged (cert=A||C, key=A)   ← restage on fresher candidate
-//	active   + force-rotation ──► staged (cert=B||C, key=B)   ← chain a new rotation
 //
 // `active` is the steady state when there is exactly one CERTIFICATE
 // block in `tls.crt`. The same `active` label is used for "post-promote,
 // pre-prune" (two blocks) — they differ in the number of CERTIFICATE
-// blocks in `tls.crt`, not in operational meaning. The phase is the
-// resumable bit of state.
+// blocks in `tls.crt` and the presence of the rotation-promoted-at
+// marker, not in operational meaning. The phase is the resumable bit
+// of state.
+//
+// Force-rotation interaction: a force-rotation annotation observed while
+// the cycle is not yet at steady-state active (either phase=staged, or
+// phase=active with rotation-promoted-at still set) is DEFERRED, not
+// applied. The annotation stays on the Secret and takes effect on the
+// first reconcile after the cycle settles. This guarantees a forced
+// rotation never drops a cert before its overlap window expires. See
+// isRotationInFlight and the gate in Reconcile.
 type RotationPhase string
 
 const (
 	// ForceRotationAnnotation is the annotation key used to trigger certificate rotation.
 	// When set to "true" on the certificate Secret, it forces immediate rotation.
 	ForceRotationAnnotation = "webhook-injector.sap.com/force-rotation"
+
+	// annotationTrue is the sentinel value that turns on a boolean
+	// annotation in this package. Kept as a named constant rather than
+	// repeating "true" so callers (production code and tests) speak the
+	// same vocabulary, and so future renames are mechanical.
+	annotationTrue = "true"
 
 	// RotationPhaseAnnotation records the current phase of an in-progress
 	// rotation on the cert Secret. Absent = steady state (equivalent to
@@ -237,6 +250,32 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// below uses both `reason` (why we're here) and `phase` (where the
 	// state machine is) to pick an action.
 	phase, _ := rotationPhase(secret)
+
+	// Force-rotation gate: if a prior rotation cycle has not yet reached
+	// steady-state active, refuse to start a new one. The dangerous shape
+	// we're guarding against is `active + force` during the overlap window,
+	// which would drop the previous old cert from `tls.crt` before its
+	// in-flight TLS sessions and slow caBundle consumers had a chance to
+	// migrate — i.e. real downtime. We deliberately apply the same gate to
+	// `staged + force` for a single, uniform rule: force-rotation only ever
+	// starts from a clean baseline. The annotation stays on the Secret so
+	// the request is visibly pending; the next reconcile after the cycle
+	// settles will pick it up. Time/SAN-driven rotations are NOT gated —
+	// those are "we must rotate" signals and cannot legitimately fire mid-
+	// rotation anyway (we just wrote a fresh cert).
+	if reason == rotationReasonForced {
+		if inFlight, remaining := isRotationInFlight(secret, r.rotationOverlapWindow()); inFlight {
+			metrics.ForceRotationDeferredTotal.Inc()
+			logger.Info("Force-rotation deferred: prior rotation still in flight",
+				"phase", phase, "remaining", remaining)
+			// Suppress the force reason so the staging block below is
+			// skipped; the phase dispatch still runs so the in-flight
+			// rotation keeps progressing. Requeue is handled by the phase
+			// dispatch (staged → stagedRequeueInterval; active → remaining
+			// overlap window); no extra requeue needed here.
+			reason = ""
+		}
+	}
 
 	// Rotation trigger fires when the leaf is missing/expired/SAN-mismatched
 	// or the user set the force-rotation annotation. In every case we
@@ -421,7 +460,7 @@ func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []ce
 
 	// Check for force-rotation annotation
 	if secret.Annotations != nil {
-		if forceRotation, exists := secret.Annotations[ForceRotationAnnotation]; exists && forceRotation == "true" {
+		if forceRotation, exists := secret.Annotations[ForceRotationAnnotation]; exists && forceRotation == annotationTrue {
 			return secret, rotationReasonForced, nil
 		}
 	}
@@ -474,6 +513,52 @@ func rotationPhase(secret *corev1.Secret) (phase RotationPhase, startedAt time.T
 		}
 	}
 	return phase, startedAt
+}
+
+// isRotationInFlight returns true when the given Secret is in the middle of
+// a rotation cycle that has not yet settled to steady-state active — i.e.
+// either phase=staged, or phase=active with the rotation-promoted-at marker
+// still present (overlap window has not elapsed). Steady-state active (no
+// promoted-at marker, no staged marker) and absent (initial bootstrap) both
+// return false. The returned duration is an upper bound on how much longer
+// the caller would have to wait before the cycle settles — used purely for
+// log/visibility, not control flow (the phase dispatch already requeues at
+// the correct cadence). A zero duration means "we can't compute a sensible
+// bound" (annotation missing or unparsable) — treat as "wait at least one
+// reconcile pass".
+//
+// This is the predicate behind the force-rotation gate: forcing a rotation
+// while one is in flight would either drop a not-yet-trusted candidate
+// (staged) or drop the previous cert before its overlap window expired
+// (active+promoted-at), both of which the staged→active→pruned machine was
+// designed to avoid.
+func isRotationInFlight(secret *corev1.Secret, overlapWindow time.Duration) (inFlight bool, remaining time.Duration) {
+	if secret == nil || secret.Annotations == nil {
+		return false, 0
+	}
+	phase := RotationPhase(secret.Annotations[RotationPhaseAnnotation])
+	switch phase {
+	case PhaseStaged:
+		// We don't know how long staged will last (depends on shoot CRD
+		// propagation), but it's bounded by --rotation-gate-timeout. We
+		// don't have access to that here, so return zero — callers log
+		// it as "indeterminate, will resume on next reconcile".
+		return true, 0
+	case PhaseActive:
+		promotedAt := parseTimeAnnotation(secret.Annotations[rotationPromotedAtAnnotation])
+		if promotedAt.IsZero() {
+			// Steady-state active (no overlap to wait out).
+			return false, 0
+		}
+		pruneAt := promotedAt.Add(overlapWindow)
+		if rem := time.Until(pruneAt); rem > 0 {
+			return true, rem
+		}
+		// Overlap window already elapsed; next reconcile will prune.
+		// Treat as in-flight one more pass so the prune happens first.
+		return true, 0
+	}
+	return false, 0
 }
 
 // needsCertificateRotation checks if certificate needs rotation based on expiry and SANs.
@@ -624,6 +709,8 @@ func (r *WebhookReconciler) stageCertificate(ctx context.Context, services []cer
 			return fmt.Errorf("get cert Secret: %w", err)
 		}
 		// Initial bootstrap: write a single-cert active-phase Secret.
+		// No incoming Secret, so no force annotation to clear; the
+		// preservedAnnotations(nil) return is empty.
 		bootstrap := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        secretKey.Name,
@@ -654,6 +741,9 @@ func (r *WebhookReconciler) stageCertificate(ctx context.Context, services []cer
 			tlsKeyKey: newKeyPEM,
 		}
 		existing.Annotations = preservedAnnotations(existing.Annotations)
+		// Consume the force annotation: stageCertificate is the rotation
+		// entry point, so once we stage we've honoured the request.
+		delete(existing.Annotations, ForceRotationAnnotation)
 		metrics.PhaseTransitionsTotal.WithLabelValues(string(fromPhase), string(PhaseActive)).Inc()
 		return r.Client.Update(ctx, existing)
 	}
@@ -674,6 +764,11 @@ func (r *WebhookReconciler) stageCertificate(ctx context.Context, services []cer
 		tlsStagedKeyKey: newKeyPEM,
 	}
 	annotations := preservedAnnotations(existing.Annotations)
+	// Consume the force annotation: the rotation it requested is starting
+	// right now. preservedAnnotations no longer strips this for us so
+	// promote/prune can preserve a deferred force, but the normal stage
+	// path always consumes it.
+	delete(annotations, ForceRotationAnnotation)
 	annotations[RotationPhaseAnnotation] = string(PhaseStaged)
 	annotations[RotationStartedAtAnnotation] = time.Now().UTC().Format(time.RFC3339)
 	existing.Annotations = annotations
@@ -760,17 +855,18 @@ func (r *WebhookReconciler) pruneCertificate(ctx context.Context, secret *corev1
 }
 
 // preservedAnnotations returns a fresh map containing every annotation
-// from src EXCEPT the controller-owned rotation annotations (which the
-// caller will set explicitly if it wants them, and otherwise clears).
-// The force-rotation annotation is always cleared — its sole purpose is
-// to trigger a rotation; once we've handled it the user-facing contract
-// says it goes away.
+// from src EXCEPT the controller-owned rotation-phase annotations (which
+// the caller will set explicitly if it wants them, and otherwise clears).
+// The ForceRotation annotation is NOT stripped here — it has consume-on-
+// rotation semantics that only stageCertificate is in a position to
+// enforce. Promote/prune passes that happen while a force-rotation is
+// deferred (gated by isRotationInFlight) must NOT swallow the pending
+// request, so they call this helper which leaves the annotation alone.
 func preservedAnnotations(src map[string]string) map[string]string {
 	out := make(map[string]string, len(src))
 	for k, v := range src {
 		switch k {
-		case ForceRotationAnnotation,
-			RotationPhaseAnnotation,
+		case RotationPhaseAnnotation,
 			RotationStartedAtAnnotation,
 			rotationPromotedAtAnnotation:
 			continue

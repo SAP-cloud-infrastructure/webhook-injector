@@ -197,6 +197,24 @@ var (
 		[]string{"condition", "status"},
 	)
 
+	// ForceRotationDeferredTotal counts reconcile passes in which a
+	// force-rotation annotation was observed but deferred because a
+	// previous rotation cycle was still in flight (phase=staged, or
+	// phase=active with the rotation-promoted-at marker present — i.e.
+	// the overlap window has not yet elapsed). The annotation stays on
+	// the Secret across these reconciles; once the prior rotation reaches
+	// steady-state active the gate lifts and the force takes effect on
+	// the next pass. A sustained non-zero rate means an operator is
+	// retriggering rotations faster than they can complete; a single
+	// brief spike is the normal "user forced during overlap window"
+	// shape. Counter, not gauge — the rate is the signal.
+	ForceRotationDeferredTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_certificate_force_rotation_deferred_total",
+			Help: "Total reconcile passes in which a force-rotation annotation was held back because a prior rotation cycle was still in flight.",
+		},
+	)
+
 	// PhaseTransitionsTotal counts state-machine transitions of the
 	// certificate-rotation phase on the cert Secret. Labels follow the
 	// closed enum {absent, staged, active, pruned}. The pair (from, to)
@@ -204,10 +222,12 @@ var (
 	//   absent  → active  (initial bootstrap)
 	//   active  → staged  (rotation begins: append new cert to bundle)
 	//   staged  → active  (promote new key once shoot has both certs)
-	//   staged  → staged  (force-rotation re-triggered mid-stage)
 	//   active  → pruned  (overlap window elapsed; drop old cert)
-	// Any other pair indicates a bug. Counter, not gauge — phases are
-	// transient and rare; the rate over time is the meaningful signal.
+	// Force-rotation observed during an in-flight cycle is deferred (see
+	// ForceRotationDeferredTotal), so the previously-legal staged→staged
+	// transition does not occur. Any other pair indicates a bug. Counter,
+	// not gauge — phases are transient and rare; the rate over time is
+	// the meaningful signal.
 	PhaseTransitionsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "webhook_injector_certificate_rotation_phase_transitions_total",
@@ -230,6 +250,7 @@ func init() {
 		ManagedResourceForceReconcileTotal,
 		ManagedResourceKeepObjectsViolationsTotal,
 		ManagedResourceUnhealthyTotal,
+		ForceRotationDeferredTotal,
 		PhaseTransitionsTotal,
 	)
 }
