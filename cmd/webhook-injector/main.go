@@ -339,6 +339,12 @@ func main() {
 			setupLog.Error(err, "Unable to create ManagedResourceReconciler controller")
 			os.Exit(1)
 		}
+		// Wire MR health snapshot into WebhookReconciler so non-force
+		// rotations defer while labeled MRs are unhealthy. Wiring after
+		// SetupWithManager because the snapshot reads from the manager's
+		// cache, which is fine to read at reconcile time (cache is
+		// populated by then) but we just need the method reference.
+		webhookReconciler.MRHealth = mrReconciler
 		setupLog.Info("ManagedResourceReconciler controller registered (runs on leader only)",
 			"label", mrLabelKey+"="+mrLabelValue,
 			"force-reconcile", forceReconcile,
