@@ -5,9 +5,13 @@ package controllers
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"math/big"
 	"slices"
 	"strings"
 	"testing"
@@ -1586,6 +1590,327 @@ func TestForceRotationGate_AllowedFromSteadyActive(t *testing.T) {
 	after := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
 	if after != before {
 		t.Errorf("ForceRotationDeferredTotal: must NOT increment on the allowed path, got %v→%v", before, after)
+	}
+}
+
+// fakeMRHealth is a test double for the MRHealthChecker interface. The
+// two fields drive the snapshot's return values; nothing else moves —
+// the snapshot is a pure read, so a single struct value is enough to
+// pin behaviour for an entire Reconcile pass.
+type fakeMRHealth struct {
+	healthy   bool
+	unhealthy []types.NamespacedName
+}
+
+func (f *fakeMRHealth) MRHealthSnapshot(_ context.Context) (bool, []types.NamespacedName) {
+	return f.healthy, f.unhealthy
+}
+
+// mintExpiredCert builds a self-signed cert whose NotAfter is in the
+// past. Used by the past-expiry escape-hatch test — GenerateSelfSignedCert
+// always anchors NotBefore at time.Now() so it cannot produce a back-dated
+// cert; we hand-roll the template here instead. The SANs match the
+// service the test ConfigMap references (webhook-svc.default.svc) so a
+// SAN mismatch is NOT what triggers rotation in the test — it's the
+// past-expiry path specifically.
+func mintExpiredCert(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	notBefore := time.Now().Add(-2 * time.Hour)
+	notAfter := time.Now().Add(-1 * time.Hour) // expired
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(42),
+		Subject:      pkix.Name{CommonName: "webhook-injector"},
+		DNSNames: []string{
+			"webhook-svc.default.svc",
+			"webhook-svc.default.svc.cluster.local",
+		},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	return certPEM, keyPEM
+}
+
+// TestUnhealthyMRGate_DefersNonForceRotation covers the canonical defer
+// path: a non-force rotation reason fires (here, SAN mismatch — the
+// existing cert was minted with SANs that don't match the ConfigMap's
+// service references) AND at least one labeled ManagedResource is
+// unhealthy. Expected: rotation is deferred — the cert Secret is
+// untouched (same tls.crt, no phase=staged annotation, no
+// staged.key) — and the deferral counter advances by exactly one.
+func TestUnhealthyMRGate_DefersNonForceRotation(t *testing.T) {
+	oldCert, oldKey := mintCert(t) // SANs are svc.ns.svc — will mismatch the test ConfigMap
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: oldCert, tlsKeyKey: oldKey},
+	}
+	before := testutilCounterValue(t, metrics.CertificateRotationDeferredUnhealthyMRsTotal)
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+    admissionReviewVersions: ["v1"]
+    sideEffects: None`,
+		},
+	}
+	r := makeRotationReconciler(t, []client.Object{secret, configMap}, nil)
+	r.WebhookConfigName = "webhook-config"
+	r.MRHealth = &fakeMRHealth{
+		healthy:   false,
+		unhealthy: []types.NamespacedName{{Namespace: "ns", Name: "mr-1"}},
+	}
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := readSecret(t, r)
+	// Cert content must be byte-identical: deferral means no rotation
+	// happened at all.
+	if string(got.Data[tlsCrtKey]) != string(oldCert) {
+		t.Errorf("tls.crt: expected to be unchanged (deferred), but differs")
+	}
+	if string(got.Data[tlsKeyKey]) != string(oldKey) {
+		t.Errorf("tls.key: expected to be unchanged (deferred), but differs")
+	}
+	if _, present := got.Data[tlsStagedKeyKey]; present {
+		t.Errorf("tls.staged.key: must NOT be present when rotation was deferred")
+	}
+	if phase := got.Annotations[RotationPhaseAnnotation]; phase != "" {
+		t.Errorf("phase annotation: expected absent (no rotation started), got %q", phase)
+	}
+
+	after := testutilCounterValue(t, metrics.CertificateRotationDeferredUnhealthyMRsTotal)
+	if after != before+1 {
+		t.Errorf("CertificateRotationDeferredUnhealthyMRsTotal: got %v→%v, want +1", before, after)
+	}
+}
+
+// TestUnhealthyMRGate_AllowsWhenMRsHealthy is the regression guard for
+// the happy path: same setup as the deferral test, but the MRHealth
+// checker reports allHealthy=true. The rotation must proceed (the cert
+// rotates because the existing leaf's SANs don't match the ConfigMap's
+// service references) and the deferral counter must NOT advance.
+func TestUnhealthyMRGate_AllowsWhenMRsHealthy(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: oldCert, tlsKeyKey: oldKey},
+	}
+	before := testutilCounterValue(t, metrics.CertificateRotationDeferredUnhealthyMRsTotal)
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+    admissionReviewVersions: ["v1"]
+    sideEffects: None`,
+		},
+	}
+	r := makeRotationReconciler(t, []client.Object{secret, configMap}, nil)
+	r.WebhookConfigName = "webhook-config"
+	r.MRHealth = &fakeMRHealth{healthy: true, unhealthy: nil}
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := readSecret(t, r)
+	// Rotation must have happened: either the bundle grew to two certs
+	// (we're now in staged phase) or it's been promoted through to a
+	// single new cert in one pass — in either case tls.crt differs from
+	// the original single-cert PEM byte-for-byte.
+	if string(got.Data[tlsCrtKey]) == string(oldCert) {
+		t.Errorf("tls.crt: expected to have rotated (MRs healthy), but is unchanged")
+	}
+	after := testutilCounterValue(t, metrics.CertificateRotationDeferredUnhealthyMRsTotal)
+	if after != before {
+		t.Errorf("CertificateRotationDeferredUnhealthyMRsTotal: must NOT increment on the allowed path, got %v→%v", before, after)
+	}
+}
+
+// TestUnhealthyMRGate_AllowsWhenPastExpiry covers the escape hatch:
+// the existing cert is past NotAfter (already expired) AND MRs are
+// unhealthy. We'd rather rotate under duress than leave a broken
+// webhook in the field, so the gate releases and rotation proceeds.
+// The deferral counter still ticks (the "rotation under duress" log
+// path also increments for dashboard visibility), which is why the
+// metric is named "deferred OR rotated despite unhealthy MRs" in
+// spirit — see the WARNING log at the past-expiry branch.
+func TestUnhealthyMRGate_AllowsWhenPastExpiry(t *testing.T) {
+	oldCert, oldKey := mintExpiredCert(t)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: oldCert, tlsKeyKey: oldKey},
+	}
+	before := testutilCounterValue(t, metrics.CertificateRotationDeferredUnhealthyMRsTotal)
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+    admissionReviewVersions: ["v1"]
+    sideEffects: None`,
+		},
+	}
+	r := makeRotationReconciler(t, []client.Object{secret, configMap}, nil)
+	r.WebhookConfigName = "webhook-config"
+	r.MRHealth = &fakeMRHealth{
+		healthy:   false,
+		unhealthy: []types.NamespacedName{{Namespace: "ns", Name: "mr-1"}},
+	}
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := readSecret(t, r)
+	if string(got.Data[tlsCrtKey]) == string(oldCert) {
+		t.Errorf("tls.crt: expected to have rotated despite unhealthy MRs (past-expiry escape hatch), but is unchanged")
+	}
+	after := testutilCounterValue(t, metrics.CertificateRotationDeferredUnhealthyMRsTotal)
+	if after != before+1 {
+		t.Errorf("CertificateRotationDeferredUnhealthyMRsTotal: expected +1 (rotation-under-duress also ticks the counter), got %v→%v", before, after)
+	}
+}
+
+// TestUnhealthyMRGate_DoesNotGateForceRotation confirms that an explicit
+// force-rotation annotation bypasses the MR-health gate entirely. Force
+// rotation is an operator-explicit action — they know what they're
+// asking for; the gate is for AUTOMATIC rotation triggers (expiry, SAN
+// mismatch) which the operator did not directly request.
+func TestUnhealthyMRGate_DoesNotGateForceRotation(t *testing.T) {
+	// Mint a cert with SANs matching the ConfigMap's service so that
+	// without the force annotation there would be NO rotation reason at
+	// all — this makes the test specifically about the force-rotation
+	// path bypassing the gate.
+	matchingCert, matchingKey, err := certificates.GenerateSelfSignedCert(
+		[]certificates.ServiceReference{{Name: "webhook-svc", Namespace: "default"}},
+		time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("GenerateSelfSignedCert: %v", err)
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				ForceRotationAnnotation: annotationTrue,
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: matchingCert, tlsKeyKey: matchingKey},
+	}
+	before := testutilCounterValue(t, metrics.CertificateRotationDeferredUnhealthyMRsTotal)
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+    admissionReviewVersions: ["v1"]
+    sideEffects: None`,
+		},
+	}
+	r := makeRotationReconciler(t, []client.Object{secret, configMap}, nil)
+	r.WebhookConfigName = "webhook-config"
+	r.MRHealth = &fakeMRHealth{
+		healthy:   false,
+		unhealthy: []types.NamespacedName{{Namespace: "ns", Name: "mr-1"}},
+	}
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := readSecret(t, r)
+	if string(got.Data[tlsCrtKey]) == string(matchingCert) {
+		t.Errorf("tls.crt: expected to have rotated (force-rotation bypasses gate), but is unchanged")
+	}
+	if got.Annotations[ForceRotationAnnotation] == annotationTrue {
+		t.Errorf("force-rotation annotation: expected to be consumed by the stage path, still present")
+	}
+	after := testutilCounterValue(t, metrics.CertificateRotationDeferredUnhealthyMRsTotal)
+	if after != before {
+		t.Errorf("CertificateRotationDeferredUnhealthyMRsTotal: must NOT increment when force-rotation bypasses the gate, got %v→%v", before, after)
 	}
 }
 

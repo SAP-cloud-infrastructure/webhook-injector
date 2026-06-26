@@ -105,6 +105,18 @@ const (
 	stagedRequeueInterval        = 5 * time.Second // how often to poll target CRDs during staged phase
 )
 
+// MRHealthChecker is implemented by ManagedResourceReconciler and lets
+// WebhookReconciler gate non-force rotations on labeled-MR health.
+//
+// Declared here (next to WebhookReconciler) rather than alongside the
+// implementation so WebhookReconciler can depend on this abstraction
+// without taking a direct field type on *ManagedResourceReconciler —
+// keeps the two reconcilers loosely coupled and keeps the tests of
+// WebhookReconciler easy to fake.
+type MRHealthChecker interface {
+	MRHealthSnapshot(ctx context.Context) (allHealthy bool, unhealthy []types.NamespacedName)
+}
+
 // WebhookReconciler reconciles a user-authored ConfigMap that carries
 // MutatingWebhookConfiguration / ValidatingWebhookConfiguration YAML and
 // manages the hosting-cluster certificate Secret. Apply-on-create, update
@@ -173,6 +185,12 @@ type WebhookReconciler struct {
 	// promoting anyway. Zero means "use defaultRotationGateTimeout".
 	// Set via --rotation-gate-timeout.
 	RotationGateTimeout time.Duration
+
+	// MRHealth, when non-nil, lets the reconciler defer non-force rotations
+	// while at least one labeled ManagedResource is unhealthy. Wired by
+	// main.go when --managed-resource-label is set. Nil = no gate, all
+	// rotations proceed immediately.
+	MRHealth MRHealthChecker
 }
 
 // rotationOverlapWindow returns the configured overlap window or the
@@ -482,6 +500,57 @@ func (r *WebhookReconciler) checkCertificates(ctx context.Context, services []ce
 	reason, err := r.needsCertificateRotation(secret, services)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to check certificate rotation: %w", err)
+	}
+
+	// MR-health gate: if the rotation reason is non-force
+	// (expired/san_mismatch/initial) AND the cert is not actually past
+	// NotAfter yet AND at least one labeled MR is unhealthy → defer. The
+	// cert keeps being served from the existing valid leaf; a future
+	// reconcile when MRs recover will pick up the rotation. The
+	// "cert past NotAfter" escape hatch ensures we never wait indefinitely
+	// on a broken GRM/MR while the cert is already invalid — past-expiry
+	// rotation proceeds with a louder warning.
+	//
+	// Force-rotation is NOT gated here. Operators who set the annotation
+	// have explicitly asked for the rotation; the existing force-rotation
+	// gate (isRotationInFlight, in Reconcile) handles the in-flight case.
+	//
+	// MRHealth nil = pure-ConfigMap deployment with no MR reconciler
+	// wired; nothing to wait on, all rotations proceed immediately.
+	if reason != "" && reason != rotationReasonForced && r.MRHealth != nil {
+		allHealthy, unhealthy := r.MRHealth.MRHealthSnapshot(ctx)
+		if !allHealthy {
+			logger := log.FromContext(ctx)
+			// Past-expiry escape hatch: if NotAfter has passed (or we
+			// can't read a leaf at all, i.e. initial bootstrap), rotate
+			// anyway. leafFromSecret returns an error on initial
+			// bootstrap (Secret was already returned NotFound above so
+			// we'd have early-returned rotationReasonInitial without
+			// reaching here — but be defensive).
+			leaf, leafErr := leafFromSecret(secret)
+			pastExpiry := leafErr == nil && leaf != nil && time.Now().After(leaf.NotAfter)
+			if !pastExpiry {
+				logger.Info("WARNING: cert rotation deferred — labeled ManagedResources unhealthy",
+					"reason", string(reason),
+					"unhealthy", unhealthy,
+				)
+				metrics.CertificateRotationDeferredUnhealthyMRsTotal.Inc()
+				// Suppress the rotation reason; the cert keeps being
+				// served as-is. A future reconcile (sync-period tick,
+				// MR status change, or the cert finally aging past
+				// NotAfter) will revisit the decision.
+				return secret, "", nil
+			}
+			// Past expiry — log a louder warning and proceed. The metric
+			// still ticks for observability so dashboards see "rotation
+			// proceeded under duress".
+			logger.Info("WARNING: rotating cert despite unhealthy ManagedResources because cert is past NotAfter",
+				"reason", string(reason),
+				"unhealthy", unhealthy,
+				"notAfter", leaf.NotAfter,
+			)
+			metrics.CertificateRotationDeferredUnhealthyMRsTotal.Inc()
+		}
 	}
 
 	return secret, reason, nil

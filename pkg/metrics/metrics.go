@@ -212,6 +212,35 @@ var (
 		},
 	)
 
+	// CertificateRotationDeferredUnhealthyMRsTotal counts reconcile passes
+	// in which a non-force certificate rotation reason (expired,
+	// san_mismatch, etc.) was suppressed because at least one labeled
+	// ManagedResource was reporting an unhealthy condition
+	// (ResourcesApplied or ResourcesHealthy with Status != True).
+	//
+	// The cert keeps being served from the existing valid leaf; a future
+	// reconcile when MRs recover will pick up the rotation. There is no
+	// time-based timeout — the cert's NotAfter is the upper bound, since
+	// the gate has an escape hatch that lets past-expiry rotations
+	// proceed regardless of MR health (those increments are also counted
+	// here, paired with a louder warning log).
+	//
+	// A sustained non-zero rate means a labeled MR has been unhealthy
+	// long enough that a cert rotation is now being held up by it. The
+	// companion alert WebhookCertificateRotationDeferredByUnhealthyMRs
+	// (controlplane-operations) fires on this counter.
+	//
+	// Distinct from ForceRotationDeferredTotal (different cause — that
+	// counter tracks force-rotation annotations deferred by the in-flight
+	// gate, this one tracks expiry/SAN rotations deferred by unhealthy
+	// downstream MRs).
+	CertificateRotationDeferredUnhealthyMRsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_certificate_rotation_deferred_unhealthy_mrs_total",
+			Help: "Total reconcile passes in which a non-force certificate rotation was held back because at least one labeled ManagedResource was reporting an unhealthy condition.",
+		},
+	)
+
 	// PhaseTransitionsTotal counts state-machine transitions of the
 	// certificate-rotation phase on the cert Secret. Labels follow the
 	// closed enum {absent, staged, active, pruned}. The pair (from, to)
@@ -248,6 +277,7 @@ func init() {
 		ManagedResourceKeepObjectsViolationsTotal,
 		ManagedResourceUnhealthyTotal,
 		ForceRotationDeferredTotal,
+		CertificateRotationDeferredUnhealthyMRsTotal,
 		PhaseTransitionsTotal,
 	)
 }

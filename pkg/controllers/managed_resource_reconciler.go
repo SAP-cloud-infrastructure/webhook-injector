@@ -363,6 +363,66 @@ func (r *ManagedResourceReconciler) observeConditionHealth(mr *resourcesv1alpha1
 	}
 }
 
+// MRHealthSnapshot lists every labeled ManagedResource on the hosting
+// cluster and reports whether all of them currently meet the condition
+// health criteria (every tracked condition either missing or Status=True).
+//
+// Returns:
+//   - allHealthy: true if every labeled MR passes the check, OR if the
+//     reconciler is not registered (e.g. --managed-resource-label unset),
+//     OR if the List call itself fails (fail-open so a transient apiserver
+//     blip doesn't block cert rotation).
+//   - unhealthy: namespaced names of every MR that failed the check, in
+//     stable order, for log/metric inclusion. Empty when allHealthy is true.
+//
+// This is read-only and safe to call from a different reconciler's
+// Reconcile path. Uses the hosting client (label-scoped List) directly,
+// not the cache, so the answer reflects fresh apiserver state.
+func (r *ManagedResourceReconciler) MRHealthSnapshot(ctx context.Context) (allHealthy bool, unhealthy []types.NamespacedName) {
+	// Fail-open: a nil receiver means the reconciler isn't registered
+	// (no --managed-resource-label). Rotation should proceed unchecked
+	// because there are no labeled MRs to gate on by definition.
+	if r == nil {
+		return true, nil
+	}
+
+	var list resourcesv1alpha1.ManagedResourceList
+	if err := r.HostingClient.List(ctx, &list, client.MatchingLabels{r.WebhookLabelKey: r.WebhookLabelValue}); err != nil {
+		// Fail-open: a transient apiserver blip during List must not
+		// block cert rotation. The caller can't do anything useful with
+		// this error; subsequent reconciles will re-check naturally.
+		log.FromContext(ctx).V(1).Info("MRHealthSnapshot: List failed, failing open", "error", err.Error())
+		return true, nil
+	}
+
+	for i := range list.Items {
+		mr := &list.Items[i]
+		mrUnhealthy := false
+		for _, wantType := range trackedConditions {
+			cond := findCondition(mr.Status.Conditions, wantType)
+			if cond == nil {
+				// Missing = not yet evaluated by GRM. Matches
+				// observeConditionHealth's semantics — a freshly
+				// created MR must not be counted as unhealthy or
+				// rotation would be blocked indefinitely waiting for
+				// GRM to populate status.
+				continue
+			}
+			if cond.Status != "True" {
+				mrUnhealthy = true
+				break
+			}
+		}
+		if mrUnhealthy {
+			unhealthy = append(unhealthy, types.NamespacedName{
+				Namespace: mr.Namespace,
+				Name:      mr.Name,
+			})
+		}
+	}
+	return len(unhealthy) == 0, unhealthy
+}
+
 // findCondition returns a pointer to the condition with the given type, or
 // nil if not present. The Gardener Condition type is referenced via the
 // surrounding []gardencorev1beta1.Condition slice without an explicit
