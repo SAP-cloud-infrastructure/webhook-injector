@@ -7,7 +7,9 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
@@ -217,6 +220,82 @@ webhooks:
 	}
 	if len(mwc.Webhooks[0].ClientConfig.CABundle) == 0 {
 		t.Error("Expected CA bundle to be injected")
+	}
+}
+
+// TestWebhookReconciler_ApplyWebhooks_PropagatesTargetError pins down the
+// contract that applyAndUpdateExpiry returns target-apply failures to
+// Reconcile rather than swallowing them. A swallowed error (the pre-fix
+// behaviour) would let controller-runtime treat the reconcile as
+// successful, leaving the caBundle stale on the target until the next
+// --sync-period tick with no backoff in between. Regression test for the
+// bug Rico flagged in the PR #11 review.
+func TestWebhookReconciler_ApplyWebhooks_PropagatesTargetError(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("corev1.AddToScheme: %v", err)
+	}
+	if err := admissionv1.AddToScheme(s); err != nil {
+		t.Fatalf("admissionv1.AddToScheme: %v", err)
+	}
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+      caBundle: ""
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+`,
+		},
+	}
+
+	hostingClient := fake.NewClientBuilder().WithScheme(s).WithObjects(configMap).Build()
+
+	// Target client whose Create fails — simulates the apiserver rejecting
+	// the freshly-stamped MWC. The bug-fix contract: this error MUST
+	// bubble up out of Reconcile so controller-runtime applies its own
+	// exponential backoff.
+	wantErr := errors.New("simulated target apiserver outage")
+	targetClient := interceptor.NewClient(
+		fake.NewClientBuilder().WithScheme(s).Build(),
+		interceptor.Funcs{
+			Create: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.CreateOption) error {
+				return wantErr
+			},
+		},
+	)
+
+	reconciler := &WebhookReconciler{
+		Client:                hostingClient,
+		TargetClient:          targetClient,
+		WebhookConfigName:     "webhook-config",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.2,
+		Scheme:                s,
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	})
+	if err == nil {
+		t.Fatal("Reconcile: expected target-cluster apply error to be propagated, got nil")
+	}
+	if !strings.Contains(err.Error(), wantErr.Error()) {
+		t.Errorf("Reconcile error: expected to wrap %q, got %q", wantErr.Error(), err.Error())
 	}
 }
 
