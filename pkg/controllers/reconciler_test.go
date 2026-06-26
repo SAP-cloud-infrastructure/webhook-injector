@@ -838,6 +838,9 @@ func phaseTestScheme(t *testing.T) *runtime.Scheme {
 	if err := corev1.AddToScheme(s); err != nil {
 		t.Fatalf("corev1.AddToScheme: %v", err)
 	}
+	if err := admissionv1.AddToScheme(s); err != nil {
+		t.Fatalf("admissionv1.AddToScheme: %v", err)
+	}
 	if err := apiextensionsv1.AddToScheme(s); err != nil {
 		t.Fatalf("apiextensionsv1.AddToScheme: %v", err)
 	}

@@ -313,23 +313,30 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{}, err
 		} else if requeue > 0 {
 			// We're waiting for shoot CRDs to show the union bundle.
-			// Carry on through apply (to keep MWC/VWC fresh) and requeue.
-			r.applyAndUpdateExpiry(ctx, configs, secret, logger)
-			return ctrl.Result{RequeueAfter: requeue}, nil
+			// Carry on through apply (to keep MWC/VWC fresh) and requeue
+			// at the phase-machine cadence. If apply fails we still return
+			// the requeue so the phase machine keeps ticking, but we also
+			// surface the error so controller-runtime applies its own
+			// backoff in parallel with our requeue (the larger of the two
+			// wins).
+			applyErr := r.applyAndUpdateExpiry(ctx, configs, secret, logger)
+			return ctrl.Result{RequeueAfter: requeue}, applyErr
 		}
 		// Promoted in this pass: fall through to apply with the new key.
 	case PhaseActive:
 		if requeue, err := r.handleActivePhase(ctx, secret); err != nil {
 			return ctrl.Result{}, err
 		} else if requeue > 0 {
-			r.applyAndUpdateExpiry(ctx, configs, secret, logger)
-			return ctrl.Result{RequeueAfter: requeue}, nil
+			applyErr := r.applyAndUpdateExpiry(ctx, configs, secret, logger)
+			return ctrl.Result{RequeueAfter: requeue}, applyErr
 		}
 		// Either steady-state (no overlap to prune) or just pruned —
 		// fall through to apply.
 	}
 
-	r.applyAndUpdateExpiry(ctx, configs, secret, logger)
+	if err := r.applyAndUpdateExpiry(ctx, configs, secret, logger); err != nil {
+		return ctrl.Result{}, err
+	}
 	logger.Info("Reconciliation complete")
 
 	// Calculate next rotation time from certificate expiry
@@ -432,13 +439,19 @@ func parseTimeAnnotation(s string) time.Time {
 // inject the current caBundle into MWC/VWC, write them to the target
 // cluster, and refresh the expiry gauge metric. Pulled out so all
 // phase-machine code paths terminate identically.
-func (r *WebhookReconciler) applyAndUpdateExpiry(ctx context.Context, configs *webhooks.WebhookConfigurations, secret *corev1.Secret, logger logr.Logger) {
+//
+// Returns the apply error so callers can surface it to controller-runtime
+// for exponential backoff. The expiry gauge is refreshed even when the
+// apply fails — the gauge reads from the cert Secret, not the target.
+func (r *WebhookReconciler) applyAndUpdateExpiry(ctx context.Context, configs *webhooks.WebhookConfigurations, secret *corev1.Secret, logger logr.Logger) error {
 	r.updateCertExpiryGauge(secret)
 	caCert := secret.Data[tlsCrtKey]
 	webhooks.InjectCABundle(configs, caCert)
 	if err := r.applyWebhookConfigurations(ctx, configs); err != nil {
 		logger.Error(err, "failed to apply webhook configurations")
+		return fmt.Errorf("apply webhook configurations: %w", err)
 	}
+	return nil
 }
 
 // checkCertificates checks if certificates exist and are valid.
