@@ -199,6 +199,7 @@ webhook-injector exposes Prometheus metrics at `<metrics-addr>/metrics` (default
 | `cert_files_written_total` | Counter | Times certificate files were written to disk by the reloader |
 | `certificate_rotation_phase_transitions_total{from,to}` | Counter | Rotation phase-machine transitions; labels drawn from {absent, active, staged, pruned}. Four legal pairs (absent→active, active→staged, staged→active, active→pruned); any other pair indicates a controller bug |
 | `certificate_force_rotation_deferred_total` | Counter | Reconcile passes in which a force-rotation annotation was held back because a prior rotation cycle was still in flight (phase=staged, or phase=active with `rotation-promoted-at` still set). The annotation stays on the Secret and is consumed once the cycle reaches steady state |
+| `certificate_rotation_deferred_unhealthy_mrs_total` | Counter | Reconcile passes in which a non-force rotation (`expired`, `san_mismatch`) was deferred because at least one labeled ManagedResource has `ResourcesApplied`/`ResourcesHealthy` not `True`, indicating downstream propagation backpressure. Also increments when the past-`NotAfter` escape hatch rotates anyway, so the counter keeps moving while the situation is unresolved. Force-rotation is not gated by this. See [Operational concerns during maintenance windows](#operational-concerns-during-maintenance-windows) |
 | `target_stamps_total{kind,result}` | Counter | Target-cluster MWC/VWC apply outcomes by `kind` (MutatingWebhookConfiguration, ValidatingWebhookConfiguration) and `result` (stamped, error). The reconciler unconditionally Updates on every pass, so idempotent reconciles count as `stamped` rather than emitting a distinct `converged` value |
 | `rotation_fanout_events_total{kind,outcome}` | Counter | Rotation fan-out events to the ManagedResource reconciler, by `kind=ManagedResource` and `outcome=emitted`. The producer blocks until the consumer drains a slot, so `emitted` is the only steady-state value; the `outcome` label is retained for forward compatibility |
 | `managed_resource_stamps_total{result}` | Counter | Per-MR reconcile outcomes (stamped, converged, error) |
@@ -231,6 +232,7 @@ Each alert can be independently disabled or have its `for`, `severity`, `service
 | `WebhookManagedResourceStampErrors` | critical | `rate(managed_resource_stamps_total{result="error"}[10m]) > 0` — MR Secret stamping on the hosting cluster is failing |
 | `WebhookManagedResourceUnhealthy` | warning | `rate(managed_resource_unhealthy_total[15m]) > 0` — GRM reports a labeled MR with `ResourcesApplied` / `ResourcesHealthy` not `True` |
 | `WebhookManagedResourceForceReconcilePatchErrors` | warning | `rate(managed_resource_force_reconcile_total{result="error"}[15m]) > 0` — patching `gardener.cloud/operation=reconcile` on the MR failed (GRM-kick degraded; propagation will rely on GRM's own watch/sync cadence) |
+| `WebhookCertificateRotationDeferredByUnhealthyMRs` | warning | `rate(certificate_rotation_deferred_unhealthy_mrs_total[5m]) > 0` — cert rotation paused (or rotating-under-duress past `NotAfter`) because a labeled MR is unhealthy and downstream caBundle propagation can't be relied on. See [Operational concerns during maintenance windows](#operational-concerns-during-maintenance-windows) |
 
 ### Configuration safety
 
@@ -239,6 +241,22 @@ Each alert can be independently disabled or have its `for`, `severity`, `service
 | `WebhookManagedResourceKeepObjectsViolation` | warning | `rate(managed_resource_keep_objects_violations_total[15m]) > 0` — a labeled MR ships CRDs without `spec.keepObjects=true`; deleting that MR would cascade-delete shoot-side CRDs and every custom resource of those kinds |
 
 To add a new alert, follow the convention already in `controlplane-remote.yaml`: Helm `dig` templating for `for`/`severity`/`service`/`support_group`, an `enabled` toggle via `prometheusRules.disabled.<AlertName>`, the shared `controlplane-operations.additionalRuleLabels` include, and a `#TODO: add playbook` placeholder if no playbook URL exists yet.
+
+## Operational concerns during maintenance windows
+
+The controllers in this system are independent and fail independently, so it's worth being explicit about what happens when each one is down or degraded. None of these scenarios require manual recovery — the alerts exist so an operator knows what's happening, but the controllers reconverge on their own once the dependency is healthy again.
+
+**When gardener-resource-manager (GRM) is down, not webhook-injector.** MWC and ValidatingWebhookConfiguration propagation is unaffected: webhook-injector writes those directly from the hosting cluster to the shoot apiserver, no GRM hop in the path. CRD conversion-webhook `caBundle` propagation does depend on GRM, because the CRD is shipped inside a ManagedResource Secret that GRM unpacks into the shoot. During GRM downtime a CRD's `caBundle` on the shoot will lag the cert until GRM recovers. The `WebhookManagedResourceUnhealthy` alert is the indicator.
+
+**The unhealthy-MR rotation gate reduces but doesn't eliminate that exposure.** If the cert needs rotating AND GRM is down at the same time, webhook-injector now defers the rotation rather than racing ahead and serving a cert whose new CA bundle hasn't reached the shoot yet. `webhook_injector_certificate_rotation_deferred_unhealthy_mrs_total` and its alert `WebhookCertificateRotationDeferredByUnhealthyMRs` are the operator signal. The cert keeps being served from the existing valid leaf throughout the deferral — webhook traffic is unaffected.
+
+**If GRM is still down when the cert reaches `NotAfter`, the gate's escape hatch lets the rotation proceed anyway.** Serving an expired cert is worse than serving a not-yet-propagated one — the webhook stops working immediately on expiry, whereas a not-yet-propagated cert will catch up the moment GRM recovers. `WebhookCertificateAboutToExpire` (critical) fires three days before `NotAfter`, and by then `WebhookManagedResourceUnhealthy` and `WebhookCertificateRotationDeferredByUnhealthyMRs` will already have been firing for a while. There is no scenario where the escape hatch fires by surprise.
+
+**When webhook-injector itself is down, not GRM.** The cert keeps being served from disk via the existing emptyDir mount the webhook server reads from — webhook-injector wrote the files and exited, but the webhook server doesn't care that the writer is gone. The webhook keeps working. The cert-expiry alerts (`WebhookCertificateNearExpiry`, `WebhookCertificateAboutToExpire`) are the safety net for the case where webhook-injector stays down long enough to matter. Recovery is automatic once the pod restarts and the manager wins leader election.
+
+**Shoot hibernation and seed control-plane recreation are not special cases.** The rotation phase machine and the unhealthy-MR gate are both annotation-based and apiserver-persisted, so they survive controller restarts. After the hosting cluster comes back, the controllers pick up wherever they left off — staged rotations resume polling propagation, deferred rotations re-evaluate MR health.
+
+**When in doubt, follow the alerts.** There is no faster manual recovery procedure than waiting for the failed component (GRM or webhook-injector) to come back. The controllers reconverge automatically once their dependencies are healthy, and the alerts are designed to tell operators which component to look at first.
 
 ## Testing
 
