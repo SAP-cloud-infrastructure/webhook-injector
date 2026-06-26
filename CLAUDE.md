@@ -295,7 +295,7 @@ All metrics are registered on controller-runtime's default Prometheus registry a
 
 ### Target-cluster stamping (ConfigMap mode)
 
-- `webhook_injector_target_stamps_total{kind, result}` — counter. Labels: `kind ∈ {MutatingWebhookConfiguration, ValidatingWebhookConfiguration}`; `result ∈ {stamped, converged, error}`. Emitted by `WebhookReconciler.applyWebhookConfigurations`. `stamped` = `Create` or `Update` succeeded; `converged` = idempotency-skip; `error` = Get/Create/Update failure. CRDs are intentionally absent — CRDs flow through `ManagedResource` Secrets and are accounted under the ManagedResource metrics below.
+- `webhook_injector_target_stamps_total{kind, result}` — counter. Labels: `kind ∈ {MutatingWebhookConfiguration, ValidatingWebhookConfiguration}`; `result ∈ {stamped, error}`. Emitted by `WebhookReconciler.applyWebhookConfigurations`. `stamped` = `Create` or `Update` succeeded; `error` = Get/Create/Update failure. The reconciler unconditionally Updates on every pass, so idempotent reconciles count as `stamped` rather than emitting a distinct `converged` value (adding equality detection here is straightforward but out of scope so far). CRDs are intentionally absent — CRDs flow through `ManagedResource` Secrets and are accounted under the ManagedResource metrics below.
 
 ### Rotation fan-out
 
