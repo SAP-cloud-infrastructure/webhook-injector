@@ -980,9 +980,23 @@ func fingerprint(cert *x509.Certificate) [32]byte {
 	return sha256.Sum256(cert.Raw)
 }
 
-// applyWebhookConfigurations applies webhook configs to target cluster
+// applyWebhookConfigurations applies webhook configs to target cluster.
+//
+// Increments TargetStampsTotal per Create/Update/error outcome so the
+// caBundle-propagation alerts (WebhookTargetStampErrors etc. in
+// controlplane-operations) have a live signal to fire on. The
+// "converged" no-op result is not distinguished here — every reconcile
+// pass Updates regardless of equality, so an idempotent reconcile shows
+// up as "stamped" rather than "converged". Adding equality detection
+// here would let the counter distinguish "we changed something" from
+// "we wrote the same bytes" but is out of scope for the rotation-bug
+// review.
 func (r *WebhookReconciler) applyWebhookConfigurations(ctx context.Context, configs *webhooks.WebhookConfigurations) error {
 	logger := log.FromContext(ctx)
+	const (
+		kindMWC = "MutatingWebhookConfiguration"
+		kindVWC = "ValidatingWebhookConfiguration"
+	)
 
 	// Apply mutating webhook configurations
 	for _, mwc := range configs.Mutating {
@@ -995,18 +1009,23 @@ func (r *WebhookReconciler) applyWebhookConfigurations(ctx context.Context, conf
 			if apierrors.IsNotFound(err) {
 				// Create new
 				if err := r.TargetClient.Create(ctx, mwc); err != nil {
+					metrics.TargetStampsTotal.WithLabelValues(kindMWC, metrics.ResultError).Inc()
 					return fmt.Errorf("failed to create MutatingWebhookConfiguration %s: %w", mwc.Name, err)
 				}
+				metrics.TargetStampsTotal.WithLabelValues(kindMWC, metrics.ResultStamped).Inc()
 				logger.Info("Created MutatingWebhookConfiguration", "name", mwc.Name)
 			} else {
+				metrics.TargetStampsTotal.WithLabelValues(kindMWC, metrics.ResultError).Inc()
 				return fmt.Errorf("failed to get MutatingWebhookConfiguration %s: %w", mwc.Name, err)
 			}
 		} else {
 			// Update existing
 			existing.Webhooks = mwc.Webhooks
 			if err := r.TargetClient.Update(ctx, existing); err != nil {
+				metrics.TargetStampsTotal.WithLabelValues(kindMWC, metrics.ResultError).Inc()
 				return fmt.Errorf("failed to update MutatingWebhookConfiguration %s: %w", mwc.Name, err)
 			}
+			metrics.TargetStampsTotal.WithLabelValues(kindMWC, metrics.ResultStamped).Inc()
 			logger.Info("Updated MutatingWebhookConfiguration", "name", mwc.Name)
 		}
 	}
@@ -1022,18 +1041,23 @@ func (r *WebhookReconciler) applyWebhookConfigurations(ctx context.Context, conf
 			if apierrors.IsNotFound(err) {
 				// Create new
 				if err := r.TargetClient.Create(ctx, vwc); err != nil {
+					metrics.TargetStampsTotal.WithLabelValues(kindVWC, metrics.ResultError).Inc()
 					return fmt.Errorf("failed to create ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
 				}
+				metrics.TargetStampsTotal.WithLabelValues(kindVWC, metrics.ResultStamped).Inc()
 				logger.Info("Created ValidatingWebhookConfiguration", "name", vwc.Name)
 			} else {
+				metrics.TargetStampsTotal.WithLabelValues(kindVWC, metrics.ResultError).Inc()
 				return fmt.Errorf("failed to get ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
 			}
 		} else {
 			// Update existing
 			existing.Webhooks = vwc.Webhooks
 			if err := r.TargetClient.Update(ctx, existing); err != nil {
+				metrics.TargetStampsTotal.WithLabelValues(kindVWC, metrics.ResultError).Inc()
 				return fmt.Errorf("failed to update ValidatingWebhookConfiguration %s: %w", vwc.Name, err)
 			}
+			metrics.TargetStampsTotal.WithLabelValues(kindVWC, metrics.ResultStamped).Inc()
 			logger.Info("Updated ValidatingWebhookConfiguration", "name", vwc.Name)
 		}
 	}
