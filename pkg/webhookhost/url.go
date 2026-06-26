@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package webhookhost contains small helpers for composing the externally-
-// reachable webhook URL used by both the patch-mode reconciler and the
-// admission mutator. It is dependency-free so both packages can import it
-// without creating a cycle.
+// reachable webhook URL used by ManagedResourceReconciler when rewriting
+// Service-form conversion clientConfig to URL-form. Dependency-free.
 package webhookhost
 
 // BuildExternalURL composes the URL that replaces a Service-form clientConfig

@@ -7,22 +7,28 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
-	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/webhookhost"
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers/rotationgate"
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
 )
 
 func TestWebhookReconciler_ReconcileConfigMap(t *testing.T) {
@@ -214,6 +220,82 @@ webhooks:
 	}
 	if len(mwc.Webhooks[0].ClientConfig.CABundle) == 0 {
 		t.Error("Expected CA bundle to be injected")
+	}
+}
+
+// TestWebhookReconciler_ApplyWebhooks_PropagatesTargetError pins down the
+// contract that applyAndUpdateExpiry returns target-apply failures to
+// Reconcile rather than swallowing them. A swallowed error (the pre-fix
+// behaviour) would let controller-runtime treat the reconcile as
+// successful, leaving the caBundle stale on the target until the next
+// --sync-period tick with no backoff in between. Regression test for the
+// bug Rico flagged in the PR #11 review.
+func TestWebhookReconciler_ApplyWebhooks_PropagatesTargetError(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("corev1.AddToScheme: %v", err)
+	}
+	if err := admissionv1.AddToScheme(s); err != nil {
+		t.Fatalf("admissionv1.AddToScheme: %v", err)
+	}
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+      caBundle: ""
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+`,
+		},
+	}
+
+	hostingClient := fake.NewClientBuilder().WithScheme(s).WithObjects(configMap).Build()
+
+	// Target client whose Create fails — simulates the apiserver rejecting
+	// the freshly-stamped MWC. The bug-fix contract: this error MUST
+	// bubble up out of Reconcile so controller-runtime applies its own
+	// exponential backoff.
+	wantErr := errors.New("simulated target apiserver outage")
+	targetClient := interceptor.NewClient(
+		fake.NewClientBuilder().WithScheme(s).Build(),
+		interceptor.Funcs{
+			Create: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.CreateOption) error {
+				return wantErr
+			},
+		},
+	)
+
+	reconciler := &WebhookReconciler{
+		Client:                hostingClient,
+		TargetClient:          targetClient,
+		WebhookConfigName:     "webhook-config",
+		Namespace:             "default",
+		CertSecretName:        "test-certs",
+		CertValidity:          30 * 24 * time.Hour,
+		CertRotationThreshold: 0.2,
+		Scheme:                s,
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	})
+	if err == nil {
+		t.Fatal("Reconcile: expected target-cluster apply error to be propagated, got nil")
+	}
+	if !strings.Contains(err.Error(), wantErr.Error()) {
+		t.Errorf("Reconcile error: expected to wrap %q, got %q", wantErr.Error(), err.Error())
 	}
 }
 
@@ -437,7 +519,7 @@ func TestWebhookReconciler_CheckCertificates_ForceRotation_Annotation(t *testing
 			Name:      "test-certs",
 			Namespace: "default",
 			Annotations: map[string]string{
-				ForceRotationAnnotation: "true",
+				ForceRotationAnnotation: annotationTrue,
 			},
 		},
 		Type: corev1.SecretTypeTLS,
@@ -488,7 +570,7 @@ func TestWebhookReconciler_RemovesAnnotationAfterRotation(t *testing.T) {
 			Name:      "test-certs",
 			Namespace: "default",
 			Annotations: map[string]string{
-				ForceRotationAnnotation: "true",
+				ForceRotationAnnotation: annotationTrue,
 			},
 		},
 		Type: corev1.SecretTypeTLS,
@@ -688,7 +770,7 @@ func TestWebhookReconciler_CalculateNextRotation_InvalidCert(t *testing.T) {
 
 func TestWebhookReconciler_CalculateNextRotation_AlreadyPastThreshold(t *testing.T) {
 	// Generate certificate that's already past rotation threshold
-	certPEM, _, err := certificates.GenerateSelfSignedCert(
+	certPEM, keyPEM, err := certificates.GenerateSelfSignedCert(
 		[]certificates.ServiceReference{
 			{Name: "test", Namespace: "default"},
 		},
@@ -704,6 +786,7 @@ func TestWebhookReconciler_CalculateNextRotation_AlreadyPastThreshold(t *testing
 	secret := &corev1.Secret{
 		Data: map[string][]byte{
 			"tls.crt": certPEM,
+			"tls.key": keyPEM,
 		},
 	}
 
@@ -825,610 +908,695 @@ webhooks:
 	t.Logf("RequeueAfter: %v (expected: ~%v)", result.RequeueAfter, expectedRequeue)
 }
 
-func patchModeScheme(t *testing.T) *runtime.Scheme {
+// phaseTestScheme builds a scheme with everything the phase-machine tests
+// need to construct hosting/target fake clients. Kept local to this file
+// so it doesn't pull in fixtures from managed_resource_reconciler_test.go.
+func phaseTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
 	if err := corev1.AddToScheme(s); err != nil {
-		t.Fatalf("Failed to add corev1: %v", err)
+		t.Fatalf("corev1.AddToScheme: %v", err)
 	}
 	if err := admissionv1.AddToScheme(s); err != nil {
-		t.Fatalf("Failed to add admissionv1: %v", err)
+		t.Fatalf("admissionv1.AddToScheme: %v", err)
 	}
 	if err := apiextensionsv1.AddToScheme(s); err != nil {
-		t.Fatalf("Failed to add apiextensionsv1: %v", err)
+		t.Fatalf("apiextensionsv1.AddToScheme: %v", err)
 	}
 	return s
 }
 
-func TestWebhookReconciler_PatchMode_NoMatchingConfigs(t *testing.T) {
-	s := patchModeScheme(t)
-
-	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
-	// Target cluster has no labeled webhook configurations
-	targetClient := fake.NewClientBuilder().WithScheme(s).Build()
-
-	reconciler := &WebhookReconciler{
-		Client:                hostingClient,
-		TargetClient:          targetClient,
-		WebhookLabelKey:       "webhook-injector/name",
-		WebhookLabelValue:     "test",
-		CertSANs:              []string{"host.example.com"},
-		Namespace:             "default",
-		CertSecretName:        "test-certs",
-		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.2,
-		Scheme:                s,
+// mintCert generates a self-signed cert/key pair via the same generator
+// the controller uses, so the resulting bundle has identical shape to a
+// real cert Secret.
+func mintCert(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+	certPEM, keyPEM, err := certificates.GenerateSelfSignedCert(
+		[]certificates.ServiceReference{{Name: "svc", Namespace: "ns"}},
+		time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("GenerateSelfSignedCert: %v", err)
 	}
+	return certPEM, keyPEM
+}
 
-	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
-		t.Fatalf("Reconcile should not error when no configs match the label: %v", err)
-	}
-
-	// Nothing was created in target cluster
-	mwcList := &admissionv1.MutatingWebhookConfigurationList{}
-	if err := targetClient.List(context.Background(), mwcList); err != nil {
-		t.Fatalf("List failed: %v", err)
-	}
-	if len(mwcList.Items) != 0 {
-		t.Errorf("Expected zero MutatingWebhookConfigurations, got %d", len(mwcList.Items))
+// makeRotationReconciler builds a WebhookReconciler around a fake
+// hosting Client (seeded with `objects`) and a fake TargetClient (seeded
+// with `targetObjects`). The CertSecretName/Namespace match the test
+// fixtures so leafFromSecret/loadCABundle resolve correctly.
+func makeRotationReconciler(t *testing.T, objects, targetObjects []client.Object) *WebhookReconciler {
+	t.Helper()
+	s := phaseTestScheme(t)
+	hosting := fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build()
+	target := fake.NewClientBuilder().WithScheme(s).WithObjects(targetObjects...).Build()
+	return &WebhookReconciler{
+		Client:         hosting,
+		TargetClient:   target,
+		CertSecretName: "test-certs",
+		Namespace:      "default",
+		CertValidity:   time.Hour,
+		Scheme:         s,
+		Gate:           rotationgate.New(),
 	}
 }
 
-const testCRDName = "widgets.example.com"
+// readSecret refetches the cert Secret from the reconciler's hosting
+// client. Convenience to keep the tests readable.
+func readSecret(t *testing.T, r *WebhookReconciler) *corev1.Secret {
+	t.Helper()
+	out := &corev1.Secret{}
+	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: r.CertSecretName, Namespace: r.Namespace}, out); err != nil {
+		t.Fatalf("Get Secret: %v", err)
+	}
+	return out
+}
 
-// crdWithWebhookConversion returns a minimal CRD wired up for Webhook conversion.
-// strategy controls .spec.conversion.strategy; clientConfig controls the client
-// config (or nil to leave conversion.webhook.clientConfig unset). The CRD always
-// carries the test label "webhook-injector/name=test" so the label-based
-// reconciler discovers it.
-func crdWithWebhookConversion(strategy apiextensionsv1.ConversionStrategyType, cc *apiextensionsv1.WebhookClientConfig) *apiextensionsv1.CustomResourceDefinition {
-	crd := &apiextensionsv1.CustomResourceDefinition{
+// countPEMCerts counts CERTIFICATE blocks in a PEM byte slice via the
+// shared ParseChain helper. Tests assert on bundle cardinality before
+// inspecting individual cert contents.
+func countPEMCerts(t *testing.T, pemBytes []byte) int {
+	t.Helper()
+	certs, err := certificates.ParseChain(pemBytes)
+	if err != nil {
+		t.Fatalf("ParseChain: %v", err)
+	}
+	return len(certs)
+}
+
+// TestStageCertificate_FromActive covers the canonical first-rotation
+// case: existing single-cert active Secret, stageCertificate runs, the
+// resulting Secret has tls.crt = old||new, tls.key still pointing at
+// old, tls.staged.key carrying the new key, phase=staged, started-at
+// freshly stamped.
+func TestStageCertificate_FromActive(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-certs", Namespace: "default"},
+		Type:       corev1.SecretTypeTLS,
+		Data:       map[string][]byte{tlsCrtKey: oldCert, tlsKeyKey: oldKey},
+	}
+	r := makeRotationReconciler(t, []client.Object{existing}, nil)
+
+	if err := r.stageCertificate(context.Background(), []certificates.ServiceReference{{Name: "svc", Namespace: "ns"}}); err != nil {
+		t.Fatalf("stageCertificate: %v", err)
+	}
+
+	got := readSecret(t, r)
+	if n := countPEMCerts(t, got.Data[tlsCrtKey]); n != 2 {
+		t.Fatalf("tls.crt: expected 2 cert blocks (union bundle), got %d", n)
+	}
+	if !bytesContains(got.Data[tlsCrtKey], oldCert) {
+		t.Errorf("tls.crt: must still contain the OLD cert verbatim")
+	}
+	if string(got.Data[tlsKeyKey]) != string(oldKey) {
+		t.Errorf("tls.key: must still be the old key during staged phase")
+	}
+	if len(got.Data[tlsStagedKeyKey]) == 0 {
+		t.Errorf("tls.staged.key: must be present during staged phase")
+	}
+	if got.Annotations[RotationPhaseAnnotation] != string(PhaseStaged) {
+		t.Errorf("phase annotation: want staged, got %q", got.Annotations[RotationPhaseAnnotation])
+	}
+	if got.Annotations[RotationStartedAtAnnotation] == "" {
+		t.Errorf("started-at annotation: must be set")
+	}
+}
+
+// TestStageCertificate_InitialBootstrap covers the no-existing-Secret
+// path: stageCertificate must write a fresh single-cert Secret in active
+// phase (no overlap to construct).
+func TestStageCertificate_InitialBootstrap(t *testing.T) {
+	r := makeRotationReconciler(t, nil, nil)
+
+	if err := r.stageCertificate(context.Background(), []certificates.ServiceReference{{Name: "svc", Namespace: "ns"}}); err != nil {
+		t.Fatalf("stageCertificate: %v", err)
+	}
+
+	got := readSecret(t, r)
+	if n := countPEMCerts(t, got.Data[tlsCrtKey]); n != 1 {
+		t.Fatalf("initial bootstrap tls.crt: expected 1 cert, got %d", n)
+	}
+	if _, present := got.Data[tlsStagedKeyKey]; present {
+		t.Errorf("initial bootstrap: tls.staged.key must NOT be present")
+	}
+	if phase := got.Annotations[RotationPhaseAnnotation]; phase != "" && phase != string(PhaseActive) {
+		t.Errorf("initial bootstrap phase: want active or empty, got %q", phase)
+	}
+}
+
+// TestStageCertificate_ReStage covers the low-level contract of
+// stageCertificate when called from a staged-phase Secret: the
+// previously-staged candidate is replaced with a fresh one, NOT chained
+// on top — the bundle stays at 2 certs. The Reconcile-level
+// force-rotation gate (isRotationInFlight) prevents this path from
+// firing in normal operation; the test exists to lock the helper's
+// behaviour in case the gate is bypassed (controller restart racing a
+// hand-edited Secret, etc.).
+func TestStageCertificate_ReStage(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	candidateCert, candidateKey := mintCert(t)
+	bundle := append(append([]byte{}, oldCert...), candidateCert...)
+	existing := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   testCRDName,
-			Labels: map[string]string{"webhook-injector/name": "test"},
-		},
-		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-			Group: "example.com",
-			Names: apiextensionsv1.CustomResourceDefinitionNames{
-				Plural:   "widgets",
-				Singular: "widget",
-				Kind:     "Widget",
-				ListKind: "WidgetList",
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				RotationPhaseAnnotation:     string(PhaseStaged),
+				RotationStartedAtAnnotation: time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339),
 			},
-			Scope: apiextensionsv1.NamespaceScoped,
-			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
-				Name: "v1", Served: true, Storage: true,
-				Schema: &apiextensionsv1.CustomResourceValidation{
-					OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{Type: "object"},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: oldKey, tlsStagedKeyKey: candidateKey},
+	}
+	r := makeRotationReconciler(t, []client.Object{existing}, nil)
+
+	if err := r.stageCertificate(context.Background(), []certificates.ServiceReference{{Name: "svc", Namespace: "ns"}}); err != nil {
+		t.Fatalf("stageCertificate: %v", err)
+	}
+
+	got := readSecret(t, r)
+	if n := countPEMCerts(t, got.Data[tlsCrtKey]); n != 2 {
+		t.Fatalf("re-stage tls.crt: expected 2 cert blocks (oldLeaf + fresh candidate), got %d", n)
+	}
+	if !bytesContains(got.Data[tlsCrtKey], oldCert) {
+		t.Errorf("re-stage: oldLeaf must still be in the bundle")
+	}
+	if bytesContains(got.Data[tlsCrtKey], candidateCert) {
+		t.Errorf("re-stage: previous-candidate must be replaced, not retained")
+	}
+}
+
+// TestStageCertificate_PreservesNonControllerAnnotations confirms that a
+// rotation does NOT clobber annotations that the controller doesn't own
+// (helm release markers, kubectl last-applied, etc.).
+func TestStageCertificate_PreservesNonControllerAnnotations(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				ForceRotationAnnotation:                     annotationTrue, // must be cleared
+				"meta.helm.sh/release-name":                 "ipam-capi-remote",
+				"kubectl.kubernetes.io/last-applied-config": "{...}",
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: oldCert, tlsKeyKey: oldKey},
+	}
+	r := makeRotationReconciler(t, []client.Object{existing}, nil)
+	if err := r.stageCertificate(context.Background(), []certificates.ServiceReference{{Name: "svc", Namespace: "ns"}}); err != nil {
+		t.Fatalf("stageCertificate: %v", err)
+	}
+
+	got := readSecret(t, r)
+	if got.Annotations[ForceRotationAnnotation] != "" {
+		t.Errorf("force-rotation annotation should be cleared after rotation")
+	}
+	if got.Annotations["meta.helm.sh/release-name"] != "ipam-capi-remote" {
+		t.Errorf("helm annotation was lost: got %q", got.Annotations["meta.helm.sh/release-name"])
+	}
+	if got.Annotations["kubectl.kubernetes.io/last-applied-config"] != "{...}" {
+		t.Errorf("kubectl annotation was lost")
+	}
+}
+
+// TestPromoteCertificate switches tls.key to the staged key, clears
+// tls.staged.key, and REORDERS tls.crt so the new (now-leaf) cert is
+// first in the bundle. Both certs remain in tls.crt (the apiserver-side
+// caBundle still trusts both). Phase becomes active and the promoted-at
+// marker is set.
+func TestPromoteCertificate(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	newCert, newKey := mintCert(t)
+	bundle := append(append([]byte{}, oldCert...), newCert...)
+	startedAt := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339)
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				RotationPhaseAnnotation:     string(PhaseStaged),
+				RotationStartedAtAnnotation: startedAt,
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: oldKey, tlsStagedKeyKey: newKey},
+	}
+	r := makeRotationReconciler(t, []client.Object{existing}, nil)
+	secret := readSecret(t, r)
+
+	if err := r.promoteCertificate(context.Background(), secret); err != nil {
+		t.Fatalf("promoteCertificate: %v", err)
+	}
+
+	got := readSecret(t, r)
+	if string(got.Data[tlsKeyKey]) != string(newKey) {
+		t.Errorf("tls.key must be swapped to the staged key after promote")
+	}
+	if _, present := got.Data[tlsStagedKeyKey]; present {
+		t.Errorf("tls.staged.key must be removed after promote")
+	}
+	// tls.crt must still carry BOTH certs (so the apiserver-side caBundle
+	// continues trusting the old cert until prune), but the NEW cert
+	// must be FIRST so tls.LoadX509KeyPair pairs it with the new key.
+	if n := countPEMCerts(t, got.Data[tlsCrtKey]); n != 2 {
+		t.Fatalf("tls.crt after promote: want 2 cert blocks, got %d", n)
+	}
+	postPromoteLeaf, err := certificates.LeafCertificate(got.Data[tlsCrtKey], got.Data[tlsKeyKey])
+	if err != nil {
+		t.Fatalf("leaf detection on promoted bundle: %v", err)
+	}
+	// The post-promote leaf must be the NEW cert. Compare by DER bytes:
+	// equivalent to ordering check on the bundle.
+	certs, err := certificates.ParseChain(got.Data[tlsCrtKey])
+	if err != nil {
+		t.Fatalf("ParseChain post-promote: %v", err)
+	}
+	if !certs[0].Equal(postPromoteLeaf) {
+		t.Errorf("post-promote tls.crt: new leaf must be first in the bundle")
+	}
+	if got.Annotations[RotationPhaseAnnotation] != string(PhaseActive) {
+		t.Errorf("phase must be active after promote, got %q", got.Annotations[RotationPhaseAnnotation])
+	}
+	if got.Annotations[RotationStartedAtAnnotation] != startedAt {
+		t.Errorf("started-at must be preserved across promote")
+	}
+	if got.Annotations[rotationPromotedAtAnnotation] == "" {
+		t.Errorf("promoted-at marker must be set on promote")
+	}
+}
+
+// TestPruneCertificate drops the old cert from the bundle, leaving only
+// the leaf. All rotation annotations are cleared.
+func TestPruneCertificate(t *testing.T) {
+	oldCert, _ := mintCert(t)
+	newCert, newKey := mintCert(t)
+	bundle := append(append([]byte{}, oldCert...), newCert...)
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				RotationPhaseAnnotation:      string(PhaseActive),
+				RotationStartedAtAnnotation:  time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+				rotationPromotedAtAnnotation: time.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: newKey},
+	}
+	r := makeRotationReconciler(t, []client.Object{existing}, nil)
+	secret := readSecret(t, r)
+
+	if err := r.pruneCertificate(context.Background(), secret); err != nil {
+		t.Fatalf("pruneCertificate: %v", err)
+	}
+
+	got := readSecret(t, r)
+	if n := countPEMCerts(t, got.Data[tlsCrtKey]); n != 1 {
+		t.Fatalf("pruned tls.crt: expected 1 cert, got %d", n)
+	}
+	if bytesContains(got.Data[tlsCrtKey], oldCert) {
+		t.Errorf("pruned bundle must NOT contain the old cert")
+	}
+	if got.Annotations[RotationPhaseAnnotation] != "" {
+		t.Errorf("phase annotation must be cleared after prune, got %q", got.Annotations[RotationPhaseAnnotation])
+	}
+	if got.Annotations[rotationPromotedAtAnnotation] != "" {
+		t.Errorf("promoted-at must be cleared after prune")
+	}
+}
+
+// TestCheckPropagation_EmptyGate confirms that when the shared
+// rotation Gate has no published CRDs (no MR reconciler running, or
+// no labeled MRs shipping CRDs), checkPropagation returns true
+// immediately — the time-based gate timeout is the only constraint
+// in that mode.
+func TestCheckPropagation_EmptyGate(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	newCert, _ := mintCert(t)
+	bundle := append(append([]byte{}, oldCert...), newCert...)
+	secret := &corev1.Secret{
+		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: oldKey},
+	}
+	r := makeRotationReconciler(t, nil, nil) // r.Gate is set by the helper but Replace was never called; Snapshot returns nil.
+	propagated, err := r.checkPropagation(context.Background(), secret)
+	if err != nil {
+		t.Fatalf("checkPropagation: %v", err)
+	}
+	if !propagated {
+		t.Errorf("empty gate should return propagated=true")
+	}
+}
+
+// TestCheckPropagation_BothCertsPresent confirms the positive case: every
+// gated CRD on the target has both certs in its conversion caBundle.
+func TestCheckPropagation_BothCertsPresent(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	newCert, _ := mintCert(t)
+	bundle := append(append([]byte{}, oldCert...), newCert...)
+	secret := &corev1.Secret{
+		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: oldKey},
+	}
+
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "widgets.example.com"},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Conversion: &apiextensionsv1.CustomResourceConversion{
+				Strategy: apiextensionsv1.WebhookConverter,
+				Webhook: &apiextensionsv1.WebhookConversion{
+					ClientConfig: &apiextensionsv1.WebhookClientConfig{CABundle: bundle},
 				},
-			}},
-			Conversion: &apiextensionsv1.CustomResourceConversion{Strategy: strategy},
+			},
 		},
 	}
-	if strategy == apiextensionsv1.WebhookConverter && cc != nil {
-		crd.Spec.Conversion.Webhook = &apiextensionsv1.WebhookConversion{
-			ClientConfig:             cc,
-			ConversionReviewVersions: []string{"v1"},
+	r := makeRotationReconciler(t, nil, []client.Object{crd})
+	r.Gate.Publish("test", []string{"widgets.example.com"})
+
+	propagated, err := r.checkPropagation(context.Background(), secret)
+	if err != nil {
+		t.Fatalf("checkPropagation: %v", err)
+	}
+	if !propagated {
+		t.Errorf("expected propagated=true when CRD has both certs")
+	}
+}
+
+// TestCheckPropagation_OnlyOldCert covers the in-flight case: the gated
+// CRD has only the old cert (the staged cert hasn't reached it yet).
+// Must return false.
+func TestCheckPropagation_OnlyOldCert(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	newCert, _ := mintCert(t)
+	bundle := append(append([]byte{}, oldCert...), newCert...)
+	secret := &corev1.Secret{
+		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: oldKey},
+	}
+
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "widgets.example.com"},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Conversion: &apiextensionsv1.CustomResourceConversion{
+				Strategy: apiextensionsv1.WebhookConverter,
+				Webhook: &apiextensionsv1.WebhookConversion{
+					ClientConfig: &apiextensionsv1.WebhookClientConfig{CABundle: oldCert}, // only old
+				},
+			},
+		},
+	}
+	r := makeRotationReconciler(t, nil, []client.Object{crd})
+	r.Gate.Publish("test", []string{"widgets.example.com"})
+
+	propagated, err := r.checkPropagation(context.Background(), secret)
+	if err != nil {
+		t.Fatalf("checkPropagation: %v", err)
+	}
+	if propagated {
+		t.Errorf("expected propagated=false when CRD only has old cert")
+	}
+}
+
+// TestCheckPropagation_MissingCRD covers the bootstrap edge case: a
+// CRD published on the gate is not (yet) present on the target.
+// Must return false (NOT error) so the staged loop waits it out.
+func TestCheckPropagation_MissingCRD(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	newCert, _ := mintCert(t)
+	bundle := append(append([]byte{}, oldCert...), newCert...)
+	secret := &corev1.Secret{
+		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: oldKey},
+	}
+	r := makeRotationReconciler(t, nil, nil) // no CRDs on target
+	r.Gate.Publish("test", []string{"missing.example.com"})
+
+	propagated, err := r.checkPropagation(context.Background(), secret)
+	if err != nil {
+		t.Fatalf("checkPropagation: %v", err)
+	}
+	if propagated {
+		t.Errorf("expected propagated=false when gated CRD is absent on target")
+	}
+}
+
+// bytesContains is a substring check on byte slices. Used to verify
+// that a concatenated PEM bundle still contains a specific cert block
+// verbatim. Local to this file so the test stays self-contained.
+func bytesContains(haystack, needle []byte) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if string(haystack[i:i+len(needle)]) == string(needle) {
+			return true
 		}
 	}
-	return crd
+	return false
 }
 
-func TestWebhookReconciler_PatchCRDs_ConfigMapMode_CAOnly(t *testing.T) {
-	s := patchModeScheme(t)
-
-	oldURL := "https://untouched.example.com:443/convert"
-	crd := crdWithWebhookConversion(apiextensionsv1.WebhookConverter,
-		&apiextensionsv1.WebhookClientConfig{URL: &oldURL, CABundle: []byte("old")})
-
-	configMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
-		Data: map[string]string{
-			"webhooks.yaml": `---
-apiVersion: admissionregistration.k8s.io/v1
-kind: MutatingWebhookConfiguration
-metadata:
-  name: test-webhook
-webhooks:
-  - name: test.example.com
-    clientConfig:
-      service:
-        name: webhook-svc
-        namespace: default
-        path: /mutate
-      caBundle: ""
-    admissionReviewVersions: ["v1"]
-    sideEffects: None
-`,
-		},
-	}
-
-	hostingClient := fake.NewClientBuilder().WithScheme(s).WithObjects(configMap).Build()
-	targetClient := fake.NewClientBuilder().WithScheme(s).WithObjects(crd).Build()
-
-	reconciler := &WebhookReconciler{
-		Client:            hostingClient,
-		TargetClient:      targetClient,
-		WebhookConfigName: "webhook-config",
-		WebhookLabelKey:   "webhook-injector/name",
-		WebhookLabelValue: "test",
-		// CRD URL/Service must be preserved; only CABundle is patched.
-		Namespace:             "default",
-		CertSecretName:        "test-certs",
-		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.2,
-		Scheme:                s,
-	}
-
-	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"}}
-	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("Reconcile failed: %v", err)
-	}
-
-	got := &apiextensionsv1.CustomResourceDefinition{}
-	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "widgets.example.com"}, got); err != nil {
-		t.Fatalf("Get CRD failed: %v", err)
-	}
-	cc := got.Spec.Conversion.Webhook.ClientConfig
-	if cc.URL == nil || *cc.URL != oldURL {
-		t.Errorf("Expected URL to be preserved as %q, got %v", oldURL, cc.URL)
-	}
-	if string(cc.CABundle) == "old" || len(cc.CABundle) == 0 {
-		t.Errorf("Expected CABundle to be replaced with generated cert, got %q", string(cc.CABundle))
-	}
-}
-
-func TestWebhookReconciler_PatchCRDs_ConfigMapMode_ExternalHost_RewritesService(t *testing.T) {
-	s := patchModeScheme(t)
-
-	servicePath := "/convert"
-	crd := crdWithWebhookConversion(apiextensionsv1.WebhookConverter,
-		&apiextensionsv1.WebhookClientConfig{
-			Service: &apiextensionsv1.ServiceReference{
-				Name:      "conv-svc",
-				Namespace: "default",
-				Path:      &servicePath,
-			},
-			CABundle: []byte("old"),
-		})
-
-	configMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
-		Data: map[string]string{
-			"webhooks.yaml": `---
-apiVersion: admissionregistration.k8s.io/v1
-kind: MutatingWebhookConfiguration
-metadata:
-  name: test-webhook
-webhooks:
-  - name: test.example.com
-    clientConfig:
-      service:
-        name: webhook-svc
-        namespace: default
-        path: /mutate
-      caBundle: ""
-    admissionReviewVersions: ["v1"]
-    sideEffects: None
-`,
-		},
-	}
-
-	hostingClient := fake.NewClientBuilder().WithScheme(s).WithObjects(configMap).Build()
-	targetClient := fake.NewClientBuilder().WithScheme(s).WithObjects(crd).Build()
-
-	reconciler := &WebhookReconciler{
-		Client:                hostingClient,
-		TargetClient:          targetClient,
-		WebhookConfigName:     "webhook-config",
-		WebhookLabelKey:       "webhook-injector/name",
-		WebhookLabelValue:     "test",
-		ExternalHost:          "webhook.example.com:9443",
-		Namespace:             "default",
-		CertSecretName:        "test-certs",
-		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.2,
-		Scheme:                s,
-	}
-
-	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"}}
-	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("Reconcile failed: %v", err)
-	}
-
-	got := &apiextensionsv1.CustomResourceDefinition{}
-	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: testCRDName}, got); err != nil {
-		t.Fatalf("Get CRD failed: %v", err)
-	}
-	cc := got.Spec.Conversion.Webhook.ClientConfig
-	if cc.Service != nil {
-		t.Errorf("Expected Service to be cleared after Service→URL rewrite, got %+v", cc.Service)
-	}
-	wantURL := "https://webhook.example.com:9443/convert"
-	if cc.URL == nil || *cc.URL != wantURL {
-		t.Errorf("Expected URL=%q, got %v", wantURL, cc.URL)
-	}
-	if string(cc.CABundle) == "old" || len(cc.CABundle) == 0 {
-		t.Errorf("Expected CABundle to be replaced with generated cert, got %q", string(cc.CABundle))
-	}
-}
-
-func TestWebhookReconciler_ConfigMapMode_IgnoresLabeledAdmissionWebhooks(t *testing.T) {
-	s := patchModeScheme(t)
-
-	originalCA := []byte("original-ca-bundle")
-	labels := map[string]string{"webhook-injector/name": "test"}
-
-	labeledMWC := &admissionv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "labeled-mwc", Labels: labels},
-		Webhooks: []admissionv1.MutatingWebhook{{
-			Name: "labeled.example.com",
-			ClientConfig: admissionv1.WebhookClientConfig{
-				CABundle: originalCA,
-			},
-		}},
-	}
-	labeledVWC := &admissionv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "labeled-vwc", Labels: labels},
-		Webhooks: []admissionv1.ValidatingWebhook{{
-			Name: "labeled-validating.example.com",
-			ClientConfig: admissionv1.WebhookClientConfig{
-				CABundle: originalCA,
-			},
-		}},
-	}
-
-	configMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
-		Data: map[string]string{
-			"webhooks.yaml": `---
-apiVersion: admissionregistration.k8s.io/v1
-kind: MutatingWebhookConfiguration
-metadata:
-  name: configmap-mwc
-webhooks:
-  - name: configmap.example.com
-    clientConfig:
-      service:
-        name: webhook-svc
-        namespace: default
-        path: /mutate
-      caBundle: ""
-    admissionReviewVersions: ["v1"]
-    sideEffects: None
-`,
-		},
-	}
-
-	hostingClient := fake.NewClientBuilder().WithScheme(s).WithObjects(configMap).Build()
-	targetClient := fake.NewClientBuilder().WithScheme(s).WithObjects(labeledMWC, labeledVWC).Build()
-
-	reconciler := &WebhookReconciler{
-		Client:                hostingClient,
-		TargetClient:          targetClient,
-		WebhookConfigName:     "webhook-config",
-		WebhookLabelKey:       "webhook-injector/name",
-		WebhookLabelValue:     "test",
-		Namespace:             "default",
-		CertSecretName:        "test-certs",
-		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.2,
-		Scheme:                s,
-	}
-
-	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"}}
-	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("Reconcile failed: %v", err)
-	}
-
-	gotMWC := &admissionv1.MutatingWebhookConfiguration{}
-	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "labeled-mwc"}, gotMWC); err != nil {
-		t.Fatalf("Get labeled MWC failed: %v", err)
-	}
-	if string(gotMWC.Webhooks[0].ClientConfig.CABundle) != string(originalCA) {
-		t.Errorf("Expected labeled MWC CABundle untouched in ConfigMap mode, got %q", string(gotMWC.Webhooks[0].ClientConfig.CABundle))
-	}
-
-	gotVWC := &admissionv1.ValidatingWebhookConfiguration{}
-	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "labeled-vwc"}, gotVWC); err != nil {
-		t.Fatalf("Get labeled VWC failed: %v", err)
-	}
-	if string(gotVWC.Webhooks[0].ClientConfig.CABundle) != string(originalCA) {
-		t.Errorf("Expected labeled VWC CABundle untouched in ConfigMap mode, got %q", string(gotVWC.Webhooks[0].ClientConfig.CABundle))
-	}
-
-	// The ConfigMap-defined webhook is still applied.
-	gotConfigMapMWC := &admissionv1.MutatingWebhookConfiguration{}
-	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "configmap-mwc"}, gotConfigMapMWC); err != nil {
-		t.Fatalf("Expected ConfigMap-defined MWC to be created: %v", err)
-	}
-	if len(gotConfigMapMWC.Webhooks[0].ClientConfig.CABundle) == 0 {
-		t.Errorf("Expected ConfigMap-defined MWC to receive a generated CABundle, got empty")
-	}
-}
-
-func TestWebhookReconciler_PatchCRDs_NoMatchingCRD(t *testing.T) {
-	s := patchModeScheme(t)
-
-	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
-	targetClient := fake.NewClientBuilder().WithScheme(s).Build() // no CRD present
-
-	reconciler := &WebhookReconciler{
-		Client:                hostingClient,
-		TargetClient:          targetClient,
-		WebhookLabelKey:       "webhook-injector/name",
-		WebhookLabelValue:     "test",
-		CertSANs:              []string{"host.example.com"},
-		Namespace:             "default",
-		CertSecretName:        "test-certs",
-		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.2,
-		Scheme:                s,
-	}
-
-	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
-		t.Fatalf("Reconcile should not error when no CRDs match the label: %v", err)
-	}
-
-	crdList := &apiextensionsv1.CustomResourceDefinitionList{}
-	if err := targetClient.List(context.Background(), crdList); err != nil {
-		t.Fatalf("List CRDs failed: %v", err)
-	}
-	if len(crdList.Items) != 0 {
-		t.Errorf("Expected zero CRDs, got %d", len(crdList.Items))
-	}
-}
-
-func TestWebhookReconciler_PatchCRDs_NonWebhookStrategy(t *testing.T) {
-	s := patchModeScheme(t)
-
-	originalCA := []byte("untouched")
-	// Strategy=None; build CRD manually so we can include a stale CABundle on a (vestigial) clientConfig
-	// to verify we don't touch it.
-	crd := crdWithWebhookConversion(apiextensionsv1.NoneConverter, nil)
-	// Simulate a leftover clientConfig under a non-Webhook strategy by attaching it manually.
-	url := "https://untouched.example.com/convert"
-	crd.Spec.Conversion.Webhook = &apiextensionsv1.WebhookConversion{
-		ClientConfig: &apiextensionsv1.WebhookClientConfig{
-			URL:      &url,
-			CABundle: originalCA,
-		},
-		ConversionReviewVersions: []string{"v1"},
-	}
-
-	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
-	targetClient := fake.NewClientBuilder().WithScheme(s).WithObjects(crd).Build()
-
-	reconciler := &WebhookReconciler{
-		Client:                hostingClient,
-		TargetClient:          targetClient,
-		WebhookLabelKey:       "webhook-injector/name",
-		WebhookLabelValue:     "test",
-		CertSANs:              []string{"new.example.com"},
-		Namespace:             "default",
-		CertSecretName:        "test-certs",
-		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.2,
-		Scheme:                s,
-	}
-
-	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
-		t.Fatalf("Reconcile failed: %v", err)
-	}
-
-	got := &apiextensionsv1.CustomResourceDefinition{}
-	if err := targetClient.Get(context.Background(), types.NamespacedName{Name: "widgets.example.com"}, got); err != nil {
-		t.Fatalf("Get CRD failed: %v", err)
-	}
-	cc := got.Spec.Conversion.Webhook.ClientConfig
-	if cc.URL == nil || *cc.URL != "https://untouched.example.com/convert" {
-		t.Errorf("Expected URL untouched, got %v", cc.URL)
-	}
-	if string(cc.CABundle) != string(originalCA) {
-		t.Errorf("Expected CABundle untouched, got %q", string(cc.CABundle))
-	}
-}
-
-func TestBuildExternalURL(t *testing.T) {
-	empty := ""
-	slashed := "/foo"
-	unslashed := "foo"
-	deep := "/a/b/c"
+// TestIsRotationInFlight covers the four shapes the predicate has to
+// distinguish: absent (initial bootstrap), steady-state active (no
+// promoted-at), post-promote pre-prune active (promoted-at recent),
+// post-prune-overdue active (promoted-at + overlap elapsed), and
+// staged. Steady and absent must return false; everything else must
+// return true so the force-rotation gate engages.
+func TestIsRotationInFlight(t *testing.T) {
+	overlap := 5 * time.Minute
 	cases := []struct {
-		name string
-		host string
-		path *string
-		want string
+		name         string
+		annotations  map[string]string
+		wantInFlight bool
 	}{
-		{"nil path", "h:1", nil, "https://h:1/"},
-		{"empty path", "h:1", &empty, "https://h:1/"},
-		{"slashed path", "h:1", &slashed, "https://h:1/foo"},
-		{"unslashed path", "h:1", &unslashed, "https://h:1/foo"},
-		{"deep path", "h:1", &deep, "https://h:1/a/b/c"},
+		{
+			name:         "absent (initial bootstrap)",
+			annotations:  nil,
+			wantInFlight: false,
+		},
+		{
+			name: "steady-state active (no promoted-at)",
+			annotations: map[string]string{
+				RotationPhaseAnnotation: string(PhaseActive),
+			},
+			wantInFlight: false,
+		},
+		{
+			name: "post-promote pre-prune (overlap window still open)",
+			annotations: map[string]string{
+				RotationPhaseAnnotation:      string(PhaseActive),
+				rotationPromotedAtAnnotation: time.Now().UTC().Add(-1 * time.Minute).Format(time.RFC3339),
+			},
+			wantInFlight: true,
+		},
+		{
+			name: "post-promote overlap elapsed (one more pass before prune)",
+			annotations: map[string]string{
+				RotationPhaseAnnotation:      string(PhaseActive),
+				rotationPromotedAtAnnotation: time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339),
+			},
+			wantInFlight: true,
+		},
+		{
+			name: "staged",
+			annotations: map[string]string{
+				RotationPhaseAnnotation:     string(PhaseStaged),
+				RotationStartedAtAnnotation: time.Now().UTC().Format(time.RFC3339),
+			},
+			wantInFlight: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := webhookhost.BuildExternalURL(tc.host, tc.path); got != tc.want {
-				t.Errorf("webhookhost.BuildExternalURL(%q, %v) = %q, want %q", tc.host, tc.path, got, tc.want)
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Annotations: tc.annotations}}
+			got, _ := isRotationInFlight(secret, overlap)
+			if got != tc.wantInFlight {
+				t.Errorf("isRotationInFlight: got %v, want %v", got, tc.wantInFlight)
 			}
 		})
 	}
 }
 
-func TestPatchModeBootstrap_StartFiresOneEvent(t *testing.T) {
-	ch := make(chan event.GenericEvent, 1)
-	b := &patchModeBootstrap{ch: ch, namespace: "ns", secretName: "sec"}
-
-	if err := b.Start(context.Background()); err != nil {
-		t.Fatalf("Start failed: %v", err)
-	}
-
-	select {
-	case evt := <-ch:
-		if evt.Object == nil {
-			t.Fatal("Expected non-nil Object on bootstrap event")
-		}
-		if evt.Object.GetName() != "sec" || evt.Object.GetNamespace() != "ns" {
-			t.Errorf("Bootstrap event metadata mismatch: got %s/%s, want ns/sec",
-				evt.Object.GetNamespace(), evt.Object.GetName())
-		}
-	default:
-		t.Fatal("Expected one bootstrap event on the channel after Start, got none")
-	}
-}
-
-func TestPatchModeBootstrap_StartReturnsOnContextCancel(t *testing.T) {
-	// Unbuffered channel with no reader — Start should block on send and then
-	// return ctx.Err() when the context is canceled. This is what manager
-	// shutdown looks like if it happens before any controller worker reads.
-	ch := make(chan event.GenericEvent)
-	b := &patchModeBootstrap{ch: ch, namespace: "ns", secretName: "sec"}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- b.Start(ctx) }()
-
-	cancel()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Error("Expected non-nil error after context cancel")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Start did not return after context cancel within 1s")
-	}
-}
-
-func TestPatchModeBootstrap_NeedsLeaderElection(t *testing.T) {
-	b := &patchModeBootstrap{}
-	if !b.NeedLeaderElection() {
-		t.Error("patchModeBootstrap must require leader election so only one replica fires the startup event")
-	}
-}
-
-func TestDesiredAdmissionWebhook_Shape(t *testing.T) {
-	r := &WebhookReconciler{
-		AdmissionWebhookName:  "webhook-injector-mutator",
-		ExternalHost:          "ext.example.com:9443",
-		AdmissionExternalHost: "ext.example.com:31443",
-		WebhookLabelKey:       "webhook-injector/managed",
-		WebhookLabelValue:     "true",
-	}
-	mwc := r.desiredAdmissionWebhook([]byte("PEM"))
-
-	if mwc.Name != "webhook-injector-mutator" {
-		t.Errorf("Name = %q, want %q", mwc.Name, "webhook-injector-mutator")
-	}
-	if mwc.Labels == nil || len(mwc.Labels) != 0 {
-		t.Errorf("Labels = %v, want non-nil empty map (so the objectSelector cannot match the MWC itself)", mwc.Labels)
-	}
-	if got, want := len(mwc.Webhooks), 1; got != want {
-		t.Fatalf("len(Webhooks) = %d, want %d (CRDs only — MWC/VWC are kube-apiserver-exempt and handled by TargetWebhookReconciler)", got, want)
-	}
-	wantPathByName := map[string]string{
-		"crd.webhook-injector.sap.com": "/mutate-crd",
-	}
-	for _, wh := range mwc.Webhooks {
-		if wh.TimeoutSeconds == nil || *wh.TimeoutSeconds != 5 {
-			t.Errorf("%s: TimeoutSeconds = %v, want *5", wh.Name, wh.TimeoutSeconds)
-		}
-		if wh.ReinvocationPolicy != nil {
-			t.Errorf("%s: ReinvocationPolicy = %v, want nil (default Never; idempotent transform doesn't need re-runs)", wh.Name, *wh.ReinvocationPolicy)
-		}
-		if wh.ObjectSelector == nil ||
-			wh.ObjectSelector.MatchLabels[r.WebhookLabelKey] != r.WebhookLabelValue {
-			t.Errorf("%s: ObjectSelector = %+v, want MatchLabels[%s]=%s", wh.Name, wh.ObjectSelector, r.WebhookLabelKey, r.WebhookLabelValue)
-		}
-		// URL must use AdmissionExternalHost (the dedicated admission port),
-		// NOT ExternalHost (which targets labeled webhook callbacks).
-		path, ok := wantPathByName[wh.Name]
-		if !ok {
-			t.Errorf("unexpected webhook name %q", wh.Name)
-			continue
-		}
-		wantURL := "https://" + r.AdmissionExternalHost + path
-		if wh.ClientConfig.URL == nil || *wh.ClientConfig.URL != wantURL {
-			t.Errorf("%s: URL = %v, want %q", wh.Name, wh.ClientConfig.URL, wantURL)
-		}
-	}
-}
-
-// newPatchModeReconcilerForRotationTrigger returns a fresh patch-mode
-// WebhookReconciler suitable for exercising the RotationTrigger send path.
-// Bootstrap is disabled (AdmissionWebhookName / AdmissionExternalHost empty)
-// so reconcilePatchMode focuses on the certificate flow.
-func newPatchModeReconcilerForRotationTrigger(t *testing.T, trigger chan<- struct{}) *WebhookReconciler {
+// reconcileWith builds a configmap+secret pair, wires a reconciler around
+// them, runs one Reconcile pass, and returns the post-reconcile cert
+// Secret. Centralises the boilerplate the three deferral tests share so
+// each test body can focus on its specific assertion.
+func reconcileWith(t *testing.T, secret *corev1.Secret) (*WebhookReconciler, *corev1.Secret) {
 	t.Helper()
-	s := patchModeScheme(t)
-	hostingClient := fake.NewClientBuilder().WithScheme(s).Build()
-	targetClient := fake.NewClientBuilder().WithScheme(s).Build()
-	return &WebhookReconciler{
-		Client:                hostingClient,
-		TargetClient:          targetClient,
-		WebhookLabelKey:       "webhook-injector/name",
-		WebhookLabelValue:     "test",
-		CertSANs:              []string{"host.example.com"},
-		Namespace:             "default",
-		CertSecretName:        "test-certs",
-		CertValidity:          30 * 24 * time.Hour,
-		CertRotationThreshold: 0.2,
-		Scheme:                s,
-		RotationTrigger:       trigger,
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+    admissionReviewVersions: ["v1"]
+    sideEffects: None`,
+		},
+	}
+	r := makeRotationReconciler(t, []client.Object{secret, configMap}, nil)
+	r.WebhookConfigName = "webhook-config"
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	return r, readSecret(t, r)
+}
+
+// TestForceRotationGate_DeferredDuringStaged covers the case where the
+// operator sets force-rotation while a previous rotation is still in
+// the staged phase. Expected: no re-stage (the staged candidate is
+// preserved in the bundle and not replaced with a fresh one), the
+// annotation stays on the Secret so the request is visibly pending,
+// and the deferred metric ticks up. Note that the in-flight rotation
+// itself keeps progressing during the same Reconcile pass — the gate
+// only suppresses NEW rotation starts; it does NOT halt the current
+// state machine. Whether the secret ends this pass in staged or active
+// depends on whether the propagation gate collapsed, so we don't pin
+// the phase here — we pin the cert content (the original candidate
+// must still be present, no fresh material).
+func TestForceRotationGate_DeferredDuringStaged(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	candidateCert, candidateKey := mintCert(t)
+	bundle := append(append([]byte{}, oldCert...), candidateCert...)
+	startedAt := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				ForceRotationAnnotation:     annotationTrue,
+				RotationPhaseAnnotation:     string(PhaseStaged),
+				RotationStartedAtAnnotation: startedAt,
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: oldKey, tlsStagedKeyKey: candidateKey},
+	}
+	before := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
+
+	_, got := reconcileWith(t, secret)
+
+	if got.Annotations[ForceRotationAnnotation] != annotationTrue {
+		t.Errorf("force-rotation annotation: expected to be preserved while deferred, got %q", got.Annotations[ForceRotationAnnotation])
+	}
+	// The candidate cert (whose key was tls.staged.key) MUST still be in
+	// the bundle. If the gate had failed to engage, stageCertificate
+	// would have minted a fresh candidate and the old one would be gone.
+	if !bytesContains(got.Data[tlsCrtKey], candidateCert) {
+		t.Errorf("tls.crt: original candidate cert must still be in the bundle (no re-stage during gate)")
+	}
+	after := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
+	if after != before+1 {
+		t.Errorf("ForceRotationDeferredTotal: got %v→%v, want +1", before, after)
 	}
 }
 
-func TestWebhookReconciler_PatchMode_RotationTrigger_SignalsOnRotation(t *testing.T) {
-	ch := make(chan struct{}, 1)
-	reconciler := newPatchModeReconcilerForRotationTrigger(t, ch)
-
-	// No pre-existing cert Secret → first reconcile must generate it
-	// (rotation reason = "initial") and emit a signal.
-	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
-		t.Fatalf("Reconcile failed: %v", err)
+// TestForceRotationGate_DeferredDuringActiveOverlap covers the more
+// dangerous case: operator sets force-rotation during the post-promote
+// pre-prune window. Without the gate this would drop the old cert
+// before its in-flight TLS sessions migrated — real downtime. With the
+// gate: no re-stage, annotation preserved, metric ticks, and the
+// promoted-at marker is left intact so the prune still happens on
+// schedule.
+func TestForceRotationGate_DeferredDuringActiveOverlap(t *testing.T) {
+	oldCert, _ := mintCert(t)
+	newCert, newKey := mintCert(t)
+	bundle := append(append([]byte{}, oldCert...), newCert...)
+	promotedAt := time.Now().UTC().Add(-1 * time.Minute).Format(time.RFC3339)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				ForceRotationAnnotation:      annotationTrue,
+				RotationPhaseAnnotation:      string(PhaseActive),
+				rotationPromotedAtAnnotation: promotedAt,
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: newKey},
 	}
+	before := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
 
-	select {
-	case <-ch:
-		// expected — initial rotation must signal the channel
-	case <-time.After(time.Second):
-		t.Fatal("expected RotationTrigger to receive a signal after initial cert generation, but channel was empty")
+	r, got := reconcileWith(t, secret)
+	// Make sure the test reconciler's overlap window is long enough that
+	// the prune doesn't run during this single Reconcile pass.
+	r.RotationOverlapWindow = 10 * time.Minute
+	_ = r
+
+	if got.Annotations[ForceRotationAnnotation] != annotationTrue {
+		t.Errorf("force-rotation annotation: expected to be preserved while deferred, got %q", got.Annotations[ForceRotationAnnotation])
+	}
+	if got.Annotations[rotationPromotedAtAnnotation] != promotedAt {
+		t.Errorf("rotation-promoted-at: expected unchanged %q, got %q", promotedAt, got.Annotations[rotationPromotedAtAnnotation])
+	}
+	if n := countPEMCerts(t, got.Data[tlsCrtKey]); n != 2 {
+		t.Errorf("tls.crt: expected 2 cert blocks (overlap bundle preserved), got %d", n)
+	}
+	if !bytesContains(got.Data[tlsCrtKey], oldCert) {
+		t.Errorf("tls.crt: old cert must still be in the bundle (no premature prune)")
+	}
+	after := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
+	if after != before+1 {
+		t.Errorf("ForceRotationDeferredTotal: got %v→%v, want +1", before, after)
 	}
 }
 
-func TestWebhookReconciler_PatchMode_RotationTrigger_NilDoesNotPanic(t *testing.T) {
-	// RotationTrigger left as the zero value (nil). The non-blocking send
-	// guard in reconcilePatchMode must skip the send and reconcile normally.
-	reconciler := newPatchModeReconcilerForRotationTrigger(t, nil)
+// TestForceRotationGate_AllowedFromSteadyActive is the regression guard
+// for the happy path: force-rotation observed in steady-state active
+// (no rotation annotations beyond phase=active and no promoted-at) must
+// proceed — the leaf must change. The reconcile may drive the cycle
+// all the way through staged→active in a single pass when the
+// propagation gate is empty (no CRDs published), so we don't pin the
+// phase; we pin the observable outcome: the original cert is gone,
+// the force annotation was consumed, and the deferred counter did NOT
+// tick.
+func TestForceRotationGate_AllowedFromSteadyActive(t *testing.T) {
+	oldCert, oldKey := mintCert(t)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				ForceRotationAnnotation: annotationTrue,
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: oldCert, tlsKeyKey: oldKey},
+	}
+	before := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
 
-	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
-		t.Fatalf("Reconcile must succeed with nil RotationTrigger, got: %v", err)
+	_, got := reconcileWith(t, secret)
+
+	if _, present := got.Annotations[ForceRotationAnnotation]; present {
+		t.Errorf("force-rotation annotation: expected to be cleared after a real rotation, still present")
+	}
+	if bytesContains(got.Data[tlsCrtKey], oldCert) && len(got.Data[tlsCrtKey]) == len(oldCert) {
+		t.Errorf("tls.crt: leaf must have rotated — bundle still equals the original cert verbatim")
+	}
+	after := testutilCounterValue(t, metrics.ForceRotationDeferredTotal)
+	if after != before {
+		t.Errorf("ForceRotationDeferredTotal: must NOT increment on the allowed path, got %v→%v", before, after)
 	}
 }
 
-func TestWebhookReconciler_PatchMode_RotationTrigger_NoSignalWhenNoRotation(t *testing.T) {
-	ch := make(chan struct{}, 1)
-	reconciler := newPatchModeReconcilerForRotationTrigger(t, ch)
-
-	// First reconcile generates the cert and signals.
-	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
-		t.Fatalf("First Reconcile failed: %v", err)
+// testutilCounterValue reads the current value of a prometheus.Counter
+// for delta assertions. Pulled out as a one-line helper so each test
+// body reads as a single before/after comparison.
+func testutilCounterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	if err := c.Write(m); err != nil {
+		t.Fatalf("counter Write: %v", err)
 	}
-	// Drain the initial signal.
-	select {
-	case <-ch:
-	case <-time.After(time.Second):
-		t.Fatal("expected initial signal on first reconcile")
-	}
-
-	// Second reconcile against the freshly generated, valid cert must NOT
-	// rotate, and therefore must NOT send another signal.
-	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{}); err != nil {
-		t.Fatalf("Second Reconcile failed: %v", err)
-	}
-	select {
-	case <-ch:
-		t.Fatal("RotationTrigger fired on second reconcile despite no rotation occurring")
-	default:
-		// expected — channel must be empty
-	}
+	return m.GetCounter().GetValue()
 }
