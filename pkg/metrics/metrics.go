@@ -26,14 +26,10 @@ const (
 	ResultError = "error"
 
 	// FanOutEmitted — an event was successfully pushed onto the per-kind
-	// channel feeding the controller.
+	// channel feeding the controller. The current fanOut implementation
+	// blocks until the consumer drains a slot rather than dropping, so
+	// this is the only outcome value emitted in steady state.
 	FanOutEmitted = "emitted"
-	// FanOutDropped — the channel was full and the non-blocking send was
-	// dropped. A non-zero rate of these means a rotation arrived faster
-	// than the previous one drained; the next rotation (or the periodic
-	// --sync-period reconcile) re-converges, so this is informational
-	// rather than a failure.
-	FanOutDropped = "dropped"
 
 	// ForceReconcilePatched — patched gardener.cloud/operation=reconcile
 	// onto the MR after a successful Secret stamp.
@@ -97,15 +93,16 @@ var (
 		[]string{"kind", "result"},
 	)
 
-	// RotationFanOutEventsTotal counts per-kind events emitted (or dropped)
-	// from the rotation fan-out goroutines on every cert rotation. A
-	// non-zero "dropped" rate means a rotation fired while the previous
-	// fan-out was still draining — informational; the next rotation or
-	// --sync-period reconcile reconverges.
+	// RotationFanOutEventsTotal counts per-kind events emitted from the
+	// rotation fan-out goroutines on every cert rotation. The fanOut
+	// producer blocks until the consumer drains, so the only outcome
+	// value emitted in steady state is "emitted"; the "outcome" label
+	// is retained for forward compatibility if a non-blocking variant
+	// is introduced again.
 	RotationFanOutEventsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "webhook_injector_rotation_fanout_events_total",
-			Help: "Total events fanned out to per-kind reconcile channels on certificate rotation, labeled by kind and outcome (emitted|dropped).",
+			Help: "Total events fanned out to per-kind reconcile channels on certificate rotation, labeled by kind and outcome (emitted).",
 		},
 		[]string{"kind", "outcome"},
 	)

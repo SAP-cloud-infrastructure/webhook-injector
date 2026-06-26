@@ -637,10 +637,13 @@ func (t *managedResourceResyncTrigger) Start(ctx context.Context) error {
 	}
 }
 
-// fanOut lists every labeled ManagedResource and pushes one GenericEvent per
-// object into mrCh. A full channel means a previous rotation is still
-// draining; we log and drop rather than block, since the next rotation (or
-// --sync-period) will reconverge.
+// fanOut lists every labeled ManagedResource and pushes one GenericEvent
+// per object into mrCh. The send blocks until the consumer drains a slot
+// (or the context is cancelled), so the producer is naturally paced by
+// the reconcile rate. Earlier versions of this code dropped events when
+// the buffer was full; that lost rotation propagation to some MRs when
+// >64 labeled MRs existed or the consumer was briefly slow, leaving
+// shoot-side CRDs trusting the old cert until --sync-period reconverged.
 func (t *managedResourceResyncTrigger) fanOut(ctx context.Context, logger logr.Logger) {
 	selector := client.MatchingLabels{t.webhookLabelKey: t.webhookLabelValue}
 
@@ -654,10 +657,8 @@ func (t *managedResourceResyncTrigger) fanOut(ctx context.Context, logger logr.L
 		select {
 		case t.mrCh <- event.GenericEvent{Object: obj}:
 			metrics.RotationFanOutEventsTotal.WithLabelValues(kindManagedResource, metrics.FanOutEmitted).Inc()
-		default:
-			metrics.RotationFanOutEventsTotal.WithLabelValues(kindManagedResource, metrics.FanOutDropped).Inc()
-			logger.Info("rotation fan-out: ManagedResource channel full, dropping event",
-				"namespace", obj.Namespace, "name", obj.Name)
+		case <-ctx.Done():
+			return
 		}
 	}
 	logger.V(1).Info("rotation fan-out complete", "managedResources", len(list.Items))

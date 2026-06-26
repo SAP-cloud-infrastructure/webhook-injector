@@ -200,7 +200,7 @@ webhook-injector exposes Prometheus metrics at `<metrics-addr>/metrics` (default
 | `certificate_rotation_phase_transitions_total{from,to}` | Counter | Rotation phase-machine transitions; labels drawn from {absent, active, staged, pruned}. Four legal pairs (absent→active, active→staged, staged→active, active→pruned); any other pair indicates a controller bug |
 | `certificate_force_rotation_deferred_total` | Counter | Reconcile passes in which a force-rotation annotation was held back because a prior rotation cycle was still in flight (phase=staged, or phase=active with `rotation-promoted-at` still set). The annotation stays on the Secret and is consumed once the cycle reaches steady state |
 | `target_stamps_total{kind,result}` | Counter | Target-cluster MWC/VWC apply outcomes by `kind` (MutatingWebhookConfiguration, ValidatingWebhookConfiguration) and `result` (stamped, converged, error) |
-| `rotation_fanout_events_total{kind,outcome}` | Counter | Rotation fan-out events to the ManagedResource reconciler, by `kind=ManagedResource` and `outcome` (emitted, dropped) |
+| `rotation_fanout_events_total{kind,outcome}` | Counter | Rotation fan-out events to the ManagedResource reconciler, by `kind=ManagedResource` and `outcome=emitted`. The producer blocks until the consumer drains a slot, so `emitted` is the only steady-state value; the `outcome` label is retained for forward compatibility |
 | `managed_resource_stamps_total{result}` | Counter | Per-MR reconcile outcomes (stamped, converged, error) |
 | `managed_resource_crds_stamped_total` | Counter | Per-CRD-document stamp count across all MR Secrets |
 | `managed_resource_secret_keys_total{encoding}` | Counter | Secret data keys processed by encoding (plain, brotli) |

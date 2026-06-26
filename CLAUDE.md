@@ -299,7 +299,7 @@ All metrics are registered on controller-runtime's default Prometheus registry a
 
 ### Rotation fan-out
 
-- `webhook_injector_rotation_fanout_events_total{kind, outcome}` — counter. Labels: `kind ∈ {ManagedResource}`; `outcome ∈ {emitted, dropped}`. Emitted by `managedResourceResyncTrigger.fanOut` for every per-kind event pushed to (or dropped from) the controller's reconcile channel on every cert rotation. A non-zero `dropped` rate is informational — the next rotation or the periodic `--sync-period` tick re-converges; alarming on it makes sense only if the rate is sustained.
+- `webhook_injector_rotation_fanout_events_total{kind, outcome}` — counter. Labels: `kind ∈ {ManagedResource}`; `outcome ∈ {emitted}`. Emitted by `managedResourceResyncTrigger.fanOut` for every per-kind event pushed to the controller's reconcile channel on every cert rotation. The producer blocks until the consumer drains a slot rather than dropping, so `outcome="emitted"` is the only steady-state value. The `outcome` label is retained for forward compatibility.
 
 ### ManagedResource stamping (`--managed-resource-label` only)
 
