@@ -93,6 +93,21 @@ var (
 		[]string{"kind", "result"},
 	)
 
+	// TargetCRDStampsTotal counts reconcile outcomes on target-cluster
+	// CustomResourceDefinition conversion-webhook caBundle stamping (the
+	// --target-crd-label patch mode), partitioned by result. "stamped" =
+	// we patched clientConfig.caBundle; "converged" = already current (no
+	// patch); "error" = Get/Patch failure. Distinct from TargetStampsTotal
+	// (MWC/VWC only) so the kind enum there stays bounded — patch-mode
+	// MWC/VWC reuse TargetStampsTotal.
+	TargetCRDStampsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_target_crd_stamps_total",
+			Help: "Total reconcile outcomes for target-cluster CRD conversion-webhook caBundle stamping, labeled by result (stamped|converged|error).",
+		},
+		[]string{"result"},
+	)
+
 	// RotationFanOutEventsTotal counts per-kind events emitted from the
 	// rotation fan-out goroutines on every cert rotation. The fanOut
 	// producer blocks until the consumer drains, so the only outcome
@@ -240,6 +255,7 @@ func init() {
 		CertificateExpiryTime,
 		CertFilesWrittenTotal,
 		TargetStampsTotal,
+		TargetCRDStampsTotal,
 		RotationFanOutEventsTotal,
 		ManagedResourceStampsTotal,
 		ManagedResourceCRDsStampedTotal,
