@@ -93,6 +93,12 @@ func (r *TargetWebhookReconciler) ReconcileCRD(ctx context.Context, req ctrl.Req
 	conv := crd.Spec.Conversion
 	if conv == nil || conv.Strategy != apiextensionsv1.WebhookConverter ||
 		conv.Webhook == nil || conv.Webhook.ClientConfig == nil {
+		// No longer a Webhook-conversion CRD we control — drop any gate
+		// entry a prior pass published so a future rotation doesn't wait
+		// on it until --rotation-gate-timeout.
+		if r.Gate != nil {
+			r.Gate.Forget(gateKey)
+		}
 		return ctrl.Result{}, nil
 	}
 	caCert, err := loadCABundle(ctx, r.certReader(), r.Namespace, r.CertSecretName)

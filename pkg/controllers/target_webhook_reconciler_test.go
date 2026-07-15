@@ -243,3 +243,30 @@ func TestTargetReconcileMWCPatchDoesNotClobberList(t *testing.T) {
 		t.Errorf("patch nulls out operator-owned fields (list replacement): %s", captured)
 	}
 }
+
+// TestTargetReconcileCRDStrategyChangeForgetsGate asserts that when a
+// previously-published labeled CRD switches conversion.strategy away from
+// Webhook, its rotation-gate entry is forgotten — otherwise a future
+// rotation waits on a stale gate entry until --rotation-gate-timeout.
+func TestTargetReconcileCRDStrategyChangeForgetsGate(t *testing.T) {
+	s := testScheme(t)
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: tcCRDName, Labels: map[string]string{tcLabelKey: tcLabelValue}},
+		Spec:       apiextensionsv1.CustomResourceDefinitionSpec{Conversion: &apiextensionsv1.CustomResourceConversion{Strategy: apiextensionsv1.NoneConverter}},
+	}
+	base := fake.NewClientBuilder().WithScheme(s).WithObjects(crd, tcCertSecret()).Build()
+	c := &countingTargetClient{Client: base}
+	gate := rotationgate.New()
+	// Simulate a prior pass that published this CRD while it was Webhook-conversion.
+	gate.Publish(rotationgate.Key(tcCRDName), []string{tcCRDName})
+	r := newTargetReconciler(c, gate)
+	if _, err := r.ReconcileCRD(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: tcCRDName}}); err != nil {
+		t.Fatalf("ReconcileCRD: %v", err)
+	}
+	if c.patches != 0 {
+		t.Errorf("expected 0 patches for strategy=None, got %d", c.patches)
+	}
+	if snap := gate.Snapshot(); len(snap) != 0 {
+		t.Errorf("expected gate forgotten when CRD left Webhook conversion, got %v", snap)
+	}
+}
