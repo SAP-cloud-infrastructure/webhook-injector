@@ -4,7 +4,6 @@
 package controllers
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 
@@ -539,7 +538,6 @@ func (r *ManagedResourceReconciler) maybeStampCRDDoc(doc, caCert []byte) (out []
 	}
 
 	cc := conv.Webhook.ClientConfig
-	caChanged := !bytes.Equal(cc.CABundle, caCert)
 	urlChanged := false
 	if r.ExternalHost != "" && cc.Service != nil {
 		url := webhookhost.BuildExternalURL(r.ExternalHost, cc.Service.Path)
@@ -547,6 +545,8 @@ func (r *ManagedResourceReconciler) maybeStampCRDDoc(doc, caCert []byte) (out []
 		cc.Service = nil
 		urlChanged = true
 	}
+	// caBundle stamp is the shared core; the URL rewrite above is MR-path-only.
+	caChanged := stampCRDConversionCABundle(crd, caCert)
 	if !caChanged && !urlChanged {
 		// Already converged — preserve the original bytes so we don't
 		// trigger a Secret update for this doc. We still return the CRD
@@ -554,7 +554,6 @@ func (r *ManagedResourceReconciler) maybeStampCRDDoc(doc, caCert []byte) (out []
 		// responsible for keeping it stamped on rotation).
 		return doc, false, true, crd.Name, nil
 	}
-	cc.CABundle = caCert
 
 	rewritten, err := sigsyaml.Marshal(crd)
 	if err != nil {
