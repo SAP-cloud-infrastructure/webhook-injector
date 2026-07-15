@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
@@ -1613,5 +1614,32 @@ func TestSignalRotationFansOutToAllTriggers(t *testing.T) {
 		default:
 			t.Errorf("trigger %s did not receive rotation signal", name)
 		}
+	}
+}
+
+func TestReconcileCertOnlyModeGeneratesCert(t *testing.T) {
+	s := testScheme(t)
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+	r := &WebhookReconciler{
+		Client:                c,
+		WebhookConfigName:     "",
+		CertSANs:              []string{"webhook.example.com"},
+		Namespace:             mrNamespace,
+		CertSecretName:        certSecretName,
+		CertValidity:          time.Hour,
+		CertRotationThreshold: 0.2,
+		Scheme:                s,
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: mrNamespace, Name: "unused-in-cert-only"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	sec := &corev1.Secret{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: mrNamespace, Name: certSecretName}, sec); err != nil {
+		t.Fatalf("expected cert Secret created in cert-only mode: %v", err)
+	}
+	if len(sec.Data[tlsCrtKey]) == 0 {
+		t.Error("expected tls.crt populated")
 	}
 }

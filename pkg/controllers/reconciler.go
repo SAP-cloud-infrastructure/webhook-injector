@@ -23,9 +23,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/go-logr/logr"
 
@@ -209,35 +212,48 @@ func (r *WebhookReconciler) gateSnapshot() []string {
 func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Fetch the ConfigMap
-	configMap := &corev1.ConfigMap{}
-	err := r.Client.Get(ctx, req.NamespacedName, configMap)
-	if err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
+	var configs *webhooks.WebhookConfigurations
+	var services []certificates.ServiceReference
 
-	logger.Info("Reconciling webhook configuration", "configmap", req.NamespacedName)
+	if r.WebhookConfigName == "" {
+		// Cert-only mode: no ConfigMap. SANs come solely from --cert-sans.
+		// Used by pure patch-mode deployments (--target-crd-label without
+		// --webhook-config-name). No MWC/VWC are applied to the target here.
+		for _, san := range r.CertSANs {
+			services = append(services, certificates.ServiceReference{Hostname: san})
+		}
+		if len(services) == 0 {
+			logger.Info("Cert-only mode but no --cert-sans provided; nothing to do")
+			return ctrl.Result{}, nil
+		}
+	} else {
+		configMap := &corev1.ConfigMap{}
+		if err := r.Client.Get(ctx, req.NamespacedName, configMap); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
 
-	// Parse webhook configurations
-	webhooksYAML, ok := configMap.Data["webhooks.yaml"]
-	if !ok {
-		return ctrl.Result{}, errors.New("webhooks.yaml not found in ConfigMap")
-	}
+		logger.Info("Reconciling webhook configuration", "configmap", req.NamespacedName)
 
-	configs, err := webhooks.ParseWebhookConfigurations([]byte(webhooksYAML))
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to parse webhook configurations: %w", err)
-	}
+		webhooksYAML, ok := configMap.Data["webhooks.yaml"]
+		if !ok {
+			return ctrl.Result{}, errors.New("webhooks.yaml not found in ConfigMap")
+		}
 
-	// Extract service references
-	services := webhooks.ExtractServiceReferences(configs)
-	// Append any user-supplied SANs (auto-classified DNS vs IP downstream).
-	for _, san := range r.CertSANs {
-		services = append(services, certificates.ServiceReference{Hostname: san})
-	}
-	if len(services) == 0 {
-		logger.Info("No service references found in webhook configurations")
-		return ctrl.Result{}, nil
+		parsed, err := webhooks.ParseWebhookConfigurations([]byte(webhooksYAML))
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to parse webhook configurations: %w", err)
+		}
+		configs = parsed
+
+		services = webhooks.ExtractServiceReferences(configs)
+		// Append any user-supplied SANs (auto-classified DNS vs IP downstream).
+		for _, san := range r.CertSANs {
+			services = append(services, certificates.ServiceReference{Hostname: san})
+		}
+		if len(services) == 0 {
+			logger.Info("No service references found in webhook configurations")
+			return ctrl.Result{}, nil
+		}
 	}
 
 	// Check if certificates need generation/rotation
@@ -448,6 +464,9 @@ func parseTimeAnnotation(s string) time.Time {
 // apply fails — the gauge reads from the cert Secret, not the target.
 func (r *WebhookReconciler) applyAndUpdateExpiry(ctx context.Context, configs *webhooks.WebhookConfigurations, secret *corev1.Secret, logger logr.Logger) error {
 	r.updateCertExpiryGauge(secret)
+	if configs == nil {
+		return nil // cert-only mode: no MWC/VWC to apply to the target
+	}
 	caCert := secret.Data[tlsCrtKey]
 	webhooks.InjectCABundle(configs, caCert)
 	if err := r.applyWebhookConfigurations(ctx, configs); err != nil {
@@ -1091,6 +1110,10 @@ func (r *WebhookReconciler) getNamespace(namespace string) string {
 
 // SetupWithManager sets up the controller with the Manager
 func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.WebhookConfigName == "" {
+		return r.setupCertOnlyMode(mgr)
+	}
+
 	// Only watch the specific webhook ConfigMap
 	configMapPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
 		return r.WebhookConfigName == object.GetName() && r.getNamespace(r.Namespace) == object.GetNamespace()
@@ -1122,3 +1145,65 @@ func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Secret{}, secretToConfigMapMapper).
 		Complete(r)
 }
+
+// setupCertOnlyMode wires the reconciler when no ConfigMap anchors it
+// (--webhook-config-name unset, --target-crd-label set). There is no
+// ConfigMap to watch, so a one-shot GenericEvent from certBootstrapRunnable
+// drives the first reconcile; after it creates the cert Secret the loop
+// self-drives via RequeueAfter, and the Secret watch continues to catch
+// rotation-annotation events.
+func (r *WebhookReconciler) setupCertOnlyMode(mgr ctrl.Manager) error {
+	bootCh := make(chan event.GenericEvent, 1)
+	if err := mgr.Add(&certBootstrapRunnable{
+		ch:        bootCh,
+		namespace: r.getNamespace(r.Namespace),
+		name:      r.CertSecretName,
+	}); err != nil {
+		return fmt.Errorf("register cert bootstrap runnable: %w", err)
+	}
+
+	enqueueCertSecret := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []ctrl.Request {
+		if obj.GetName() != r.CertSecretName || obj.GetNamespace() != r.getNamespace(r.Namespace) {
+			return nil
+		}
+		return []ctrl.Request{{NamespacedName: types.NamespacedName{
+			Namespace: r.getNamespace(r.Namespace),
+			Name:      r.CertSecretName,
+		}}}
+	})
+
+	return ctrl.NewControllerManagedBy(mgr).
+		Named("webhook-cert-only").
+		WatchesRawSource(source.Channel(bootCh, enqueueCertSecret)).
+		Watches(&corev1.Secret{}, enqueueCertSecret).
+		Complete(r)
+}
+
+// certBootstrapRunnable emits exactly one GenericEvent at startup so the
+// cert-only-mode WebhookReconciler runs its first reconcile without a
+// ConfigMap to watch. Leader-only. After the first reconcile creates the
+// cert Secret, the loop self-drives via RequeueAfter and the Secret watch.
+type certBootstrapRunnable struct {
+	ch        chan event.GenericEvent
+	namespace string
+	name      string
+}
+
+func (b *certBootstrapRunnable) Start(ctx context.Context) error {
+	obj := &corev1.Secret{}
+	obj.SetNamespace(b.namespace)
+	obj.SetName(b.name)
+	select {
+	case b.ch <- event.GenericEvent{Object: obj}:
+	case <-ctx.Done():
+	}
+	<-ctx.Done()
+	return nil
+}
+
+func (b *certBootstrapRunnable) NeedLeaderElection() bool { return true }
+
+var (
+	_ manager.Runnable               = (*certBootstrapRunnable)(nil)
+	_ manager.LeaderElectionRunnable = (*certBootstrapRunnable)(nil)
+)
