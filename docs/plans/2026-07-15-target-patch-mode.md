@@ -1488,9 +1488,56 @@ git commit -m "docs: document --target-crd-label patch mode and optional --webho
 
 ---
 
+## Task 13: Holistic code review (code-reviewer subagent)
+
+**Files:** none (review only — dispatched after all prior tasks land and `gmake check` is green)
+
+- [ ] **Step 1: Confirm the branch is in a reviewable state**
+
+Run: `git status && git log --oneline main..HEAD`
+
+Expected: clean working tree; commits for Tasks 1-12 present.
+
+- [ ] **Step 2: Dispatch the `code-reviewer` subagent for a final holistic review**
+
+Per `AGENTS.md`, review is performed by the configured `code-reviewer` subagent (never `general`). Dispatch it against the full diff from the base branch, not a single commit:
+
+```
+task(
+  subagent_type="code-reviewer",
+  description="Holistic review of target patch mode",
+  prompt="Holistically review the entire feature branch feat-13-target-patch-mode against main for SAP-cloud-infrastructure/webhook-injector issue #13. Scope: the full diff `git diff main...HEAD` across all commits, not just the latest.
+
+  Feature summary: opt-in target-cluster patch mode (--target-crd-label) that watches labeled CRD/MWC/VWC on the TARGET cluster and keeps only their caBundle in sync via MergeFrom patch; --webhook-config-name made optional (at-least-one-mode); WebhookReconciler cert-only mode; RotationTrigger→RotationTriggers fan-out; new TargetWebhookReconciler on a label-scoped target cluster.Cluster cache.
+
+  Spec: docs/plans/2026-07-15-target-patch-mode-design.md. Plan: docs/plans/2026-07-15-target-patch-mode.md.
+
+  Review focus (report findings by severity, with file:line and concrete fixes):
+  1. Backward compatibility — prove existing ConfigMap mode and --managed-resource-label MR path are byte-for-byte unchanged when --target-crd-label is unset. Flag any behavior drift.
+  2. Write-surface minimality — TargetWebhookReconciler must patch ONLY caBundle (MergeFrom base), never create/delete, never mutate clientConfig Service/URL or other fields. Verify.
+  3. Concurrency/rotation — RotationTriggers non-blocking fan-out, buffered-1 channels, leader-election gating on the resync trigger, target-cache startup race, gate publish/forget correctness.
+  4. RBAC least-privilege — target CRD verbs are get/list/watch/patch only (no create/delete); MWC/VWC unchanged.
+  5. Error handling, metrics label cardinality, and idempotency (converged path issues zero patches).
+  6. Cert-only mode correctness — SAN source from --cert-sans, bootstrap runnable, nil-configs guard in applyAndUpdateExpiry.
+  7. SOLID/security/taste per the reviewer standard.
+
+  Do NOT modify code. Return a prioritized findings list (Critical/High/Medium/Low) plus an overall PASS/FAIL verdict."
+)
+```
+
+- [ ] **Step 3: Triage and resolve findings**
+
+For each Critical/High finding: fix via a focused follow-up commit (RED-GREEN if it's a behavior change), then re-run `gmake check`. For Medium/Low: fix if cheap, otherwise record as a follow-up note in the PR description. Re-dispatch the `code-reviewer` subagent if Critical/High fixes were substantial.
+
+- [ ] **Step 4: Gate**
+
+The feature is not complete until the `code-reviewer` verdict is PASS (no open Critical/High findings) and `gmake check` is green.
+
+---
+
 ## Self-Review Checklist (completed during authoring)
 
-**Spec coverage:** flag (T8), shared helpers (T1), CRD/MWC/VWC reconcile (T4), edge cases (T5), target cache + three watches + resync (T6), rotation fan-out slice (T3), optional ConfigMap / cert-only mode + bootstrap (T7), at-least-one-mode + pure-patch --cert-sans validation (T8), RBAC (T9), metrics (T2), tests (T4/T5/T7/T11), docs (T12), backward-compat invariants (T10). ✅
+**Spec coverage:** flag (T8), shared helpers (T1), CRD/MWC/VWC reconcile (T4), edge cases (T5), target cache + three watches + resync (T6), rotation fan-out slice (T3), optional ConfigMap / cert-only mode + bootstrap (T7), at-least-one-mode + pure-patch --cert-sans validation (T8), RBAC (T9), metrics (T2), tests (T4/T5/T7/T11), docs (T12), backward-compat invariants (T10), holistic code-reviewer review (T13). ✅
 
 **Placeholder scan:** every code step shows complete code; every command has expected output. "Inspect first" steps (T6.1, T7.1, T11.1) are reads preceding fully-specified edits; T11's e2e body is described concretely against the existing harness. ✅
 
