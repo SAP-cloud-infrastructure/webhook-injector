@@ -33,12 +33,14 @@ import (
 // cluster (GRM-free / direct-apply topology). Opt-in via --target-crd-label.
 // Leader-only, event-driven via a label-scoped target-cluster cache.
 //
-// Write surface is minimal: patches ONLY caBundle (MergeFrom), never
-// creates/deletes, never rewrites clientConfig Service/URL, and only touches
-// labeled objects — so it never fights GRM (GRM-owned objects lack the label).
-// Stamped CRD names are published on the shared rotation Gate so
-// WebhookReconciler's staged-phase promotion waits for target propagation;
-// MWC/VWC are not gated (they are not part of conversion-caBundle gating).
+// Write surface is minimal: patches ONLY caBundle (MergeFrom for the CRD's
+// nested clientConfig; StrategicMergeFrom for MWC/VWC so per-webhook entries
+// merge by name instead of replacing the whole list), never creates/deletes,
+// never rewrites clientConfig Service/URL, and only touches labeled objects —
+// so it never fights GRM (GRM-owned objects lack the label). Stamped CRD names
+// are published on the shared rotation Gate so WebhookReconciler's staged-phase
+// promotion waits for target propagation; MWC/VWC are not gated (they are not
+// part of conversion-caBundle gating).
 type TargetWebhookReconciler struct {
 	TargetClient     client.Client
 	CertSecretReader client.Reader
