@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
@@ -1599,4 +1600,18 @@ func testutilCounterValue(t *testing.T, c prometheus.Counter) float64 {
 		t.Fatalf("counter Write: %v", err)
 	}
 	return m.GetCounter().GetValue()
+}
+
+func TestSignalRotationFansOutToAllTriggers(t *testing.T) {
+	a := make(chan struct{}, 1)
+	b := make(chan struct{}, 1)
+	r := &WebhookReconciler{RotationTriggers: []chan<- struct{}{a, b}}
+	r.signalRotation(logr.Discard(), rotationReasonForced)
+	for name, ch := range map[string]chan struct{}{"A": a, "B": b} {
+		select {
+		case <-ch:
+		default:
+			t.Errorf("trigger %s did not receive rotation signal", name)
+		}
+	}
 }

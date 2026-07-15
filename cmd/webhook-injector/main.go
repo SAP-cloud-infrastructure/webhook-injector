@@ -288,15 +288,18 @@ func main() {
 	}
 	setupLog.Info("CertificateReloader controller registered (runs on all replicas)")
 
-	// rotationTrigger feeds ManagedResourceReconciler when the MR reconciler
-	// is wired. WebhookReconciler signals it non-blocking on every detected
-	// rotation; the MR reconciler reads from it and force-stamps every
-	// labeled MR with the new caBundle, instead of waiting for the periodic
-	// --sync-period tick. Buffered 1 + non-blocking send means a missed
-	// signal is harmless — a single signal triggers a full re-stamp pass.
-	var rotationTrigger chan struct{}
+	// rotationTriggers feed the stamping reconcilers when wired.
+	// WebhookReconciler signals each non-blocking on every detected
+	// rotation; each consumer reads its channel and force-stamps every
+	// labeled object with the new caBundle, instead of waiting for the
+	// periodic --sync-period tick. Buffered 1 + non-blocking send means a
+	// missed signal is harmless — a single signal triggers a full re-stamp
+	// pass. One channel per registered stamping reconciler.
+	var rotationTriggers []chan<- struct{}
+	var mrTrigger chan struct{}
 	if mrLabelOK {
-		rotationTrigger = make(chan struct{}, 1)
+		mrTrigger = make(chan struct{}, 1)
+		rotationTriggers = append(rotationTriggers, mrTrigger)
 	}
 
 	webhookReconciler := &controllers.WebhookReconciler{
@@ -312,7 +315,6 @@ func main() {
 		RotationOverlapWindow: rotationOverlapWindow,
 		RotationGateTimeout:   rotationGateTimeout,
 		Scheme:                mgr.GetScheme(),
-		RotationTrigger:       rotationTrigger,
 	}
 	if err := webhookReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Unable to create WebhookReconciler controller")
@@ -335,7 +337,7 @@ func main() {
 			ForceReconcile:    forceReconcile,
 			Gate:              gate,
 		}
-		if err := mrReconciler.SetupWithManager(mgr, rotationTrigger); err != nil {
+		if err := mrReconciler.SetupWithManager(mgr, mrTrigger); err != nil {
 			setupLog.Error(err, "Unable to create ManagedResourceReconciler controller")
 			os.Exit(1)
 		}
@@ -344,6 +346,8 @@ func main() {
 			"force-reconcile", forceReconcile,
 		)
 	}
+
+	webhookReconciler.RotationTriggers = rotationTriggers
 
 	// Add health checks
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

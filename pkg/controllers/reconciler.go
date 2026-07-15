@@ -131,19 +131,19 @@ type WebhookReconciler struct {
 	CertRotationThreshold float64
 	Scheme                *runtime.Scheme
 
-	// RotationTrigger is signaled (non-blocking send) on every detected
-	// certificate rotation. The sole downstream consumer is
-	// ManagedResourceReconciler, which reads from this channel and
-	// force-stamps every labeled ManagedResource on the hosting cluster
-	// with the new caBundle, instead of waiting for its cache --sync-period
-	// to fire.
+	// RotationTriggers are signaled (non-blocking send to each) on every
+	// detected certificate rotation. Downstream consumers are
+	// ManagedResourceReconciler (--managed-resource-label) and
+	// TargetWebhookReconciler (--target-crd-label); each reads its channel
+	// and force-stamps every labeled object with the new caBundle instead of
+	// waiting for a cache --sync-period to fire.
 	//
-	// Nil when no MR reconciler is wired (e.g. --managed-resource-label
-	// unset, or in tests that don't exercise rotation). Should be created
-	// with a buffer of 1 so a missed send (because the receiver is mid-
-	// resync) is harmless — the next rotation will fire again, and a single
-	// signal is enough to trigger a full re-stamp pass.
-	RotationTrigger chan<- struct{}
+	// Nil/empty when no stamping reconciler is wired (e.g. neither label flag
+	// set, or in tests that don't exercise rotation). Each channel should be
+	// created with a buffer of 1 so a missed send (because the receiver is
+	// mid-resync) is harmless — the next rotation will fire again, and a
+	// single signal is enough to trigger a full re-stamp pass.
+	RotationTriggers []chan<- struct{}
 
 	// Gate is the shared rotation-gate snapshot. WebhookReconciler reads
 	// it during the staged rotation phase to learn which CRDs on the
@@ -350,20 +350,23 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
-// signalRotation pushes a non-blocking notification to RotationTrigger so
-// ManagedResourceReconciler re-stamps every labeled MR with the new
-// caBundle. Shared between the in-line rotation path (in Reconcile) and
-// the phase-promotion/prune transitions which also change what gets
-// stamped downstream.
+// signalRotation pushes a non-blocking notification to each RotationTriggers
+// channel so downstream consumers (ManagedResourceReconciler,
+// TargetWebhookReconciler) re-stamp every labeled object with the new
+// caBundle. Shared between the in-line rotation path (in Reconcile) and the
+// phase-promotion/prune transitions which also change what gets stamped
+// downstream.
 func (r *WebhookReconciler) signalRotation(logger logr.Logger, reason rotationReason) {
-	if r.RotationTrigger == nil {
-		return
-	}
-	select {
-	case r.RotationTrigger <- struct{}{}:
-		logger.Info("Signaled rotation downstream consumers", "reason", reason)
-	default:
-		logger.V(1).Info("Rotation signal channel full, skipping (already pending)")
+	for _, trigger := range r.RotationTriggers {
+		if trigger == nil {
+			continue
+		}
+		select {
+		case trigger <- struct{}{}:
+			logger.Info("Signaled rotation downstream consumer", "reason", reason)
+		default:
+			logger.V(1).Info("Rotation signal channel full, skipping (already pending)")
+		}
 	}
 }
 
