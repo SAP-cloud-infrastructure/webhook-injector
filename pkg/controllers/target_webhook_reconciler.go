@@ -7,12 +7,22 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/cluster"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers/rotationgate"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
@@ -172,3 +182,139 @@ func (r *TargetWebhookReconciler) ReconcileVWC(ctx context.Context, req ctrl.Req
 	logger.Info("Stamped target ValidatingWebhookConfiguration caBundle")
 	return ctrl.Result{}, nil
 }
+
+// SetupWithManager registers three leader-only controllers (target-crd,
+// target-mwc, target-vwc) that watch labeled objects on the TARGET cluster's
+// cache. Because those objects live on a different cluster than the manager,
+// each watch uses source.Kind against targetCluster.GetCache(). A resync
+// trigger (fed by rotationTrigger and firing once at startup) re-lists all
+// labeled objects so a fresh caBundle propagates immediately and the initial
+// state is reconciled even with an empty event backlog.
+func (r *TargetWebhookReconciler) SetupWithManager(mgr ctrl.Manager, targetCluster cluster.Cluster, rotationTrigger <-chan struct{}) error {
+	crdCh := make(chan event.GenericEvent, 64)
+	mwcCh := make(chan event.GenericEvent, 64)
+	vwcCh := make(chan event.GenericEvent, 64)
+
+	trigger := &targetResyncTrigger{
+		targetClient:    r.TargetClient,
+		labelKey:        r.LabelKey,
+		labelValue:      r.LabelValue,
+		rotationTrigger: rotationTrigger,
+		crdCh:           crdCh,
+		mwcCh:           mwcCh,
+		vwcCh:           vwcCh,
+	}
+	if err := mgr.Add(trigger); err != nil {
+		return fmt.Errorf("register target resync trigger: %w", err)
+	}
+
+	labelPred := predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		return obj != nil && obj.GetLabels()[r.LabelKey] == r.LabelValue
+	})
+	nameMapper := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []ctrl.Request {
+		return []ctrl.Request{{NamespacedName: types.NamespacedName{Name: obj.GetName()}}}
+	})
+	tc := targetCluster.GetCache()
+
+	if err := ctrl.NewControllerManagedBy(mgr).
+		Named("target-crd").
+		WatchesRawSource(source.Kind(tc, client.Object(&apiextensionsv1.CustomResourceDefinition{}), &handler.EnqueueRequestForObject{}, labelPred)).
+		WatchesRawSource(source.Channel(crdCh, nameMapper)).
+		Complete(reconcile.Func(r.ReconcileCRD)); err != nil {
+		return fmt.Errorf("build target-crd controller: %w", err)
+	}
+	if err := ctrl.NewControllerManagedBy(mgr).
+		Named("target-mwc").
+		WatchesRawSource(source.Kind(tc, client.Object(&admissionv1.MutatingWebhookConfiguration{}), &handler.EnqueueRequestForObject{}, labelPred)).
+		WatchesRawSource(source.Channel(mwcCh, nameMapper)).
+		Complete(reconcile.Func(r.ReconcileMWC)); err != nil {
+		return fmt.Errorf("build target-mwc controller: %w", err)
+	}
+	if err := ctrl.NewControllerManagedBy(mgr).
+		Named("target-vwc").
+		WatchesRawSource(source.Kind(tc, client.Object(&admissionv1.ValidatingWebhookConfiguration{}), &handler.EnqueueRequestForObject{}, labelPred)).
+		WatchesRawSource(source.Channel(vwcCh, nameMapper)).
+		Complete(reconcile.Func(r.ReconcileVWC)); err != nil {
+		return fmt.Errorf("build target-vwc controller: %w", err)
+	}
+	return nil
+}
+
+// targetResyncTrigger lists labeled CRD/MWC/VWC on the target cluster and
+// emits one GenericEvent per object on the matching channel — once at startup
+// and on each rotation signal. Leader-only.
+type targetResyncTrigger struct {
+	targetClient    client.Client
+	labelKey        string
+	labelValue      string
+	rotationTrigger <-chan struct{}
+	crdCh           chan event.GenericEvent
+	mwcCh           chan event.GenericEvent
+	vwcCh           chan event.GenericEvent
+}
+
+func (t *targetResyncTrigger) Start(ctx context.Context) error {
+	logger := log.FromContext(ctx).WithName("target-resync-trigger")
+	t.fanOut(ctx, logger) // initial pass so startup state is reconciled
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.rotationTrigger:
+			t.fanOut(ctx, logger)
+		}
+	}
+}
+
+func (t *targetResyncTrigger) fanOut(ctx context.Context, logger logr.Logger) {
+	sel := labels.SelectorFromSet(labels.Set{t.labelKey: t.labelValue})
+	opt := client.MatchingLabelsSelector{Selector: sel}
+
+	var crds apiextensionsv1.CustomResourceDefinitionList
+	if err := t.targetClient.List(ctx, &crds, opt); err != nil {
+		logger.Error(err, "target resync: list CRDs")
+	} else {
+		for i := range crds.Items {
+			if !t.send(ctx, t.crdCh, &crds.Items[i]) {
+				return
+			}
+		}
+	}
+	var mwcs admissionv1.MutatingWebhookConfigurationList
+	if err := t.targetClient.List(ctx, &mwcs, opt); err != nil {
+		logger.Error(err, "target resync: list MWCs")
+	} else {
+		for i := range mwcs.Items {
+			if !t.send(ctx, t.mwcCh, &mwcs.Items[i]) {
+				return
+			}
+		}
+	}
+	var vwcs admissionv1.ValidatingWebhookConfigurationList
+	if err := t.targetClient.List(ctx, &vwcs, opt); err != nil {
+		logger.Error(err, "target resync: list VWCs")
+	} else {
+		for i := range vwcs.Items {
+			if !t.send(ctx, t.vwcCh, &vwcs.Items[i]) {
+				return
+			}
+		}
+	}
+	logger.V(1).Info("target resync complete", "crds", len(crds.Items), "mwcs", len(mwcs.Items), "vwcs", len(vwcs.Items))
+}
+
+func (t *targetResyncTrigger) send(ctx context.Context, ch chan event.GenericEvent, obj client.Object) bool {
+	select {
+	case ch <- event.GenericEvent{Object: obj}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (t *targetResyncTrigger) NeedLeaderElection() bool { return true }
+
+var (
+	_ manager.Runnable               = (*targetResyncTrigger)(nil)
+	_ manager.LeaderElectionRunnable = (*targetResyncTrigger)(nil)
+)
