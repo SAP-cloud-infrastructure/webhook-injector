@@ -26,6 +26,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -44,6 +45,7 @@ var (
 var (
 	webhookConfigName     string
 	managedResourceLabel  string
+	targetCRDLabel        string
 	certSANs              string
 	externalHost          string
 	externalPort          int
@@ -68,6 +70,7 @@ func init() {
 	// Initialize flag variables
 	flag.StringVar(&webhookConfigName, "webhook-config-name", "", "Required. ConfigMap (in --namespace, hosting cluster) carrying a `webhooks.yaml` key whose value contains the MutatingWebhookConfiguration / ValidatingWebhookConfiguration YAML to apply to the target cluster. webhook-injector parses, injects the caBundle, and applies these to the target cluster. CRDs are not handled here — CRDs flow through Gardener ManagedResources, see --managed-resource-label.")
 	flag.StringVar(&managedResourceLabel, "managed-resource-label", "", "Label selector (key=value) used to scope the Gardener ManagedResource reconciler on the *hosting* cluster. When set, the controller watches labeled ManagedResources, walks their referenced Secrets, finds embedded CRDs with conversion.strategy=Webhook, and stamps caBundle / rewrites Service-form clientConfig to URL-form using --external-host and --external-port. When unset, the ManagedResource reconciler is not registered.")
+	flag.StringVar(&targetCRDLabel, "target-crd-label", "", "Label selector (key=value) enabling target-cluster patch mode. When set, watches CRDs, MutatingWebhookConfigurations, and ValidatingWebhookConfigurations on the TARGET cluster carrying this label and keeps their caBundle in sync as certs rotate — for GRM-free / direct-apply topologies where these objects are applied directly to the shoot (no ManagedResource). Only pre-existing labeled objects are stamped; nothing is created or deleted, and only caBundle is patched. Independent of --managed-resource-label. When unset, patch mode is not registered.")
 	flag.StringVar(&certSANs, "cert-sans", "", "Comma-separated DNS names and/or IP addresses to include as additional certificate SANs (merged with SANs derived from the ConfigMap's webhook services/URLs).")
 	flag.StringVar(&externalHost, "external-host", "", "External host (DNS name or IP, no port) the target cluster uses to reach the labeled webhook callbacks. Required when --managed-resource-label is set. Combined with --external-port to rewrite Service-form conversion clientConfig inside ManagedResource-embedded CRDs to clientConfig.URL = \"https://<external-host>:<external-port><Service.Path>\" (path defaults to \"/\"). Ignored when --managed-resource-label is unset.")
 	flag.IntVar(&externalPort, "external-port", 0, "External port the target cluster uses to reach the labeled webhook callbacks. Required when --managed-resource-label is set.")
@@ -119,20 +122,35 @@ func main() {
 		return
 	}
 
-	// --webhook-config-name is required: ConfigMap mode is the only mode.
-	if webhookConfigName == "" {
-		setupLog.Error(nil, "--webhook-config-name is required")
-		flag.Usage()
-		os.Exit(1)
-	}
-
 	mrLabelKey, mrLabelValue, mrLabelOK := parseLabel(managedResourceLabel)
 	if managedResourceLabel != "" && !mrLabelOK {
 		setupLog.Error(nil, fmt.Sprintf("--managed-resource-label must be in key=value form, got %q", managedResourceLabel))
 		os.Exit(1)
 	}
 
+	tcLabelKey, tcLabelValue, tcLabelOK := parseLabel(targetCRDLabel)
+	if targetCRDLabel != "" && !tcLabelOK {
+		setupLog.Error(nil, fmt.Sprintf("--target-crd-label must be in key=value form, got %q", targetCRDLabel))
+		os.Exit(1)
+	}
+
 	certSANsList := splitAndTrim(certSANs)
+
+	// At least one mode must be active. ConfigMap mode (--webhook-config-name)
+	// and target patch mode (--target-crd-label) are independent; a controller
+	// with neither manages nothing and is a misconfiguration.
+	if webhookConfigName == "" && !tcLabelOK {
+		setupLog.Error(nil, "at least one of --webhook-config-name or --target-crd-label must be set")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// Pure patch mode (no ConfigMap) has no webhook services to derive SANs
+	// from — --cert-sans is the only SAN source, so it must be non-empty.
+	if webhookConfigName == "" && len(certSANsList) == 0 {
+		setupLog.Error(nil, "--cert-sans is required when running patch mode without --webhook-config-name")
+		os.Exit(1)
+	}
 
 	// Shared rotation-gate snapshot bridging ManagedResourceReconciler
 	// (publisher) and WebhookReconciler (consumer). Both reconcilers
@@ -188,6 +206,7 @@ func main() {
 		"namespace", namespace,
 		"webhook-config-name", webhookConfigName,
 		"managed-resource-label", managedResourceLabel,
+		"target-crd-label", targetCRDLabel,
 		"cert-sans", certSANsList,
 		"external-host", effectiveExternalHost,
 		"cert-secret-name", certSecretName,
@@ -344,6 +363,54 @@ func main() {
 		setupLog.Info("ManagedResourceReconciler controller registered (runs on leader only)",
 			"label", mrLabelKey+"="+mrLabelValue,
 			"force-reconcile", forceReconcile,
+		)
+	}
+
+	// Optionally keep caBundle in sync on CRD/MWC/VWC applied directly to the
+	// target cluster (GRM-free patch mode). Opt-in via --target-crd-label. Uses
+	// a second, label-scoped cluster.Cluster handle so the target objects are
+	// watched from the target cluster's own cache.
+	if tcLabelOK {
+		targetCfg, err := getTargetRestConfig()
+		if err != nil {
+			setupLog.Error(err, "Unable to get target cluster config for patch mode")
+			os.Exit(1)
+		}
+		tcSelector := labels.SelectorFromSet(labels.Set{tcLabelKey: tcLabelValue})
+		targetCluster, err := cluster.New(targetCfg, func(o *cluster.Options) {
+			o.Scheme = scheme
+			o.Cache.SyncPeriod = &syncPeriod
+			o.Cache.ByObject = map[client.Object]cache.ByObject{
+				&apiextensionsv1.CustomResourceDefinition{}:   {Label: tcSelector},
+				&admissionv1.MutatingWebhookConfiguration{}:   {Label: tcSelector},
+				&admissionv1.ValidatingWebhookConfiguration{}: {Label: tcSelector},
+			}
+		})
+		if err != nil {
+			setupLog.Error(err, "Unable to create target cluster handle for patch mode")
+			os.Exit(1)
+		}
+		if err := mgr.Add(targetCluster); err != nil {
+			setupLog.Error(err, "Unable to add target cluster to manager")
+			os.Exit(1)
+		}
+		tcTrigger := make(chan struct{}, 1)
+		rotationTriggers = append(rotationTriggers, tcTrigger)
+		tcReconciler := &controllers.TargetWebhookReconciler{
+			TargetClient:     targetCluster.GetClient(),
+			CertSecretReader: mgr.GetAPIReader(),
+			Namespace:        namespace,
+			CertSecretName:   certSecretName,
+			LabelKey:         tcLabelKey,
+			LabelValue:       tcLabelValue,
+			Gate:             gate,
+		}
+		if err := tcReconciler.SetupWithManager(mgr, targetCluster, tcTrigger); err != nil {
+			setupLog.Error(err, "Unable to create TargetWebhookReconciler controller")
+			os.Exit(1)
+		}
+		setupLog.Info("TargetWebhookReconciler controller registered (patch mode, runs on leader only)",
+			"label", tcLabelKey+"="+tcLabelValue,
 		)
 	}
 
