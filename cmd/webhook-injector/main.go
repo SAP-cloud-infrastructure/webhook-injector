@@ -394,10 +394,20 @@ func main() {
 			setupLog.Error(err, "Unable to add target cluster to manager")
 			os.Exit(1)
 		}
+		// Get/Patch use an uncached client so each reconcile live-reads the
+		// target object before patching. The targetCluster handle is used
+		// only to drive the label-scoped watches; reading Get through its
+		// cache could compute a patch from stale state and clobber another
+		// direct-apply owner's fresh changes.
+		targetPatchClient, err := client.New(targetCfg, client.Options{Scheme: scheme})
+		if err != nil {
+			setupLog.Error(err, "Unable to create uncached target client for patch mode")
+			os.Exit(1)
+		}
 		tcTrigger := make(chan struct{}, 1)
 		rotationTriggers = append(rotationTriggers, tcTrigger)
 		tcReconciler := &controllers.TargetWebhookReconciler{
-			TargetClient:     targetCluster.GetClient(),
+			TargetClient:     targetPatchClient,
 			CertSecretReader: mgr.GetAPIReader(),
 			Namespace:        namespace,
 			CertSecretName:   certSecretName,
