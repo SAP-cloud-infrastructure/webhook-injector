@@ -44,7 +44,7 @@ golang:
 
 golangciLint:
   createConfig: true
-  timeout: 3m
+  timeout: 10m
 
 renovate:
   enabled: true
