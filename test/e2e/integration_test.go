@@ -86,7 +86,12 @@ func getKubernetesClient(t *testing.T, contextName string) *kubernetes.Clientset
 	return clientset
 }
 
-func waitForDeploymentReady(t *testing.T, client *kubernetes.Clientset, name string, replicas int32, timeout time.Duration) {
+func waitForDeploymentReady(t *testing.T, client *kubernetes.Clientset) {
+	const (
+		name     = "webhook-server"
+		replicas = int32(3)
+		timeout  = 5 * time.Minute
+	)
 	ctx := context.Background()
 	deadline := time.After(timeout)
 	ticker := time.NewTicker(5 * time.Second)
@@ -233,7 +238,7 @@ func TestWebhookLoadAndRotation(t *testing.T) {
 
 	// Wait for webhook server to be ready
 	logWithTimestamp(t, "Waiting for webhook deployment ready...")
-	waitForDeploymentReady(t, hostingClient, "webhook-server", 3, 5*time.Minute)
+	waitForDeploymentReady(t, hostingClient)
 
 	// Create context for API calls
 	ctx := context.Background()

@@ -140,7 +140,7 @@ func TestManagedResourceFlow(t *testing.T) {
 	// The cert Secret tls.crt is populated by the running ConfigMap-mode
 	// WebhookReconciler. Wait for the deployment so we don't race startup.
 	logWithTimestamp(t, "Waiting for webhook deployment ready...")
-	waitForDeploymentReady(t, hostingClient, "webhook-server", 3, 5*time.Minute)
+	waitForDeploymentReady(t, hostingClient)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

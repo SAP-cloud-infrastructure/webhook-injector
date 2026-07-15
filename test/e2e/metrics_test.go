@@ -173,7 +173,7 @@ func TestMetrics(t *testing.T) {
 	hostingClient := getKubernetesClient(t, "kind-hosting")
 
 	logWithTimestamp(t, "Waiting for webhook deployment ready...")
-	waitForDeploymentReady(t, hostingClient, "webhook-server", 3, 5*time.Minute)
+	waitForDeploymentReady(t, hostingClient)
 
 	ctx := context.Background()
 
