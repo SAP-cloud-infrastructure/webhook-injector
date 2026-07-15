@@ -141,7 +141,7 @@ func (r *TargetWebhookReconciler) ReconcileMWC(ctx context.Context, req ctrl.Req
 		metrics.TargetStampsTotal.WithLabelValues(targetKindMWC, metrics.ResultConverged).Inc()
 		return ctrl.Result{}, nil
 	}
-	if err := r.TargetClient.Patch(ctx, mwc, client.MergeFrom(base)); err != nil {
+	if err := r.TargetClient.Patch(ctx, mwc, client.StrategicMergeFrom(base)); err != nil {
 		metrics.TargetStampsTotal.WithLabelValues(targetKindMWC, metrics.ResultError).Inc()
 		return ctrl.Result{}, fmt.Errorf("patch target MWC %s caBundle: %w", req.Name, err)
 	}
@@ -174,7 +174,7 @@ func (r *TargetWebhookReconciler) ReconcileVWC(ctx context.Context, req ctrl.Req
 		metrics.TargetStampsTotal.WithLabelValues(targetKindVWC, metrics.ResultConverged).Inc()
 		return ctrl.Result{}, nil
 	}
-	if err := r.TargetClient.Patch(ctx, vwc, client.MergeFrom(base)); err != nil {
+	if err := r.TargetClient.Patch(ctx, vwc, client.StrategicMergeFrom(base)); err != nil {
 		metrics.TargetStampsTotal.WithLabelValues(targetKindVWC, metrics.ResultError).Inc()
 		return ctrl.Result{}, fmt.Errorf("patch target VWC %s caBundle: %w", req.Name, err)
 	}

@@ -5,6 +5,7 @@ package controllers
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
@@ -15,6 +16,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers/rotationgate"
 )
@@ -202,5 +204,42 @@ func TestTargetReconcileCRDLabelRemovedForgetsGate(t *testing.T) {
 	}
 	if snap := gate.Snapshot(); len(snap) != 0 {
 		t.Errorf("expected gate forgotten on label loss, got %v", snap)
+	}
+}
+
+// TestTargetReconcileMWCPatchDoesNotClobberList asserts the MWC caBundle
+// patch targets only per-webhook clientConfig.caBundle (strategic-merge
+// shape: $setElementOrder + name-keyed elements) and never emits a bare
+// "webhooks" array that would replace the whole list and null out
+// operator-owned fields like admissionReviewVersions/sideEffects.
+func TestTargetReconcileMWCPatchDoesNotClobberList(t *testing.T) {
+	s := testScheme(t)
+	mwc := tcMWC("")
+	var captured string
+	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mwc, tcCertSecret()).Build()
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			data, err := patch.Data(obj)
+			if err != nil {
+				t.Fatalf("patch.Data: %v", err)
+			}
+			captured = string(data)
+			return cl.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	r := newTargetReconciler(c, rotationgate.New())
+	if _, err := r.ReconcileMWC(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "tc-mwc"}}); err != nil {
+		t.Fatalf("ReconcileMWC: %v", err)
+	}
+	if captured == "" {
+		t.Fatal("no patch captured")
+	}
+	// Strategic-merge patch keys webhook entries by name and preserves order;
+	// it must NOT null out fields the reconciler didn't touch.
+	if !strings.Contains(captured, "$setElementOrder/webhooks") {
+		t.Errorf("expected strategic-merge patch ($setElementOrder/webhooks), got: %s", captured)
+	}
+	if strings.Contains(captured, `"admissionReviewVersions":null`) || strings.Contains(captured, `"sideEffects":null`) {
+		t.Errorf("patch nulls out operator-owned fields (list replacement): %s", captured)
 	}
 }
