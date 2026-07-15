@@ -235,7 +235,15 @@ func TestTargetPatchModeFlow(t *testing.T) {
 
 	// --- 4. Simulate rotation: change the hosting cert Secret tls.crt, then
 	// re-reconcile and assert the new caBundle propagates to all three.
-	newCA := append([]byte("rotated-"), caBundle...)
+	// Restore the original tls.crt afterwards so we don't leave the shared,
+	// deployment-owned cert Secret in a mutated state for reused kind
+	// clusters or later tests. The simulated "new" bundle is a valid PEM
+	// concatenation (old || old) so nothing downstream chokes on a
+	// malformed cert while the test runs.
+	t.Cleanup(func() {
+		patchCertSecretTLSCrt(t, context.Background(), hostingCRClient, ns, certSecretName, caBundle)
+	})
+	newCA := append(append([]byte(nil), caBundle...), caBundle...)
 	patchCertSecretTLSCrt(t, ctx, hostingCRClient, ns, certSecretName, newCA)
 	reconcileAll()
 	assertCRDCABundle(t, ctx, targetCRClient, crdName, newCA)
