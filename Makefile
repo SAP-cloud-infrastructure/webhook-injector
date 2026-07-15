@@ -33,6 +33,12 @@ endif
 
 default: build-all
 
+# The coverage test run (build/cover.out) bundles unit tests with the
+# kind-based e2e suite (test/e2e). The e2e tests share two kind clusters
+# and run serially, so the default 10m `go test` binary timeout is too
+# tight once several e2e flows are present. Extend it for the coverage run.
+GO_TESTFLAGS += -timeout 30m
+
 check: test-e2e
 
 .PHONY: test-e2e
