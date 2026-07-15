@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -88,5 +89,118 @@ func TestTargetReconcileCRDStampsCABundle(t *testing.T) {
 	}
 	if snap := gate.Snapshot(); len(snap) != 1 || snap[0] != tcCRDName {
 		t.Errorf("gate snapshot = %v, want [%s]", snap, tcCRDName)
+	}
+}
+
+func tcMWC(ca string) *admissionv1.MutatingWebhookConfiguration {
+	m := &admissionv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "tc-mwc", Labels: map[string]string{tcLabelKey: tcLabelValue}},
+		Webhooks:   []admissionv1.MutatingWebhook{{Name: "a.example.com"}, {Name: "b.example.com"}},
+	}
+	if ca != "" {
+		for i := range m.Webhooks {
+			m.Webhooks[i].ClientConfig.CABundle = []byte(ca)
+		}
+	}
+	return m
+}
+
+func TestTargetReconcileMWCStampsAllWebhooks(t *testing.T) {
+	s := testScheme(t)
+	mwc := tcMWC("")
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(mwc, tcCertSecret()).Build()
+	r := newTargetReconciler(c, rotationgate.New())
+	if _, err := r.ReconcileMWC(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "tc-mwc"}}); err != nil {
+		t.Fatalf("ReconcileMWC: %v", err)
+	}
+	got := &admissionv1.MutatingWebhookConfiguration{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "tc-mwc"}, got); err != nil {
+		t.Fatalf("get MWC: %v", err)
+	}
+	for i, w := range got.Webhooks {
+		if string(w.ClientConfig.CABundle) != tcCA {
+			t.Errorf("webhook[%d] caBundle = %q, want %q", i, w.ClientConfig.CABundle, tcCA)
+		}
+	}
+}
+
+func TestTargetReconcileMWCConvergedNoPatch(t *testing.T) {
+	s := testScheme(t)
+	base := fake.NewClientBuilder().WithScheme(s).WithObjects(tcMWC(tcCA), tcCertSecret()).Build()
+	c := &countingTargetClient{Client: base}
+	r := newTargetReconciler(c, rotationgate.New())
+	if _, err := r.ReconcileMWC(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "tc-mwc"}}); err != nil {
+		t.Fatalf("ReconcileMWC: %v", err)
+	}
+	if c.patches != 0 {
+		t.Errorf("expected 0 patches on converged MWC, got %d", c.patches)
+	}
+}
+
+func TestTargetReconcileCRDConvergedNoPatch(t *testing.T) {
+	s := testScheme(t)
+	base := fake.NewClientBuilder().WithScheme(s).WithObjects(tcWebhookCRD(tcCA), tcCertSecret()).Build()
+	c := &countingTargetClient{Client: base}
+	r := newTargetReconciler(c, rotationgate.New())
+	if _, err := r.ReconcileCRD(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: tcCRDName}}); err != nil {
+		t.Fatalf("ReconcileCRD: %v", err)
+	}
+	if c.patches != 0 {
+		t.Errorf("expected 0 patches on converged CRD, got %d", c.patches)
+	}
+}
+
+func TestTargetReconcileCRDSkipsNonWebhook(t *testing.T) {
+	s := testScheme(t)
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: tcCRDName, Labels: map[string]string{tcLabelKey: tcLabelValue}},
+		Spec:       apiextensionsv1.CustomResourceDefinitionSpec{Conversion: &apiextensionsv1.CustomResourceConversion{Strategy: apiextensionsv1.NoneConverter}},
+	}
+	base := fake.NewClientBuilder().WithScheme(s).WithObjects(crd, tcCertSecret()).Build()
+	c := &countingTargetClient{Client: base}
+	gate := rotationgate.New()
+	r := newTargetReconciler(c, gate)
+	if _, err := r.ReconcileCRD(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: tcCRDName}}); err != nil {
+		t.Fatalf("ReconcileCRD: %v", err)
+	}
+	if c.patches != 0 {
+		t.Errorf("expected 0 patches for strategy=None, got %d", c.patches)
+	}
+	if snap := gate.Snapshot(); len(snap) != 0 {
+		t.Errorf("expected empty gate for strategy=None, got %v", snap)
+	}
+}
+
+func TestTargetReconcileCRDNotFoundForgetsGate(t *testing.T) {
+	s := testScheme(t)
+	base := fake.NewClientBuilder().WithScheme(s).WithObjects(tcCertSecret()).Build()
+	gate := rotationgate.New()
+	gate.Publish(rotationgate.Key(tcCRDName), []string{tcCRDName})
+	r := newTargetReconciler(base, gate)
+	if _, err := r.ReconcileCRD(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: tcCRDName}}); err != nil {
+		t.Fatalf("ReconcileCRD: %v", err)
+	}
+	if snap := gate.Snapshot(); len(snap) != 0 {
+		t.Errorf("expected gate forgotten on NotFound, got %v", snap)
+	}
+}
+
+func TestTargetReconcileCRDLabelRemovedForgetsGate(t *testing.T) {
+	s := testScheme(t)
+	crd := tcWebhookCRD("")
+	crd.Labels = map[string]string{}
+	base := fake.NewClientBuilder().WithScheme(s).WithObjects(crd, tcCertSecret()).Build()
+	c := &countingTargetClient{Client: base}
+	gate := rotationgate.New()
+	gate.Publish(rotationgate.Key(tcCRDName), []string{tcCRDName})
+	r := newTargetReconciler(c, gate)
+	if _, err := r.ReconcileCRD(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: tcCRDName}}); err != nil {
+		t.Fatalf("ReconcileCRD: %v", err)
+	}
+	if c.patches != 0 {
+		t.Errorf("expected 0 patches for unlabeled CRD, got %d", c.patches)
+	}
+	if snap := gate.Snapshot(); len(snap) != 0 {
+		t.Errorf("expected gate forgotten on label loss, got %v", snap)
 	}
 }
