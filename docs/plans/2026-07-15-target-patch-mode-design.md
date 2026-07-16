@@ -40,7 +40,7 @@ That rationale is sound **when GRM owns the object**. It does **not** apply when
 
 ## Solution
 
-Add an **opt-in patch mode**, gated by a new `--target-crd-label` flag, implemented as a new leader-only `TargetWebhookReconciler` that **watches labeled objects on the target cluster** and keeps their `caBundle` in sync:
+Add an **opt-in patch mode**, gated by a new `--target-label` flag, implemented as a new leader-only `TargetWebhookReconciler` that **watches labeled objects on the target cluster** and keeps their `caBundle` in sync:
 
 - **CustomResourceDefinition** with `spec.conversion.strategy=Webhook` → patch `spec.conversion.webhook.clientConfig.caBundle`.
 - **MutatingWebhookConfiguration** → patch each `webhooks[*].clientConfig.caBundle`.
@@ -48,7 +48,7 @@ Add an **opt-in patch mode**, gated by a new `--target-crd-label` flag, implemen
 
 **Architecture:**
 ```
---target-crd-label=key=value set →
+--target-label=key=value set →
   1. Build a second, label-scoped cluster.Cluster handle on the TARGET cluster.
   2. Register TargetWebhookReconciler (leader-only): three controllers
      (target-crd, target-mwc, target-vwc), each watching the labeled kind.
@@ -59,7 +59,7 @@ Add an **opt-in patch mode**, gated by a new `--target-crd-label` flag, implemen
      enqueue, so the new caBundle propagates in seconds.
   5. CRDs additionally publish to the shared rotation Gate so staged→active
      promotion waits for target propagation.
---target-crd-label unset → reconciler + target cache not registered →
+--target-label unset → reconciler + target cache not registered →
   behavior byte-for-byte unchanged.
 ```
 
@@ -77,9 +77,9 @@ Add an **opt-in patch mode**, gated by a new `--target-crd-label` flag, implemen
 
 3. **No admission-webhook bootstrap.** PR #10 also shipped an in-process admission mutator + a bootstrap `MutatingWebhookConfiguration` (`webhook-injector-mutator`) that stamped CRDs synchronously at admission time (`pkg/admission/*`). It is **out of scope** here: issue #13 explicitly excludes it, it was the heaviest and most failure-prone piece (`failurePolicy`, self-exemption edge cases, extra `--admission-*` flags), and the Watch reconciler is a complete safety net on its own. The rotation Gate + Watch give the same propagation guarantees without it.
 
-4. **`--webhook-config-name` becomes optional.** Today it is required (PR #11). It becomes optional so a pure direct-apply consumer can run patch mode alone. **Startup validation:** at least one of `--webhook-config-name` or `--target-crd-label` MUST be set; if neither is set, startup fails (a controller that manages nothing is a misconfiguration). This mirrors PR #10's "at least one mode" rule.
+4. **`--webhook-config-name` becomes optional.** Today it is required (PR #11). It becomes optional so a pure direct-apply consumer can run patch mode alone. **Startup validation:** at least one of `--webhook-config-name` or `--target-label` MUST be set; if neither is set, startup fails (a controller that manages nothing is a misconfiguration). This mirrors PR #10's "at least one mode" rule.
 
-5. **Additive, backward-compatible.** `--managed-resource-label` and its `ManagedResourceReconciler` are **untouched**. The existing ConfigMap path (`WebhookReconciler`) is unchanged except that its required-flag check moves into the new "at least one mode" validation. All existing flags keep their names, defaults, and semantics. Unset `--target-crd-label` → no new reconciler, no target cache, no behavior change.
+5. **Additive, backward-compatible.** `--managed-resource-label` and its `ManagedResourceReconciler` are **untouched**. The existing ConfigMap path (`WebhookReconciler`) is unchanged except that its required-flag check moves into the new "at least one mode" validation. All existing flags keep their names, defaults, and semantics. Unset `--target-label` → no new reconciler, no target cache, no behavior change.
 
 6. **Reuses the shared rotation gate.** `checkPropagation` in `reconciler.go` already polls target CRDs against the shared `rotationgate.Gate` snapshot. `TargetWebhookReconciler` publishes stamped **CRD** names to the gate (MWC/VWC are not gated — they are not part of the conversion-caBundle propagation the gate models), so staged→active promotion waits for the union bundle on target CRDs too. `checkPropagation` needs **zero changes**.
 
@@ -98,7 +98,7 @@ Add an **opt-in patch mode**, gated by a new `--target-crd-label` flag, implemen
 **File:** `cmd/webhook-injector/main.go`
 
 ```go
-flag.StringVar(&targetCRDLabel, "target-crd-label", "",
+flag.StringVar(&targetLabel, "target-label", "",
     "Label selector (key=value) enabling target-cluster patch mode. When set, "+
     "webhook-injector watches CRDs, MutatingWebhookConfigurations, and "+
     "ValidatingWebhookConfigurations on the TARGET cluster carrying this label "+
@@ -130,14 +130,14 @@ Replace the hard requirement:
 with a "at least one mode" check evaluated after both labels are parsed:
 
 ```go
-	tcLabelKey, tcLabelValue, tcLabelOK := parseLabel(targetCRDLabel)
-	if targetCRDLabel != "" && !tcLabelOK { /* fatal: key=value form */ }
+	targetLabelKey, targetLabelValue, targetLabelOK := parseLabel(targetLabel)
+	if targetLabel != "" && !targetLabelOK { /* fatal: key=value form */ }
 
 	// At least one mode must be active. ConfigMap mode (--webhook-config-name)
-	// and target patch mode (--target-crd-label) are independent; --managed-
+	// and target patch mode (--target-label) are independent; --managed-
 	// resource-label augments ConfigMap mode but is not itself a mode.
-	if webhookConfigName == "" && !tcLabelOK {
-		setupLog.Error(nil, "at least one of --webhook-config-name or --target-crd-label must be set")
+	if webhookConfigName == "" && !targetLabelOK {
+		setupLog.Error(nil, "at least one of --webhook-config-name or --target-label must be set")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -156,7 +156,7 @@ Today, cert generation/rotation is driven entirely by `WebhookReconciler.Reconci
 
   Choose **A**. `WebhookReconciler` gains: (i) skip ConfigMap Get/parse/apply when `WebhookConfigName == ""`; (ii) build services from `--cert-sans` only in that case; (iii) a leader-only startup `GenericEvent` runnable so the first reconcile fires without a ConfigMap event. This is additive — when `WebhookConfigName != ""` the existing ConfigMap-driven path is byte-for-byte unchanged.
 
-- **Validation:** in pure patch mode (`--target-crd-label` set, `--webhook-config-name` unset), `--cert-sans` MUST be non-empty (else the cert has no SANs and TLS fails). Fatal at startup otherwise.
+- **Validation:** in pure patch mode (`--target-label` set, `--webhook-config-name` unset), `--cert-sans` MUST be non-empty (else the cert has no SANs and TLS fails). Fatal at startup otherwise.
 
 ### Target-cluster cache + reconciler
 
@@ -228,7 +228,7 @@ Still **no** `create`/`delete` on CRDs.
 ### main.go wiring (shape)
 
 ```go
-tcLabelKey, tcLabelValue, tcLabelOK := parseLabel(targetCRDLabel)
+targetLabelKey, targetLabelValue, targetLabelOK := parseLabel(targetLabel)
 // ... at-least-one-mode + pure-patch-mode --cert-sans validation ...
 
 var triggers []chan<- struct{}
@@ -240,14 +240,14 @@ if webhookConfigName != "" {
 // else: register WebhookReconciler in cert-only mode (decision A) with a
 //       startup GenericEvent runnable and --cert-sans-derived SANs.
 
-if tcLabelOK {
+if targetLabelOK {
     targetCluster, err := cluster.New(targetRestConfig, func(o *cluster.Options){
         o.Scheme = scheme
         o.Cache.ByObject = /* label-scoped CRD/MWC/VWC */
     })
     // mgr.Add(targetCluster)
     tcTrigger := make(chan struct{}, 1); triggers = append(triggers, tcTrigger)
-    tc := &controllers.TargetWebhookReconciler{ TargetClient: targetCluster.GetClient(), CertSecretReader: mgr.GetAPIReader(), Namespace: namespace, CertSecretName: certSecretName, LabelKey: tcLabelKey, LabelValue: tcLabelValue, Gate: gate }
+    tc := &controllers.TargetWebhookReconciler{ TargetClient: targetCluster.GetClient(), CertSecretReader: mgr.GetAPIReader(), Namespace: namespace, CertSecretName: certSecretName, LabelKey: targetLabelKey, LabelValue: targetLabelValue, Gate: gate }
     tc.SetupWithManager(mgr, targetCluster, tcTrigger)
 }
 webhookReconciler.RotationTriggers = triggers
@@ -266,7 +266,7 @@ Pure patch-mode deployments now have a **non-empty** gate (from target CRDs), cl
 
 ## Backward Compatibility
 
-- Unset `--target-crd-label` → `TargetWebhookReconciler` and the target cache are not constructed; no new watches, no new RBAC exercised, no behavior change.
+- Unset `--target-label` → `TargetWebhookReconciler` and the target cache are not constructed; no new watches, no new RBAC exercised, no behavior change.
 - `--managed-resource-label` path (`ManagedResourceReconciler`) is untouched.
 - `--webhook-config-name` set → ConfigMap mode identical to today (its only change is that the required-check became an "at least one mode" check; when it's set, that check passes exactly as before).
 - All existing flag names, defaults, and semantics preserved. New flag defaults to unset.
@@ -279,7 +279,7 @@ Pure patch-mode deployments now have a **non-empty** gate (from target CRDs), cl
 - `pkg/controllers/reconciler_test.go`: `RotationTriggers` fan-out to multiple consumers; cert-only mode (no ConfigMap) generates a cert from `--cert-sans`; startup bootstrap runnable fires one event.
 - `cmd/webhook-injector` (or a small `main_test.go` if the package has one; else document manual `--help` + startup checks): at-least-one-mode validation; pure-patch-mode requires `--cert-sans`.
 
-**E2E tests** (`test/e2e/`): apply labeled CRD + MWC + VWC **directly** to the target (no ManagedResource), start injector with `--target-crd-label` and no `--webhook-config-name`, assert all three get `caBundle` within seconds (Watch), force-rotate, assert union then promoted single cert land, and the gate held promotion until CRD propagation. Match the existing e2e harness.
+**E2E tests** (`test/e2e/`): apply labeled CRD + MWC + VWC **directly** to the target (no ManagedResource), start injector with `--target-label` and no `--webhook-config-name`, assert all three get `caBundle` within seconds (Watch), force-rotate, assert union then promoted single cert land, and the gate held promotion until CRD propagation. Match the existing e2e harness.
 
 **Manual testing:** kind hosting+target, directly-applied labeled objects, verify `kubectl get {crd,mwc,vwc} -o jsonpath=...caBundle` tracks rotation; verify a `failurePolicy: Fail` MWC is stamped before it can block traffic.
 
@@ -290,7 +290,7 @@ Pure patch-mode deployments now have a **non-empty** gate (from target CRDs), cl
 - `pkg/controllers/target_webhook_reconciler_test.go`
 
 **Modify:**
-- `cmd/webhook-injector/main.go` — `--target-crd-label` flag; at-least-one-mode + pure-patch `--cert-sans` validation; optional `WebhookReconciler` registration / cert-only mode; target `cluster.Cluster` construction; `RotationTriggers` slice.
+- `cmd/webhook-injector/main.go` — `--target-label` flag; at-least-one-mode + pure-patch `--cert-sans` validation; optional `WebhookReconciler` registration / cert-only mode; target `cluster.Cluster` construction; `RotationTriggers` slice.
 - `pkg/controllers/reconciler.go` — `RotationTriggers`; `signalRotation` loop; ConfigMap-optional cert-only path + startup bootstrap runnable.
 - `pkg/controllers/managed_resource_reconciler.go` — extract `stampCRDConversionCABundle` (shared); untouched otherwise.
 - `pkg/metrics/metrics.go` — `target_crd_stamps_total{result}`.
@@ -307,9 +307,9 @@ Pure patch-mode deployments now have a **non-empty** gate (from target CRDs), cl
 ## Completion Criteria
 
 - [ ] `stampCRDConversionCABundle` + `stampAdmissionCABundle` extracted/added; existing MR tests unchanged and green.
-- [ ] `--target-crd-label` registers `TargetWebhookReconciler` (target-crd/mwc/vwc) on a label-scoped target cache; unset → nothing registered, behavior byte-for-byte unchanged.
+- [ ] `--target-label` registers `TargetWebhookReconciler` (target-crd/mwc/vwc) on a label-scoped target cache; unset → nothing registered, behavior byte-for-byte unchanged.
 - [ ] Patch mode patches **only** `caBundle` (CRD conversion + MWC/VWC per-webhook); no create/delete; no other field mutated; no admission mutator.
-- [ ] `--webhook-config-name` optional; startup fails only when neither it nor `--target-crd-label` is set; pure patch mode requires `--cert-sans`.
+- [ ] `--webhook-config-name` optional; startup fails only when neither it nor `--target-label` is set; pure patch mode requires `--cert-sans`.
 - [ ] `WebhookReconciler` runs cert lifecycle in cert-only mode from `--cert-sans`; ConfigMap mode unchanged when the flag is set.
 - [ ] Stamped CRDs published to the rotation gate; MWC/VWC not gated; staged promotion waits for target CRD propagation.
 - [ ] `RotationTriggers` fan-out delivers to both MR and patch-mode consumers.

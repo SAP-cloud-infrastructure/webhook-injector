@@ -22,10 +22,10 @@ import (
 )
 
 const (
-	tcLabelKey   = "webhook-injector/target"
-	tcLabelValue = "metal-operator"
-	tcCRDName    = "servers.metal.ironcore.dev"
-	tcCA         = "target-ca-bundle-bytes"
+	targetLabelKey   = "webhook-injector/target"
+	targetLabelValue = "metal-operator"
+	tcCRDName        = "servers.metal.ironcore.dev"
+	tcCA             = "target-ca-bundle-bytes"
 )
 
 func tcCertSecret() *corev1.Secret {
@@ -38,7 +38,7 @@ func tcCertSecret() *corev1.Secret {
 
 func tcWebhookCRD(caBundle string) *apiextensionsv1.CustomResourceDefinition {
 	crd := &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{Name: tcCRDName, Labels: map[string]string{tcLabelKey: tcLabelValue}},
+		ObjectMeta: metav1.ObjectMeta{Name: tcCRDName, Labels: map[string]string{targetLabelKey: targetLabelValue}},
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 			Conversion: &apiextensionsv1.CustomResourceConversion{
 				Strategy: apiextensionsv1.WebhookConverter,
@@ -66,7 +66,7 @@ func newTargetReconciler(c client.Client, gate *rotationgate.Gate) *TargetWebhoo
 	return &TargetWebhookReconciler{
 		TargetClient: c, CertSecretReader: c,
 		Namespace: mrNamespace, CertSecretName: certSecretName,
-		LabelKey: tcLabelKey, LabelValue: tcLabelValue, Gate: gate,
+		LabelKey: targetLabelKey, LabelValue: targetLabelValue, Gate: gate,
 	}
 }
 
@@ -96,7 +96,7 @@ func TestTargetReconcileCRDStampsCABundle(t *testing.T) {
 
 func tcMWC(ca string) *admissionv1.MutatingWebhookConfiguration {
 	m := &admissionv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "tc-mwc", Labels: map[string]string{tcLabelKey: tcLabelValue}},
+		ObjectMeta: metav1.ObjectMeta{Name: "tc-mwc", Labels: map[string]string{targetLabelKey: targetLabelValue}},
 		Webhooks:   []admissionv1.MutatingWebhook{{Name: "a.example.com"}, {Name: "b.example.com"}},
 	}
 	if ca != "" {
@@ -155,7 +155,7 @@ func TestTargetReconcileCRDConvergedNoPatch(t *testing.T) {
 func TestTargetReconcileCRDSkipsNonWebhook(t *testing.T) {
 	s := testScheme(t)
 	crd := &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{Name: tcCRDName, Labels: map[string]string{tcLabelKey: tcLabelValue}},
+		ObjectMeta: metav1.ObjectMeta{Name: tcCRDName, Labels: map[string]string{targetLabelKey: targetLabelValue}},
 		Spec:       apiextensionsv1.CustomResourceDefinitionSpec{Conversion: &apiextensionsv1.CustomResourceConversion{Strategy: apiextensionsv1.NoneConverter}},
 	}
 	base := fake.NewClientBuilder().WithScheme(s).WithObjects(crd, tcCertSecret()).Build()
@@ -251,7 +251,7 @@ func TestTargetReconcileMWCPatchDoesNotClobberList(t *testing.T) {
 func TestTargetReconcileCRDStrategyChangeForgetsGate(t *testing.T) {
 	s := testScheme(t)
 	crd := &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{Name: tcCRDName, Labels: map[string]string{tcLabelKey: tcLabelValue}},
+		ObjectMeta: metav1.ObjectMeta{Name: tcCRDName, Labels: map[string]string{targetLabelKey: targetLabelValue}},
 		Spec:       apiextensionsv1.CustomResourceDefinitionSpec{Conversion: &apiextensionsv1.CustomResourceConversion{Strategy: apiextensionsv1.NoneConverter}},
 	}
 	base := fake.NewClientBuilder().WithScheme(s).WithObjects(crd, tcCertSecret()).Build()

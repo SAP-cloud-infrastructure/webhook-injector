@@ -30,7 +30,7 @@ import (
 
 // TargetWebhookReconciler keeps caBundle in sync on CRD conversion webhooks
 // and Mutating/ValidatingWebhookConfigurations applied DIRECTLY to the target
-// cluster (GRM-free / direct-apply topology). Opt-in via --target-crd-label.
+// cluster (GRM-free / direct-apply topology). Opt-in via --target-label.
 // Leader-only, event-driven via a label-scoped target-cluster cache.
 //
 // Write surface is minimal: patches ONLY caBundle (MergeFrom for the CRD's

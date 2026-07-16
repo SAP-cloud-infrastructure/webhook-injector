@@ -137,7 +137,7 @@ type WebhookReconciler struct {
 	// RotationTriggers are signaled (non-blocking send to each) on every
 	// detected certificate rotation. Downstream consumers are
 	// ManagedResourceReconciler (--managed-resource-label) and
-	// TargetWebhookReconciler (--target-crd-label); each reads its channel
+	// TargetWebhookReconciler (--target-label); each reads its channel
 	// and force-stamps every labeled object with the new caBundle instead of
 	// waiting for a cache --sync-period to fire.
 	//
@@ -217,7 +217,7 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	if r.WebhookConfigName == "" {
 		// Cert-only mode: no ConfigMap. SANs come solely from --cert-sans.
-		// Used by pure patch-mode deployments (--target-crd-label without
+		// Used by pure patch-mode deployments (--target-label without
 		// --webhook-config-name). No MWC/VWC are applied to the target here.
 		for _, san := range r.CertSANs {
 			services = append(services, certificates.ServiceReference{Hostname: san})
@@ -1147,7 +1147,7 @@ func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // setupCertOnlyMode wires the reconciler when no ConfigMap anchors it
-// (--webhook-config-name unset, --target-crd-label set). There is no
+// (--webhook-config-name unset, --target-label set). There is no
 // ConfigMap to watch, so a one-shot GenericEvent from certBootstrapRunnable
 // drives the first reconcile; after it creates the cert Secret the loop
 // self-drives via RequeueAfter, and the Secret watch continues to catch

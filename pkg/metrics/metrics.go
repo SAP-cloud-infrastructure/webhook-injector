@@ -95,7 +95,7 @@ var (
 
 	// TargetCRDStampsTotal counts reconcile outcomes on target-cluster
 	// CustomResourceDefinition conversion-webhook caBundle stamping (the
-	// --target-crd-label patch mode), partitioned by result. "stamped" =
+	// --target-label patch mode), partitioned by result. "stamped" =
 	// we patched clientConfig.caBundle; "converged" = already current (no
 	// patch); "error" = Get/Patch failure. Distinct from TargetStampsTotal
 	// (MWC/VWC only) so the kind enum there stays bounded — patch-mode
