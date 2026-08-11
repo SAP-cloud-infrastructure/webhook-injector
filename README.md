@@ -253,6 +253,7 @@ Each alert can be independently disabled or have its `for`, `severity`, `service
 | Alert | Severity | Triggers when |
 |---|---|---|
 | `WebhookTargetStampErrors` | critical | `rate(target_stamps_total{result="error"}[10m]) > 0` — MWC/VWC apply on the target cluster is failing |
+| `WebhookTargetCRDStampErrors` | critical | `rate(target_crd_stamps_total{result="error"}[10m]) > 0` — patch-mode (`--target-label`) CRD conversion-webhook caBundle stamping on the target cluster is failing (GRM-free / direct-apply counterpart of the ManagedResource stamp alert) |
 | `WebhookManagedResourceStampErrors` | critical | `rate(managed_resource_stamps_total{result="error"}[10m]) > 0` — MR Secret stamping on the hosting cluster is failing |
 | `WebhookManagedResourceUnhealthy` | warning | `rate(managed_resource_unhealthy_total[15m]) > 0` — GRM reports a labeled MR with `ResourcesApplied` / `ResourcesHealthy` not `True` |
 | `WebhookManagedResourceForceReconcilePatchErrors` | warning | `rate(managed_resource_force_reconcile_total{result="error"}[15m]) > 0` — patching `gardener.cloud/operation=reconcile` on the MR failed (GRM-kick degraded; propagation will rely on GRM's own watch/sync cadence) |
