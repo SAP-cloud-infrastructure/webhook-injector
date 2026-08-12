@@ -649,6 +649,7 @@ func (t *managedResourceResyncTrigger) fanOut(ctx context.Context, logger logr.L
 	var list resourcesv1alpha1.ManagedResourceList
 	if err := t.hostingClient.List(ctx, &list, selector); err != nil {
 		logger.Error(err, "rotation fan-out: failed to list ManagedResources")
+		metrics.RotationFanOutEventsTotal.WithLabelValues(kindManagedResource, metrics.FanOutError).Inc()
 		return
 	}
 	for i := range list.Items {

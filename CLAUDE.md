@@ -320,7 +320,7 @@ All metrics are registered on controller-runtime's default Prometheus registry a
 
 ### Rotation fan-out
 
-- `webhook_injector_rotation_fanout_events_total{kind, outcome}` — counter. Labels: `kind ∈ {ManagedResource}`; `outcome ∈ {emitted}`. Emitted by `managedResourceResyncTrigger.fanOut` for every per-kind event pushed to the controller's reconcile channel on every cert rotation. The producer blocks until the consumer drains a slot rather than dropping, so `outcome="emitted"` is the only steady-state value. The `outcome` label is retained for forward compatibility.
+- `webhook_injector_rotation_fanout_events_total{kind, outcome}` — counter. Labels: `kind ∈ {ManagedResource, TargetCRD, TargetMWC, TargetVWC}`; `outcome ∈ {emitted, error}`. Emitted by `managedResourceResyncTrigger.fanOut` (kind=`ManagedResource`) and by `targetResyncTrigger.fanOut` (kinds=`TargetCRD`/`TargetMWC`/`TargetVWC`) for every per-kind event pushed to the controller's reconcile channel on every cert rotation. `outcome="emitted"` counts successful sends (the producer blocks until the consumer drains a slot rather than dropping, so this is the steady-state value); `outcome="error"` counts List failures against the (hosting or target) apiserver — the alertable signal that a persistent RBAC/apiserver problem is silently degrading rotation propagation. The target fan-out drains its three kinds in independent goroutines, so a List failure on one kind never blocks the others.
 
 ### ManagedResource stamping (`--managed-resource-label` only)
 

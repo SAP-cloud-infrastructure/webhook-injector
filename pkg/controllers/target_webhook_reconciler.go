@@ -6,6 +6,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
@@ -62,12 +63,22 @@ func (r *TargetWebhookReconciler) hasLabel(obj client.Object) bool {
 	return obj.GetLabels()[r.LabelKey] == r.LabelValue
 }
 
-// targetKindMWC / targetKindVWC are the TargetStampsTotal kind label values
-// for patch-mode admission-webhook stamps (they reuse that counter, matching
-// the ConfigMap path's kinds).
+// targetKindMWC / targetKindVWC / targetKindCRD are the metrics-label kind
+// values for patch-mode admission-webhook stamps (TargetStampsTotal reuses the
+// first two, matching the ConfigMap path's kinds) and for the rotation
+// fan-out (RotationFanOutEventsTotal, all three).
 const (
+	targetKindCRD = "TargetCRD"
 	targetKindMWC = "MutatingWebhookConfiguration"
 	targetKindVWC = "ValidatingWebhookConfiguration"
+
+	// fanOutKindMWC / fanOutKindVWC are the RotationFanOutEventsTotal kind
+	// values for the target-cluster MWC/VWC resyncs. They differ from the
+	// TargetStampsTotal kind values (which reuse the API kind name) so the
+	// fan-out kind enum is uniformly TargetXxx across all three kinds and
+	// cannot collide with the ManagedResource fan-out label.
+	fanOutKindMWC = "TargetMWC"
+	fanOutKindVWC = "TargetVWC"
 )
 
 // ReconcileCRD stamps caBundle on one labeled target CRD's conversion webhook.
@@ -274,41 +285,76 @@ func (t *targetResyncTrigger) Start(ctx context.Context) error {
 	}
 }
 
+// fanOut lists every labeled CRD/MWC/VWC on the target cluster and emits one
+// GenericEvent per object on the matching channel. Each kind runs in its own
+// goroutine so a wedged or slow consumer for one kind cannot starve the
+// others — the earlier sequential implementation head-of-line-blocked
+// MWC/VWC resync whenever >64 labeled CRDs existed and the target-crd
+// controller was momentarily slow. The three goroutines are independent
+// and List failures are per-kind; a failure on one kind logs plus
+// increments RotationFanOutEventsTotal{outcome="error"} but never
+// prevents the other two kinds from resyncing.
 func (t *targetResyncTrigger) fanOut(ctx context.Context, logger logr.Logger) {
 	sel := labels.SelectorFromSet(labels.Set{t.labelKey: t.labelValue})
 	opt := client.MatchingLabelsSelector{Selector: sel}
 
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go t.fanOutCRDs(ctx, logger, opt, &wg)
+	go t.fanOutMWCs(ctx, logger, opt, &wg)
+	go t.fanOutVWCs(ctx, logger, opt, &wg)
+	wg.Wait()
+}
+
+func (t *targetResyncTrigger) fanOutCRDs(ctx context.Context, logger logr.Logger, opt client.MatchingLabelsSelector, wg *sync.WaitGroup) {
+	defer wg.Done()
 	var crds apiextensionsv1.CustomResourceDefinitionList
 	if err := t.targetClient.List(ctx, &crds, opt); err != nil {
 		logger.Error(err, "target resync: list CRDs")
-	} else {
-		for i := range crds.Items {
-			if !t.send(ctx, t.crdCh, &crds.Items[i]) {
-				return
-			}
-		}
+		metrics.RotationFanOutEventsTotal.WithLabelValues(targetKindCRD, metrics.FanOutError).Inc()
+		return
 	}
+	for i := range crds.Items {
+		if !t.send(ctx, t.crdCh, &crds.Items[i]) {
+			return
+		}
+		metrics.RotationFanOutEventsTotal.WithLabelValues(targetKindCRD, metrics.FanOutEmitted).Inc()
+	}
+	logger.V(1).Info("target resync: CRDs complete", "count", len(crds.Items))
+}
+
+func (t *targetResyncTrigger) fanOutMWCs(ctx context.Context, logger logr.Logger, opt client.MatchingLabelsSelector, wg *sync.WaitGroup) {
+	defer wg.Done()
 	var mwcs admissionv1.MutatingWebhookConfigurationList
 	if err := t.targetClient.List(ctx, &mwcs, opt); err != nil {
 		logger.Error(err, "target resync: list MWCs")
-	} else {
-		for i := range mwcs.Items {
-			if !t.send(ctx, t.mwcCh, &mwcs.Items[i]) {
-				return
-			}
-		}
+		metrics.RotationFanOutEventsTotal.WithLabelValues(fanOutKindMWC, metrics.FanOutError).Inc()
+		return
 	}
+	for i := range mwcs.Items {
+		if !t.send(ctx, t.mwcCh, &mwcs.Items[i]) {
+			return
+		}
+		metrics.RotationFanOutEventsTotal.WithLabelValues(fanOutKindMWC, metrics.FanOutEmitted).Inc()
+	}
+	logger.V(1).Info("target resync: MWCs complete", "count", len(mwcs.Items))
+}
+
+func (t *targetResyncTrigger) fanOutVWCs(ctx context.Context, logger logr.Logger, opt client.MatchingLabelsSelector, wg *sync.WaitGroup) {
+	defer wg.Done()
 	var vwcs admissionv1.ValidatingWebhookConfigurationList
 	if err := t.targetClient.List(ctx, &vwcs, opt); err != nil {
 		logger.Error(err, "target resync: list VWCs")
-	} else {
-		for i := range vwcs.Items {
-			if !t.send(ctx, t.vwcCh, &vwcs.Items[i]) {
-				return
-			}
-		}
+		metrics.RotationFanOutEventsTotal.WithLabelValues(fanOutKindVWC, metrics.FanOutError).Inc()
+		return
 	}
-	logger.V(1).Info("target resync complete", "crds", len(crds.Items), "mwcs", len(mwcs.Items), "vwcs", len(vwcs.Items))
+	for i := range vwcs.Items {
+		if !t.send(ctx, t.vwcCh, &vwcs.Items[i]) {
+			return
+		}
+		metrics.RotationFanOutEventsTotal.WithLabelValues(fanOutKindVWC, metrics.FanOutEmitted).Inc()
+	}
+	logger.V(1).Info("target resync: VWCs complete", "count", len(vwcs.Items))
 }
 
 func (t *targetResyncTrigger) send(ctx context.Context, ch chan event.GenericEvent, obj client.Object) bool {
