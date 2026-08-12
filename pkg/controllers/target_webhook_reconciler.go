@@ -372,3 +372,38 @@ var (
 	_ manager.Runnable               = (*targetResyncTrigger)(nil)
 	_ manager.LeaderElectionRunnable = (*targetResyncTrigger)(nil)
 )
+
+// LeaderOnlyCluster wraps a cluster.Cluster as a leader-election-gated
+// manager.Runnable that does NOT expose GetCache() at the Runnable interface
+// level.
+//
+// Why this exists: controller-runtime's manager.Add type-switch
+// (runnable_group.go in v0.23.1) matches `case hasCache:` BEFORE it checks
+// LeaderElectionRunnable. Adding a bare cluster.Cluster (which implements
+// both Runnable and GetCache()) therefore lands it in the Caches group and
+// blocks manager startup on WaitForCacheSync unconditionally, on every
+// replica, with no timeout — so if the target apiserver is unreachable or
+// the target RBAC is not yet in place, followers block forever, readyz stays
+// red, and certs never reach the sidecar filesystem. Wrapping the cluster in
+// a struct that implements Runnable + NeedLeaderElection but NOT hasCache
+// re-routes it into the LeaderElection group. Followers never touch the
+// target apiserver; the leader waits for its own cache sync via each
+// controller's source-add.
+type LeaderOnlyCluster struct {
+	Cluster cluster.Cluster
+}
+
+// Start starts the wrapped cluster. Blocks until ctx is cancelled or the
+// underlying cluster errors, as manager.Runnable requires.
+func (l *LeaderOnlyCluster) Start(ctx context.Context) error {
+	return l.Cluster.Start(ctx)
+}
+
+// NeedLeaderElection routes the wrapper into the manager's LeaderElection
+// runnable group — followers do not run it.
+func (l *LeaderOnlyCluster) NeedLeaderElection() bool { return true }
+
+var (
+	_ manager.Runnable               = (*LeaderOnlyCluster)(nil)
+	_ manager.LeaderElectionRunnable = (*LeaderOnlyCluster)(nil)
+)

@@ -390,7 +390,7 @@ func main() {
 			setupLog.Error(err, "Unable to create target cluster handle for patch mode")
 			os.Exit(1)
 		}
-		if err := mgr.Add(targetCluster); err != nil {
+		if err := mgr.Add(&controllers.LeaderOnlyCluster{Cluster: targetCluster}); err != nil {
 			setupLog.Error(err, "Unable to add target cluster to manager")
 			os.Exit(1)
 		}
@@ -419,7 +419,7 @@ func main() {
 			setupLog.Error(err, "Unable to create TargetWebhookReconciler controller")
 			os.Exit(1)
 		}
-		setupLog.Info("TargetWebhookReconciler controller registered (patch mode, runs on leader only)",
+		setupLog.Info("TargetWebhookReconciler controller registered (patch mode, cache + controllers leader-only)",
 			"label", targetLabelKey+"="+targetLabelValue,
 		)
 	}
