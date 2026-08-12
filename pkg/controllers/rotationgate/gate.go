@@ -1,33 +1,43 @@
 // SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
 // SPDX-License-Identifier: Apache-2.0
 
-// Package rotationgate owns the bridge between ManagedResourceReconciler
-// (which knows which CRDs it has stamped) and WebhookReconciler (which
-// needs to gate certificate-rotation promotion on those CRDs' caBundles
-// having propagated to the target cluster).
+// Package rotationgate owns the bridge between the publishing reconcilers
+// (ManagedResourceReconciler on the hosting cluster, TargetWebhookReconciler
+// on the target cluster in patch mode) and WebhookReconciler, which needs
+// to gate certificate-rotation promotion on those CRDs' caBundles having
+// propagated.
 //
 // Why a dedicated type rather than a bare channel or a slice on a shared
-// struct: the read and write sides are in different packages run by
+// struct: publishers and readers are in different packages, run by
 // different reconcilers at different cadences, and a typed handle makes
 // the contract explicit:
 //
 //	g := rotationgate.New()
 //	wr := WebhookReconciler{..., Gate: g}
 //	mr := ManagedResourceReconciler{..., Gate: g}
+//	tr := TargetWebhookReconciler{..., Gate: g}
 //
-// The Gate is keyed by ManagedResource (a `key` derived from namespace +
-// name), so each MR independently publishes the set of CRDs it observed
-// on its most recent reconcile, and the global view (Snapshot) is the
-// union across every currently-known MR. When an MR is deleted, the
-// reconciler calls Forget(key) to drop its contribution. Snapshot
-// canonicalises the union: sorted, deduplicated, nil-when-empty.
+// The Gate is keyed by a stable per-publisher string. Two publishers live
+// here today, using disjoint key schemes so entries cannot collide:
+//
+//   - ManagedResourceReconciler publishes each MR under `<namespace>/<name>`
+//     (via req.String()); those keys always contain a '/'.
+//   - TargetWebhookReconciler publishes each labeled target CRD under its
+//     bare CRD name (cluster-scoped resource); CRD names never contain '/'.
+//
+// Snapshot returns the union of all currently-published CRD names across
+// every publisher: sorted, deduplicated, nil-when-empty. Publishers call
+// Forget(key) to drop their contribution when the source object is
+// deleted, unlabeled, or leaves conversion.strategy=Webhook — otherwise a
+// future rotation would wait on a stale gate entry until
+// --rotation-gate-timeout.
 //
 // State is in-memory only by design. A controller restart returns an
-// empty Gate; the MR reconciler re-populates each MR's entry within
-// one reconcile cycle (seconds). Rotations that overlap with that
-// window simply fall back to the time-based gate timeout — the
-// alternative (persisting the gate set on an apiserver object) would
-// introduce a watch race and a stale-entry GC hazard.
+// empty Gate; publishers re-populate their entries within one reconcile
+// cycle (seconds). Rotations that overlap with that window simply fall
+// back to the time-based gate timeout — the alternative (persisting the
+// gate set on an apiserver object) would introduce a watch race and a
+// stale-entry GC hazard.
 package rotationgate
 
 import (
@@ -35,71 +45,75 @@ import (
 	"sync"
 )
 
-// Key uniquely identifies a ManagedResource for gate publishing. Tests
-// can use any string; production callers pass `<namespace>/<name>`.
+// Key uniquely identifies a publisher entry in the Gate. The keyspace is
+// shared across publishers; each publisher uses a scheme that cannot
+// collide with the others (see the package doc for the current scheme
+// assignments). Tests may use any string.
 type Key string
 
 // Gate is the shared snapshot of CRD names whose caBundles must show
 // the staged-rotation union bundle on the target cluster before
 // WebhookReconciler promotes the new serving cert.
 //
-// Safe for concurrent use by both reconcilers. The zero value is a
-// usable empty Gate; New() is provided for symmetry with the rest of
-// the codebase.
+// Safe for concurrent use by every publisher and the reader. The zero
+// value is a usable empty Gate; New() is provided for symmetry with the
+// rest of the codebase.
 type Gate struct {
-	mu    sync.RWMutex
-	perMR map[Key][]string // canonicalised per-MR slices; Snapshot unions them.
+	mu           sync.RWMutex
+	perPublisher map[Key][]string // canonicalised per-publisher slices; Snapshot unions them.
 }
 
-// New returns a fresh empty Gate. Reads (Snapshot) return nil; the MR
-// reconciler will call Publish once it stamps any CRD.
+// New returns a fresh empty Gate. Reads (Snapshot) return nil until a
+// publisher calls Publish.
 func New() *Gate {
 	return &Gate{}
 }
 
-// Publish atomically replaces the set of CRDs published by the given
-// MR. Caller does not need to dedupe or sort — Publish canonicalises.
-// An empty or nil slice is the right value when an MR was reconciled
-// but observed no CRDs (e.g. it ships only ConfigMaps); the entry
-// becomes a no-op contribution to the union but stays in the map so
-// later reconciles can re-populate it without a Forget round-trip.
+// Publish atomically replaces the set of CRDs published by the caller
+// identified by key. Caller does not need to dedupe or sort — Publish
+// canonicalises. An empty or nil slice is the right value when the
+// publisher reconciled but observed no CRDs (e.g. an MR that ships only
+// ConfigMaps); the entry becomes a no-op contribution to the union but
+// stays in the map so later reconciles can re-populate it without a
+// Forget round-trip.
 //
 // Publish copies its input so callers don't need to worry about
 // aliasing.
-func (g *Gate) Publish(mr Key, crds []string) {
+func (g *Gate) Publish(publisher Key, crds []string) {
 	canon := canonicalize(crds)
 	g.mu.Lock()
-	if g.perMR == nil {
-		g.perMR = make(map[Key][]string)
+	if g.perPublisher == nil {
+		g.perPublisher = make(map[Key][]string)
 	}
-	g.perMR[mr] = canon
+	g.perPublisher[publisher] = canon
 	g.mu.Unlock()
 }
 
-// Forget drops the given MR's contribution. Call on MR deletion. A
-// missing key is a no-op (an MR that was deleted before it was ever
-// reconciled).
-func (g *Gate) Forget(mr Key) {
+// Forget drops the given publisher's contribution. Call when the source
+// object is deleted, unlabeled, or otherwise no longer contributes to
+// the gate. A missing key is a no-op (a publisher that never called
+// Publish).
+func (g *Gate) Forget(publisher Key) {
 	g.mu.Lock()
-	delete(g.perMR, mr)
+	delete(g.perPublisher, publisher)
 	g.mu.Unlock()
 }
 
 // Snapshot returns the union of all currently-published CRD names as a
 // freshly-allocated, sorted, deduplicated slice the caller is free to
-// retain. Returns nil for an empty gate (no MRs published anything, or
-// the perMR map is nil) so callers can treat "no gate" and "empty gate"
-// identically.
+// retain. Returns nil for an empty gate (no publisher published
+// anything, or the map is nil) so callers can treat "no gate" and
+// "empty gate" identically.
 func (g *Gate) Snapshot() []string {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	if len(g.perMR) == 0 {
+	if len(g.perPublisher) == 0 {
 		return nil
 	}
 	// Union without an intermediate set whenever possible — typical case
-	// is a single MR with a handful of CRDs.
+	// is a single publisher with a handful of CRDs.
 	seen := make(map[string]struct{})
-	for _, list := range g.perMR {
+	for _, list := range g.perPublisher {
 		for _, name := range list {
 			seen[name] = struct{}{}
 		}
