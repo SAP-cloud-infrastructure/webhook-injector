@@ -99,7 +99,7 @@ func TestTargetPatchModeFlow(t *testing.T) {
 
 	const (
 		ns             = "default"
-		certSecretName = "webhook-injector-certs"
+		certSecretName = "webhook-injector-test-patch-mode"
 		labelKey       = "webhook-injector.sap.com/test-patch"
 		labelVal       = "true"
 		crdName        = "widgets.patch.example.com"
@@ -195,8 +195,30 @@ func TestTargetPatchModeFlow(t *testing.T) {
 	})
 
 	// --- 2. In-process TargetWebhookReconciler against the target cluster.
-	// CertSecretReader reads the hosting cert Secret (populated by the
-	// deployed ConfigMap-mode reconciler).
+	// The reconciler reads caBundle from its OWN test-owned Secret rather
+	// than the deployment-owned "webhook-injector-certs" Secret. This
+	// eliminates a race where the deployed ConfigMap-mode WebhookReconciler
+	// could rotate the shared Secret during the test — a t.Cleanup restore
+	// of the pre-test tls.crt would then leave the shared Secret with a
+	// tls.crt/tls.key/rotation-annotations tuple that no longer references
+	// the same leaf, wedging the live controller for later tests. Seeding
+	// value: whatever byte string the test picks; downstream assertions
+	// compare byte-for-byte so no PEM validity is required.
+	origCA := []byte("test-owned-original-ca-bundle")
+	testSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: certSecretName, Namespace: ns},
+		Type:       corev1.SecretTypeTLS,
+		Data:       map[string][]byte{"tls.crt": origCA, "tls.key": []byte("test-owned-key")},
+	}
+	if err := hostingCRClient.Create(ctx, testSecret); err != nil {
+		t.Fatalf("Create test-owned cert Secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = hostingCRClient.Delete(context.Background(), &corev1.Secret{ //nolint:errcheck
+			ObjectMeta: metav1.ObjectMeta{Name: certSecretName, Namespace: ns},
+		})
+	})
+
 	gate := rotationgate.New()
 	rec := &controllers.TargetWebhookReconciler{
 		TargetClient:     targetCRClient,
@@ -208,7 +230,7 @@ func TestTargetPatchModeFlow(t *testing.T) {
 		Gate:             gate,
 	}
 
-	caBundle := getCABundle(t, ctx, hostingCRClient, ns, certSecretName)
+	caBundle := origCA
 
 	reconcileAll := func() {
 		if _, err := rec.ReconcileCRD(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: crdName}}); err != nil {
@@ -233,17 +255,12 @@ func TestTargetPatchModeFlow(t *testing.T) {
 		t.Errorf("gate snapshot = %v, want [%s] (only CRDs are gated)", snap, crdName)
 	}
 
-	// --- 4. Simulate rotation: change the hosting cert Secret tls.crt, then
-	// re-reconcile and assert the new caBundle propagates to all three.
-	// Restore the original tls.crt afterwards so we don't leave the shared,
-	// deployment-owned cert Secret in a mutated state for reused kind
-	// clusters or later tests. The simulated "new" bundle is a valid PEM
-	// concatenation (old || old) so nothing downstream chokes on a
-	// malformed cert while the test runs.
-	t.Cleanup(func() {
-		patchCertSecretTLSCrt(t, context.Background(), hostingCRClient, ns, certSecretName, caBundle)
-	})
-	newCA := append(append([]byte(nil), caBundle...), caBundle...)
+	// --- 4. Simulate rotation: change the test-owned Secret's tls.crt,
+	// re-reconcile, and assert the new caBundle propagates to all three.
+	// The Secret is test-owned (created above, deleted by t.Cleanup) so no
+	// restore of a shared/deployment-owned Secret is required. The "new"
+	// bundle is byte-distinct from the original; assertion is byte-for-byte.
+	newCA := []byte("test-owned-rotated-ca-bundle")
 	patchCertSecretTLSCrt(t, ctx, hostingCRClient, ns, certSecretName, newCA)
 	reconcileAll()
 	assertCRDCABundle(t, ctx, targetCRClient, crdName, newCA)
@@ -271,6 +288,9 @@ func assertMWCCABundle(t *testing.T, ctx context.Context, c ctrlclient.Client, n
 	if err := c.Get(ctx, types.NamespacedName{Name: name}, got); err != nil {
 		t.Fatalf("Get target MWC %s: %v", name, err)
 	}
+	if len(got.Webhooks) == 0 {
+		t.Fatalf("MWC %s has zero webhooks; caBundle assertion would pass vacuously", name)
+	}
 	for i, w := range got.Webhooks {
 		if !bytes.Equal(w.ClientConfig.CABundle, want) {
 			t.Errorf("MWC %s webhook[%d] caBundle mismatch: got %q want %q", name, i, w.ClientConfig.CABundle, want)
@@ -283,6 +303,9 @@ func assertVWCCABundle(t *testing.T, ctx context.Context, c ctrlclient.Client, n
 	got := &admissionv1.ValidatingWebhookConfiguration{}
 	if err := c.Get(ctx, types.NamespacedName{Name: name}, got); err != nil {
 		t.Fatalf("Get target VWC %s: %v", name, err)
+	}
+	if len(got.Webhooks) == 0 {
+		t.Fatalf("VWC %s has zero webhooks; caBundle assertion would pass vacuously", name)
 	}
 	for i, w := range got.Webhooks {
 		if !bytes.Equal(w.ClientConfig.CABundle, want) {
