@@ -212,6 +212,8 @@ webhook-injector \
 
 `--webhook-config-name` is optional here (at least one of it or `--target-label` must be set). With no ConfigMap there are no webhook services to derive SANs from, so `--cert-sans` is the sole SAN source and is required. Setting both flags runs ConfigMap mode and patch mode together.
 
+> **RBAC rollout ordering.** Patch mode adds `list,watch,patch` on `customresourcedefinitions.apiextensions.k8s.io` and `list,watch` on `mutatingwebhookconfigurations`/`validatingwebhookconfigurations` to the target ClusterRole (see [`config/rbac.yaml`](config/rbac.yaml)). Apply the updated target ClusterRole **before** rolling out a controller with `--target-label` set — otherwise the leader's label-scoped target-cluster cache fails its initial `list`/`watch` with `Forbidden`, the controller start errors out, and the pod CrashLoopBackOffs. Followers continue delivering certs (they don't run the target cache — see `LeaderOnlyCluster` in `pkg/controllers/target_webhook_reconciler.go`), so this is a loud, alertable failure rather than a silent hang.
+
 ## Metrics
 
 webhook-injector exposes Prometheus metrics at `<metrics-addr>/metrics` (default `:8082`). All metric names are prefixed `webhook_injector_`.
