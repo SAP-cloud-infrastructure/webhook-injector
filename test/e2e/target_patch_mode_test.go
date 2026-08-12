@@ -22,6 +22,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/certificates"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers/rotationgate"
 )
@@ -198,13 +199,17 @@ func TestTargetPatchModeFlow(t *testing.T) {
 	// The reconciler reads caBundle from its OWN test-owned Secret rather
 	// than the deployment-owned "webhook-injector-certs" Secret. This
 	// eliminates a race where the deployed ConfigMap-mode WebhookReconciler
-	// could rotate the shared Secret during the test — a t.Cleanup restore
-	// of the pre-test tls.crt would then leave the shared Secret with a
-	// tls.crt/tls.key/rotation-annotations tuple that no longer references
-	// the same leaf, wedging the live controller for later tests. Seeding
-	// value: whatever byte string the test picks; downstream assertions
-	// compare byte-for-byte so no PEM validity is required.
-	origCA := []byte("test-owned-original-ca-bundle")
+	// could rotate the shared Secret during the test and wedge the live
+	// controller for later tests. The seed must be valid PEM because the
+	// target apiserver validates spec.conversion.webhook.clientConfig.caBundle
+	// as a PEM block — a plain byte-string is rejected by admission.
+	origCA, _, err := certificates.GenerateSelfSignedCert(
+		[]certificates.ServiceReference{{Hostname: "webhook.example.com"}},
+		1*time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("Generate self-signed cert for test Secret: %v", err)
+	}
 	testSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: certSecretName, Namespace: ns},
 		Type:       corev1.SecretTypeTLS,
@@ -259,8 +264,18 @@ func TestTargetPatchModeFlow(t *testing.T) {
 	// re-reconcile, and assert the new caBundle propagates to all three.
 	// The Secret is test-owned (created above, deleted by t.Cleanup) so no
 	// restore of a shared/deployment-owned Secret is required. The "new"
-	// bundle is byte-distinct from the original; assertion is byte-for-byte.
-	newCA := []byte("test-owned-rotated-ca-bundle")
+	// bundle is a freshly-generated self-signed cert — byte-distinct from
+	// origCA AND valid PEM (target apiserver validates CRD caBundle).
+	newCA, _, err := certificates.GenerateSelfSignedCert(
+		[]certificates.ServiceReference{{Hostname: "webhook-rotated.example.com"}},
+		1*time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("Generate rotated self-signed cert: %v", err)
+	}
+	if bytes.Equal(origCA, newCA) {
+		t.Fatal("generated CAs are identical; test would not detect rotation")
+	}
 	patchCertSecretTLSCrt(t, ctx, hostingCRClient, ns, certSecretName, newCA)
 	reconcileAll()
 	assertCRDCABundle(t, ctx, targetCRClient, crdName, newCA)
