@@ -19,10 +19,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/controllers/rotationgate"
 	"github.com/sap-cloud-infrastructure/webhook-injector/pkg/metrics"
@@ -604,5 +606,43 @@ func TestTargetResyncTriggerStartupPassAndRotation(t *testing.T) {
 	}
 	if startErr != nil {
 		t.Errorf("Start returned error: %v", startErr)
+	}
+}
+
+// TestLeaderOnlyClusterIsNotHasCache is the regression test for PR #14
+// finding #1. LeaderOnlyCluster's whole reason for existing is that it
+// implements manager.Runnable + LeaderElectionRunnable but DELIBERATELY
+// does NOT expose GetCache(). controller-runtime v0.23.1's
+// runnables.Add type-switch (pkg/manager/runnable_group.go) matches
+//
+//	case hasCache: // Runnable + GetCache() cache.Cache
+//
+// BEFORE it checks LeaderElectionRunnable. A future maintainer adding
+// an innocuous convenience passthrough like
+//
+//	func (l *LeaderOnlyCluster) GetCache() cache.Cache { return l.Cluster.GetCache() }
+//
+// would silently reinstate the original bug: the target cluster lands
+// back in the manager's Caches runnable group, every replica (leader
+// and followers) blocks on WaitForCacheSync unconditionally, readyz
+// stays red, no CrashLoopBackOff. Nothing else fails to compile and
+// no other test breaks — the failure is quiet and would reach a
+// cluster before anyone noticed.
+//
+// This test pins the invariant: LeaderOnlyCluster must NOT satisfy
+// the hasCache interface, AND must require leader election.
+func TestLeaderOnlyClusterIsNotHasCache(t *testing.T) {
+	var r manager.Runnable = &LeaderOnlyCluster{}
+	if _, ok := r.(interface{ GetCache() cache.Cache }); ok {
+		t.Fatal("LeaderOnlyCluster must NOT expose GetCache(): it would land in " +
+			"the manager's Caches runnable group and block followers on cache sync")
+	}
+	ler, ok := r.(manager.LeaderElectionRunnable)
+	if !ok {
+		t.Fatal("LeaderOnlyCluster must implement manager.LeaderElectionRunnable")
+	}
+	if !ler.NeedLeaderElection() {
+		t.Fatal("LeaderOnlyCluster.NeedLeaderElection() must return true; " +
+			"otherwise it lands in the manager's Others group and starts on followers")
 	}
 }
