@@ -314,11 +314,22 @@ func main() {
 	// periodic --sync-period tick. Buffered 1 + non-blocking send means a
 	// missed signal is harmless — a single signal triggers a full re-stamp
 	// pass. One channel per registered stamping reconciler.
+	//
+	// Triggers are allocated up-front — before webhookReconciler.SetupWithManager
+	// runs — so RotationTriggers is populated at Setup time rather than mutated
+	// after. The current controller-runtime shape doesn't run Reconcile until
+	// mgr.Start, but the earlier post-Setup assignment read as a latent
+	// ordering hazard that would bite if anyone moved a Start earlier.
 	var rotationTriggers []chan<- struct{}
 	var mrTrigger chan struct{}
 	if mrLabelOK {
 		mrTrigger = make(chan struct{}, 1)
 		rotationTriggers = append(rotationTriggers, mrTrigger)
+	}
+	var targetTrigger chan struct{}
+	if targetLabelOK {
+		targetTrigger = make(chan struct{}, 1)
+		rotationTriggers = append(rotationTriggers, targetTrigger)
 	}
 
 	webhookReconciler := &controllers.WebhookReconciler{
@@ -333,6 +344,7 @@ func main() {
 		Gate:                  gate,
 		RotationOverlapWindow: rotationOverlapWindow,
 		RotationGateTimeout:   rotationGateTimeout,
+		RotationTriggers:      rotationTriggers,
 		Scheme:                mgr.GetScheme(),
 	}
 	if err := webhookReconciler.SetupWithManager(mgr); err != nil {
@@ -404,8 +416,6 @@ func main() {
 			setupLog.Error(err, "Unable to create uncached target client for patch mode")
 			os.Exit(1)
 		}
-		targetTrigger := make(chan struct{}, 1)
-		rotationTriggers = append(rotationTriggers, targetTrigger)
 		targetReconciler := &controllers.TargetWebhookReconciler{
 			TargetClient:     targetPatchClient,
 			CertSecretReader: mgr.GetAPIReader(),
@@ -423,8 +433,6 @@ func main() {
 			"label", targetLabelKey+"="+targetLabelValue,
 		)
 	}
-
-	webhookReconciler.RotationTriggers = rotationTriggers
 
 	// Add health checks
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
