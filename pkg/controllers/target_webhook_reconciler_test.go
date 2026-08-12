@@ -365,13 +365,14 @@ func TestTargetReconcileVWCPatchDoesNotClobberList(t *testing.T) {
 
 // --- targetResyncTrigger coverage -----------------------------------------
 
-// tcTrigger is a small helper that builds a trigger with buffered channels
-// large enough for typical tests (avoids blocking sends in the trigger).
-func tcTrigger(c client.Client, rot <-chan struct{}, buf int) (*targetResyncTrigger, chan event.GenericEvent, chan event.GenericEvent, chan event.GenericEvent) {
-	crdCh := make(chan event.GenericEvent, buf)
-	mwcCh := make(chan event.GenericEvent, buf)
-	vwcCh := make(chan event.GenericEvent, buf)
-	return &targetResyncTrigger{
+// tcTrigger builds a targetResyncTrigger wired to buffered channels large
+// enough for typical tests (avoids blocking sends in the trigger). Named
+// returns document which channel each output is.
+func tcTrigger(c client.Client, rot <-chan struct{}, buf int) (tr *targetResyncTrigger, crdCh, mwcCh, vwcCh chan event.GenericEvent) {
+	crdCh = make(chan event.GenericEvent, buf)
+	mwcCh = make(chan event.GenericEvent, buf)
+	vwcCh = make(chan event.GenericEvent, buf)
+	tr = &targetResyncTrigger{
 		targetClient:    c,
 		labelKey:        targetLabelKey,
 		labelValue:      targetLabelValue,
@@ -379,24 +380,21 @@ func tcTrigger(c client.Client, rot <-chan struct{}, buf int) (*targetResyncTrig
 		crdCh:           crdCh,
 		mwcCh:           mwcCh,
 		vwcCh:           vwcCh,
-	}, crdCh, mwcCh, vwcCh
+	}
+	return tr, crdCh, mwcCh, vwcCh
 }
 
-// drainNames pulls up to want events off ch or times out. Returns the names
-// observed so the test can assert per-kind routing.
-func drainNames(t *testing.T, ch <-chan event.GenericEvent, want int, timeout time.Duration) []string {
+// drainOne pulls exactly one event off ch or fails the test on timeout.
+// Returns the event's object name so callers can assert per-kind routing.
+func drainOne(t *testing.T, ch <-chan event.GenericEvent, timeout time.Duration) string {
 	t.Helper()
-	names := make([]string, 0, want)
-	deadline := time.After(timeout)
-	for i := 0; i < want; i++ {
-		select {
-		case ev := <-ch:
-			names = append(names, ev.Object.GetName())
-		case <-deadline:
-			t.Fatalf("timeout draining channel: got %d/%d events", len(names), want)
-		}
+	select {
+	case ev := <-ch:
+		return ev.Object.GetName()
+	case <-time.After(timeout):
+		t.Fatalf("timeout draining channel")
+		return ""
 	}
-	return names
 }
 
 // TestTargetResyncTriggerRoutesPerKind asserts fanOut sends each labeled
@@ -418,14 +416,14 @@ func TestTargetResyncTriggerRoutesPerKind(t *testing.T) {
 
 	tr.fanOut(context.Background(), logr.Discard())
 
-	if got := drainNames(t, crdCh, 1, time.Second); len(got) != 1 || got[0] != "crd-l" {
-		t.Errorf("crd channel: got %v, want [crd-l]", got)
+	if got := drainOne(t, crdCh, time.Second); got != "crd-l" {
+		t.Errorf("crd channel: got %q, want crd-l", got)
 	}
-	if got := drainNames(t, mwcCh, 1, time.Second); len(got) != 1 || got[0] != "mwc-l" {
-		t.Errorf("mwc channel: got %v, want [mwc-l]", got)
+	if got := drainOne(t, mwcCh, time.Second); got != "mwc-l" {
+		t.Errorf("mwc channel: got %q, want mwc-l", got)
 	}
-	if got := drainNames(t, vwcCh, 1, time.Second); len(got) != 1 || got[0] != "vwc-l" {
-		t.Errorf("vwc channel: got %v, want [vwc-l]", got)
+	if got := drainOne(t, vwcCh, time.Second); got != "vwc-l" {
+		t.Errorf("vwc channel: got %q, want vwc-l", got)
 	}
 	// Unlabeled CRD must not leak onto crdCh.
 	select {
@@ -469,11 +467,11 @@ func TestTargetResyncTriggerCRDListErrorDoesNotStarveMWCVWC(t *testing.T) {
 	tr, _, mwcCh, vwcCh := tcTrigger(c, nil, 8)
 	tr.fanOut(context.Background(), logr.Discard())
 
-	if got := drainNames(t, mwcCh, 1, time.Second); len(got) != 1 || got[0] != "mwc-x" {
-		t.Errorf("mwc channel did not receive event despite CRD list failure: got %v", got)
+	if got := drainOne(t, mwcCh, time.Second); got != "mwc-x" {
+		t.Errorf("mwc channel did not receive event despite CRD list failure: got %q", got)
 	}
-	if got := drainNames(t, vwcCh, 1, time.Second); len(got) != 1 || got[0] != "vwc-x" {
-		t.Errorf("vwc channel did not receive event despite CRD list failure: got %v", got)
+	if got := drainOne(t, vwcCh, time.Second); got != "vwc-x" {
+		t.Errorf("vwc channel did not receive event despite CRD list failure: got %q", got)
 	}
 	errAfter := readCounter(t, targetKindCRD, metrics.FanOutError)
 	if errAfter-errBefore != 1 {
@@ -530,11 +528,11 @@ func TestTargetResyncTriggerCRDSendBlockedDoesNotStarveMWCVWC(t *testing.T) {
 	// While the CRD goroutine is parked on its blocked send, MWC and VWC
 	// events must still arrive. Under sequential HOL blocking these
 	// would never fire.
-	if got := drainNames(t, mwcCh, 1, 2*time.Second); len(got) != 1 || got[0] != "mwc-live" {
-		t.Errorf("mwc did not arrive while CRD send blocked: got %v", got)
+	if got := drainOne(t, mwcCh, 2*time.Second); got != "mwc-live" {
+		t.Errorf("mwc did not arrive while CRD send blocked: got %q", got)
 	}
-	if got := drainNames(t, vwcCh, 1, 2*time.Second); len(got) != 1 || got[0] != "vwc-live" {
-		t.Errorf("vwc did not arrive while CRD send blocked: got %v", got)
+	if got := drainOne(t, vwcCh, 2*time.Second); got != "vwc-live" {
+		t.Errorf("vwc did not arrive while CRD send blocked: got %q", got)
 	}
 
 	// Cancel context so the blocked CRD goroutine unwinds via send()'s
@@ -585,14 +583,14 @@ func TestTargetResyncTriggerStartupPassAndRotation(t *testing.T) {
 	}()
 
 	// Initial pass: exactly one CRD event within a short deadline.
-	if got := drainNames(t, crdCh, 1, 2*time.Second); len(got) != 1 || got[0] != "crd-startup" {
-		t.Errorf("initial pass: got %v, want [crd-startup]", got)
+	if got := drainOne(t, crdCh, 2*time.Second); got != "crd-startup" {
+		t.Errorf("initial pass: got %q, want crd-startup", got)
 	}
 
 	// Rotation pass: another CRD event.
 	rot <- struct{}{}
-	if got := drainNames(t, crdCh, 1, 2*time.Second); len(got) != 1 || got[0] != "crd-startup" {
-		t.Errorf("rotation pass: got %v, want [crd-startup]", got)
+	if got := drainOne(t, crdCh, 2*time.Second); got != "crd-startup" {
+		t.Errorf("rotation pass: got %q, want crd-startup", got)
 	}
 
 	// Clean shutdown on ctx cancel.

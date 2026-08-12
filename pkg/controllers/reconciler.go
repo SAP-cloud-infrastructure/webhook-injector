@@ -230,7 +230,7 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// in a different package: if the process ever reaches this branch
 			// with zero SANs, the reconciler surfaces a loud error rather than
 			// permanently no-op'ing after the bootstrap event.
-			return ctrl.Result{}, fmt.Errorf("cert-only mode requires --cert-sans (no SANs available for certificate generation)")
+			return ctrl.Result{}, errors.New("cert-only mode requires --cert-sans (no SANs available for certificate generation)")
 		}
 	} else {
 		configMap := &corev1.ConfigMap{}
