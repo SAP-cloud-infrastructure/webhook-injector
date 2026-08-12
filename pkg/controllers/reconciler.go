@@ -223,8 +223,14 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			services = append(services, certificates.ServiceReference{Hostname: san})
 		}
 		if len(services) == 0 {
-			logger.Info("Cert-only mode but no --cert-sans provided; nothing to do")
-			return ctrl.Result{}, nil
+			// Unreachable in a correctly-configured process — main.go validates
+			// that --cert-sans is non-empty whenever --webhook-config-name is
+			// unset. Returning an error (not nil, no requeue) makes the guard
+			// self-enforcing rather than relying on the flag-validation living
+			// in a different package: if the process ever reaches this branch
+			// with zero SANs, the reconciler surfaces a loud error rather than
+			// permanently no-op'ing after the bootstrap event.
+			return ctrl.Result{}, fmt.Errorf("cert-only mode requires --cert-sans (no SANs available for certificate generation)")
 		}
 	} else {
 		configMap := &corev1.ConfigMap{}
