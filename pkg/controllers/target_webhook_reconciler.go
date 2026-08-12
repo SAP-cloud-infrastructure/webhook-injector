@@ -63,20 +63,19 @@ func (r *TargetWebhookReconciler) hasLabel(obj client.Object) bool {
 	return obj.GetLabels()[r.LabelKey] == r.LabelValue
 }
 
-// targetKindMWC / targetKindVWC / targetKindCRD are the metrics-label kind
-// values for patch-mode admission-webhook stamps (TargetStampsTotal reuses the
-// first two, matching the ConfigMap path's kinds) and for the rotation
-// fan-out (RotationFanOutEventsTotal, all three).
+// targetKindMWC / targetKindVWC are the TargetStampsTotal kind label values
+// for patch-mode admission-webhook stamps (reusing the API kind names, matching
+// the ConfigMap path's kinds).
+//
+// fanOutKindCRD / fanOutKindMWC / fanOutKindVWC are the RotationFanOutEventsTotal
+// kind label values for the target-cluster resyncs — uniformly TargetXxx across
+// all three kinds so the fan-out enum stays consistent and cannot collide with
+// the ManagedResource fan-out label.
 const (
-	targetKindCRD = "TargetCRD"
 	targetKindMWC = "MutatingWebhookConfiguration"
 	targetKindVWC = "ValidatingWebhookConfiguration"
 
-	// fanOutKindMWC / fanOutKindVWC are the RotationFanOutEventsTotal kind
-	// values for the target-cluster MWC/VWC resyncs. They differ from the
-	// TargetStampsTotal kind values (which reuse the API kind name) so the
-	// fan-out kind enum is uniformly TargetXxx across all three kinds and
-	// cannot collide with the ManagedResource fan-out label.
+	fanOutKindCRD = "TargetCRD"
 	fanOutKindMWC = "TargetMWC"
 	fanOutKindVWC = "TargetVWC"
 )
@@ -311,14 +310,14 @@ func (t *targetResyncTrigger) fanOutCRDs(ctx context.Context, logger logr.Logger
 	var crds apiextensionsv1.CustomResourceDefinitionList
 	if err := t.targetClient.List(ctx, &crds, opt); err != nil {
 		logger.Error(err, "target resync: list CRDs")
-		metrics.RotationFanOutEventsTotal.WithLabelValues(targetKindCRD, metrics.FanOutError).Inc()
+		metrics.RotationFanOutEventsTotal.WithLabelValues(fanOutKindCRD, metrics.FanOutError).Inc()
 		return
 	}
 	for i := range crds.Items {
 		if !t.send(ctx, t.crdCh, &crds.Items[i]) {
 			return
 		}
-		metrics.RotationFanOutEventsTotal.WithLabelValues(targetKindCRD, metrics.FanOutEmitted).Inc()
+		metrics.RotationFanOutEventsTotal.WithLabelValues(fanOutKindCRD, metrics.FanOutEmitted).Inc()
 	}
 	logger.V(1).Info("target resync: CRDs complete", "count", len(crds.Items))
 }

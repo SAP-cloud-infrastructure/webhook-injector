@@ -464,7 +464,7 @@ func TestTargetResyncTriggerCRDListErrorDoesNotStarveMWCVWC(t *testing.T) {
 
 	// Snapshot the error counter before the pass so a shared registry
 	// doesn't leak counts across tests.
-	errBefore := readCounter(t, targetKindCRD, metrics.FanOutError)
+	errBefore := readCounter(t, fanOutKindCRD, metrics.FanOutError)
 
 	tr, _, mwcCh, vwcCh := tcTrigger(c, nil, 8)
 	tr.fanOut(context.Background(), logr.Discard())
@@ -475,7 +475,7 @@ func TestTargetResyncTriggerCRDListErrorDoesNotStarveMWCVWC(t *testing.T) {
 	if got := drainOne(t, vwcCh, time.Second); got != "vwc-x" {
 		t.Errorf("vwc channel did not receive event despite CRD list failure: got %q", got)
 	}
-	errAfter := readCounter(t, targetKindCRD, metrics.FanOutError)
+	errAfter := readCounter(t, fanOutKindCRD, metrics.FanOutError)
 	if errAfter-errBefore != 1 {
 		t.Errorf("RotationFanOutEventsTotal{kind=TargetCRD,outcome=error} delta = %v, want 1", errAfter-errBefore)
 	}
