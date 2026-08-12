@@ -80,7 +80,7 @@ rules:
     resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   # Read CRDs on the target cluster to verify caBundle propagation during
-  # staged-rotation. With --target-crd-label set the controller also PATCHES
+  # staged-rotation. With --target-label set the controller also PATCHES
   # spec.conversion.webhook.clientConfig.caBundle on labeled CRDs applied
   # directly to the target (GRM-free patch mode). patch only — never create
   # or delete. GRM-managed CRDs flow through the MR Secret on the seed.
