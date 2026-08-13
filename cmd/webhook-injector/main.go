@@ -26,6 +26,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -44,6 +45,7 @@ var (
 var (
 	webhookConfigName     string
 	managedResourceLabel  string
+	targetLabel           string
 	certSANs              string
 	externalHost          string
 	externalPort          int
@@ -68,6 +70,7 @@ func init() {
 	// Initialize flag variables
 	flag.StringVar(&webhookConfigName, "webhook-config-name", "", "Required. ConfigMap (in --namespace, hosting cluster) carrying a `webhooks.yaml` key whose value contains the MutatingWebhookConfiguration / ValidatingWebhookConfiguration YAML to apply to the target cluster. webhook-injector parses, injects the caBundle, and applies these to the target cluster. CRDs are not handled here — CRDs flow through Gardener ManagedResources, see --managed-resource-label.")
 	flag.StringVar(&managedResourceLabel, "managed-resource-label", "", "Label selector (key=value) used to scope the Gardener ManagedResource reconciler on the *hosting* cluster. When set, the controller watches labeled ManagedResources, walks their referenced Secrets, finds embedded CRDs with conversion.strategy=Webhook, and stamps caBundle / rewrites Service-form clientConfig to URL-form using --external-host and --external-port. When unset, the ManagedResource reconciler is not registered.")
+	flag.StringVar(&targetLabel, "target-label", "", "Label selector (key=value) enabling target-cluster patch mode. When set, watches CustomResourceDefinitions, MutatingWebhookConfigurations, and ValidatingWebhookConfigurations on the TARGET cluster carrying this label and keeps their caBundle in sync as certs rotate — for GRM-free / direct-apply topologies where these objects are applied directly to the shoot (no ManagedResource). The same label must be present on every object (CRD/MWC/VWC) you want stamped. Only pre-existing labeled objects are stamped; nothing is created or deleted, and only caBundle is patched. Independent of --managed-resource-label. When unset, patch mode is not registered.")
 	flag.StringVar(&certSANs, "cert-sans", "", "Comma-separated DNS names and/or IP addresses to include as additional certificate SANs (merged with SANs derived from the ConfigMap's webhook services/URLs).")
 	flag.StringVar(&externalHost, "external-host", "", "External host (DNS name or IP, no port) the target cluster uses to reach the labeled webhook callbacks. Required when --managed-resource-label is set. Combined with --external-port to rewrite Service-form conversion clientConfig inside ManagedResource-embedded CRDs to clientConfig.URL = \"https://<external-host>:<external-port><Service.Path>\" (path defaults to \"/\"). Ignored when --managed-resource-label is unset.")
 	flag.IntVar(&externalPort, "external-port", 0, "External port the target cluster uses to reach the labeled webhook callbacks. Required when --managed-resource-label is set.")
@@ -119,20 +122,35 @@ func main() {
 		return
 	}
 
-	// --webhook-config-name is required: ConfigMap mode is the only mode.
-	if webhookConfigName == "" {
-		setupLog.Error(nil, "--webhook-config-name is required")
-		flag.Usage()
-		os.Exit(1)
-	}
-
 	mrLabelKey, mrLabelValue, mrLabelOK := parseLabel(managedResourceLabel)
 	if managedResourceLabel != "" && !mrLabelOK {
 		setupLog.Error(nil, fmt.Sprintf("--managed-resource-label must be in key=value form, got %q", managedResourceLabel))
 		os.Exit(1)
 	}
 
+	targetLabelKey, targetLabelValue, targetLabelOK := parseLabel(targetLabel)
+	if targetLabel != "" && !targetLabelOK {
+		setupLog.Error(nil, fmt.Sprintf("--target-label must be in key=value form, got %q", targetLabel))
+		os.Exit(1)
+	}
+
 	certSANsList := splitAndTrim(certSANs)
+
+	// At least one mode must be active. ConfigMap mode (--webhook-config-name)
+	// and target patch mode (--target-label) are independent; a controller
+	// with neither manages nothing and is a misconfiguration.
+	if webhookConfigName == "" && !targetLabelOK {
+		setupLog.Error(nil, "at least one of --webhook-config-name or --target-label must be set")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// Pure patch mode (no ConfigMap) has no webhook services to derive SANs
+	// from — --cert-sans is the only SAN source, so it must be non-empty.
+	if webhookConfigName == "" && len(certSANsList) == 0 {
+		setupLog.Error(nil, "--cert-sans is required when running patch mode without --webhook-config-name")
+		os.Exit(1)
+	}
 
 	// Shared rotation-gate snapshot bridging ManagedResourceReconciler
 	// (publisher) and WebhookReconciler (consumer). Both reconcilers
@@ -188,6 +206,7 @@ func main() {
 		"namespace", namespace,
 		"webhook-config-name", webhookConfigName,
 		"managed-resource-label", managedResourceLabel,
+		"target-label", targetLabel,
 		"cert-sans", certSANsList,
 		"external-host", effectiveExternalHost,
 		"cert-secret-name", certSecretName,
@@ -288,15 +307,29 @@ func main() {
 	}
 	setupLog.Info("CertificateReloader controller registered (runs on all replicas)")
 
-	// rotationTrigger feeds ManagedResourceReconciler when the MR reconciler
-	// is wired. WebhookReconciler signals it non-blocking on every detected
-	// rotation; the MR reconciler reads from it and force-stamps every
-	// labeled MR with the new caBundle, instead of waiting for the periodic
-	// --sync-period tick. Buffered 1 + non-blocking send means a missed
-	// signal is harmless — a single signal triggers a full re-stamp pass.
-	var rotationTrigger chan struct{}
+	// rotationTriggers feed the stamping reconcilers when wired.
+	// WebhookReconciler signals each non-blocking on every detected
+	// rotation; each consumer reads its channel and force-stamps every
+	// labeled object with the new caBundle, instead of waiting for the
+	// periodic --sync-period tick. Buffered 1 + non-blocking send means a
+	// missed signal is harmless — a single signal triggers a full re-stamp
+	// pass. One channel per registered stamping reconciler.
+	//
+	// Triggers are allocated up-front — before webhookReconciler.SetupWithManager
+	// runs — so RotationTriggers is populated at Setup time rather than mutated
+	// after. The current controller-runtime shape doesn't run Reconcile until
+	// mgr.Start, but the earlier post-Setup assignment read as a latent
+	// ordering hazard that would bite if anyone moved a Start earlier.
+	var rotationTriggers []chan<- struct{}
+	var mrTrigger chan struct{}
 	if mrLabelOK {
-		rotationTrigger = make(chan struct{}, 1)
+		mrTrigger = make(chan struct{}, 1)
+		rotationTriggers = append(rotationTriggers, mrTrigger)
+	}
+	var targetTrigger chan struct{}
+	if targetLabelOK {
+		targetTrigger = make(chan struct{}, 1)
+		rotationTriggers = append(rotationTriggers, targetTrigger)
 	}
 
 	webhookReconciler := &controllers.WebhookReconciler{
@@ -311,8 +344,8 @@ func main() {
 		Gate:                  gate,
 		RotationOverlapWindow: rotationOverlapWindow,
 		RotationGateTimeout:   rotationGateTimeout,
+		RotationTriggers:      rotationTriggers,
 		Scheme:                mgr.GetScheme(),
-		RotationTrigger:       rotationTrigger,
 	}
 	if err := webhookReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Unable to create WebhookReconciler controller")
@@ -335,13 +368,69 @@ func main() {
 			ForceReconcile:    forceReconcile,
 			Gate:              gate,
 		}
-		if err := mrReconciler.SetupWithManager(mgr, rotationTrigger); err != nil {
+		if err := mrReconciler.SetupWithManager(mgr, mrTrigger); err != nil {
 			setupLog.Error(err, "Unable to create ManagedResourceReconciler controller")
 			os.Exit(1)
 		}
 		setupLog.Info("ManagedResourceReconciler controller registered (runs on leader only)",
 			"label", mrLabelKey+"="+mrLabelValue,
 			"force-reconcile", forceReconcile,
+		)
+	}
+
+	// Optionally keep caBundle in sync on CRD/MWC/VWC applied directly to the
+	// target cluster (GRM-free patch mode). Opt-in via --target-label. Uses
+	// a second, label-scoped cluster.Cluster handle so the target objects are
+	// watched from the target cluster's own cache.
+	if targetLabelOK {
+		targetCfg, err := getTargetRestConfig()
+		if err != nil {
+			setupLog.Error(err, "Unable to get target cluster config for patch mode")
+			os.Exit(1)
+		}
+		targetSelector := labels.SelectorFromSet(labels.Set{targetLabelKey: targetLabelValue})
+		targetCluster, err := cluster.New(targetCfg, func(o *cluster.Options) {
+			o.Scheme = scheme
+			o.Cache.SyncPeriod = &syncPeriod
+			o.Cache.ByObject = map[client.Object]cache.ByObject{
+				&apiextensionsv1.CustomResourceDefinition{}:   {Label: targetSelector},
+				&admissionv1.MutatingWebhookConfiguration{}:   {Label: targetSelector},
+				&admissionv1.ValidatingWebhookConfiguration{}: {Label: targetSelector},
+			}
+		})
+		if err != nil {
+			setupLog.Error(err, "Unable to create target cluster handle for patch mode")
+			os.Exit(1)
+		}
+		if err := mgr.Add(&controllers.LeaderOnlyCluster{Cluster: targetCluster}); err != nil {
+			setupLog.Error(err, "Unable to add target cluster to manager")
+			os.Exit(1)
+		}
+		// Get/Patch use an uncached client so each reconcile live-reads the
+		// target object before patching. The targetCluster handle is used
+		// only to drive the label-scoped watches; reading Get through its
+		// cache could compute a patch from stale state and clobber another
+		// direct-apply owner's fresh changes.
+		targetPatchClient, err := client.New(targetCfg, client.Options{Scheme: scheme})
+		if err != nil {
+			setupLog.Error(err, "Unable to create uncached target client for patch mode")
+			os.Exit(1)
+		}
+		targetReconciler := &controllers.TargetWebhookReconciler{
+			TargetClient:     targetPatchClient,
+			CertSecretReader: mgr.GetAPIReader(),
+			Namespace:        namespace,
+			CertSecretName:   certSecretName,
+			LabelKey:         targetLabelKey,
+			LabelValue:       targetLabelValue,
+			Gate:             gate,
+		}
+		if err := targetReconciler.SetupWithManager(mgr, targetCluster, targetTrigger); err != nil {
+			setupLog.Error(err, "Unable to create TargetWebhookReconciler controller")
+			os.Exit(1)
+		}
+		setupLog.Info("TargetWebhookReconciler controller registered (patch mode, cache + controllers leader-only)",
+			"label", targetLabelKey+"="+targetLabelValue,
 		)
 	}
 

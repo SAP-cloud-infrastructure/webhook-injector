@@ -23,9 +23,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/go-logr/logr"
 
@@ -131,19 +134,19 @@ type WebhookReconciler struct {
 	CertRotationThreshold float64
 	Scheme                *runtime.Scheme
 
-	// RotationTrigger is signaled (non-blocking send) on every detected
-	// certificate rotation. The sole downstream consumer is
-	// ManagedResourceReconciler, which reads from this channel and
-	// force-stamps every labeled ManagedResource on the hosting cluster
-	// with the new caBundle, instead of waiting for its cache --sync-period
-	// to fire.
+	// RotationTriggers are signaled (non-blocking send to each) on every
+	// detected certificate rotation. Downstream consumers are
+	// ManagedResourceReconciler (--managed-resource-label) and
+	// TargetWebhookReconciler (--target-label); each reads its channel
+	// and force-stamps every labeled object with the new caBundle instead of
+	// waiting for a cache --sync-period to fire.
 	//
-	// Nil when no MR reconciler is wired (e.g. --managed-resource-label
-	// unset, or in tests that don't exercise rotation). Should be created
-	// with a buffer of 1 so a missed send (because the receiver is mid-
-	// resync) is harmless — the next rotation will fire again, and a single
-	// signal is enough to trigger a full re-stamp pass.
-	RotationTrigger chan<- struct{}
+	// Nil/empty when no stamping reconciler is wired (e.g. neither label flag
+	// set, or in tests that don't exercise rotation). Each channel should be
+	// created with a buffer of 1 so a missed send (because the receiver is
+	// mid-resync) is harmless — the next rotation will fire again, and a
+	// single signal is enough to trigger a full re-stamp pass.
+	RotationTriggers []chan<- struct{}
 
 	// Gate is the shared rotation-gate snapshot. WebhookReconciler reads
 	// it during the staged rotation phase to learn which CRDs on the
@@ -209,35 +212,54 @@ func (r *WebhookReconciler) gateSnapshot() []string {
 func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Fetch the ConfigMap
-	configMap := &corev1.ConfigMap{}
-	err := r.Client.Get(ctx, req.NamespacedName, configMap)
-	if err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
+	var configs *webhooks.WebhookConfigurations
+	var services []certificates.ServiceReference
 
-	logger.Info("Reconciling webhook configuration", "configmap", req.NamespacedName)
+	if r.WebhookConfigName == "" {
+		// Cert-only mode: no ConfigMap. SANs come solely from --cert-sans.
+		// Used by pure patch-mode deployments (--target-label without
+		// --webhook-config-name). No MWC/VWC are applied to the target here.
+		for _, san := range r.CertSANs {
+			services = append(services, certificates.ServiceReference{Hostname: san})
+		}
+		if len(services) == 0 {
+			// Unreachable in a correctly-configured process — main.go validates
+			// that --cert-sans is non-empty whenever --webhook-config-name is
+			// unset. Returning an error (not nil, no requeue) makes the guard
+			// self-enforcing rather than relying on the flag-validation living
+			// in a different package: if the process ever reaches this branch
+			// with zero SANs, the reconciler surfaces a loud error rather than
+			// permanently no-op'ing after the bootstrap event.
+			return ctrl.Result{}, errors.New("cert-only mode requires --cert-sans (no SANs available for certificate generation)")
+		}
+	} else {
+		configMap := &corev1.ConfigMap{}
+		if err := r.Client.Get(ctx, req.NamespacedName, configMap); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
 
-	// Parse webhook configurations
-	webhooksYAML, ok := configMap.Data["webhooks.yaml"]
-	if !ok {
-		return ctrl.Result{}, errors.New("webhooks.yaml not found in ConfigMap")
-	}
+		logger.Info("Reconciling webhook configuration", "configmap", req.NamespacedName)
 
-	configs, err := webhooks.ParseWebhookConfigurations([]byte(webhooksYAML))
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to parse webhook configurations: %w", err)
-	}
+		webhooksYAML, ok := configMap.Data["webhooks.yaml"]
+		if !ok {
+			return ctrl.Result{}, errors.New("webhooks.yaml not found in ConfigMap")
+		}
 
-	// Extract service references
-	services := webhooks.ExtractServiceReferences(configs)
-	// Append any user-supplied SANs (auto-classified DNS vs IP downstream).
-	for _, san := range r.CertSANs {
-		services = append(services, certificates.ServiceReference{Hostname: san})
-	}
-	if len(services) == 0 {
-		logger.Info("No service references found in webhook configurations")
-		return ctrl.Result{}, nil
+		parsed, err := webhooks.ParseWebhookConfigurations([]byte(webhooksYAML))
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to parse webhook configurations: %w", err)
+		}
+		configs = parsed
+
+		services = webhooks.ExtractServiceReferences(configs)
+		// Append any user-supplied SANs (auto-classified DNS vs IP downstream).
+		for _, san := range r.CertSANs {
+			services = append(services, certificates.ServiceReference{Hostname: san})
+		}
+		if len(services) == 0 {
+			logger.Info("No service references found in webhook configurations")
+			return ctrl.Result{}, nil
+		}
 	}
 
 	// Check if certificates need generation/rotation
@@ -350,20 +372,23 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
-// signalRotation pushes a non-blocking notification to RotationTrigger so
-// ManagedResourceReconciler re-stamps every labeled MR with the new
-// caBundle. Shared between the in-line rotation path (in Reconcile) and
-// the phase-promotion/prune transitions which also change what gets
-// stamped downstream.
+// signalRotation pushes a non-blocking notification to each RotationTriggers
+// channel so downstream consumers (ManagedResourceReconciler,
+// TargetWebhookReconciler) re-stamp every labeled object with the new
+// caBundle. Shared between the in-line rotation path (in Reconcile) and the
+// phase-promotion/prune transitions which also change what gets stamped
+// downstream.
 func (r *WebhookReconciler) signalRotation(logger logr.Logger, reason rotationReason) {
-	if r.RotationTrigger == nil {
-		return
-	}
-	select {
-	case r.RotationTrigger <- struct{}{}:
-		logger.Info("Signaled rotation downstream consumers", "reason", reason)
-	default:
-		logger.V(1).Info("Rotation signal channel full, skipping (already pending)")
+	for _, trigger := range r.RotationTriggers {
+		if trigger == nil {
+			continue
+		}
+		select {
+		case trigger <- struct{}{}:
+			logger.Info("Signaled rotation downstream consumer", "reason", reason)
+		default:
+			logger.V(1).Info("Rotation signal channel full, skipping (already pending)")
+		}
 	}
 }
 
@@ -445,6 +470,9 @@ func parseTimeAnnotation(s string) time.Time {
 // apply fails — the gauge reads from the cert Secret, not the target.
 func (r *WebhookReconciler) applyAndUpdateExpiry(ctx context.Context, configs *webhooks.WebhookConfigurations, secret *corev1.Secret, logger logr.Logger) error {
 	r.updateCertExpiryGauge(secret)
+	if configs == nil {
+		return nil // cert-only mode: no MWC/VWC to apply to the target
+	}
 	caCert := secret.Data[tlsCrtKey]
 	webhooks.InjectCABundle(configs, caCert)
 	if err := r.applyWebhookConfigurations(ctx, configs); err != nil {
@@ -1088,6 +1116,10 @@ func (r *WebhookReconciler) getNamespace(namespace string) string {
 
 // SetupWithManager sets up the controller with the Manager
 func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.WebhookConfigName == "" {
+		return r.setupCertOnlyMode(mgr)
+	}
+
 	// Only watch the specific webhook ConfigMap
 	configMapPredicate := predicate.NewPredicateFuncs(func(object client.Object) bool {
 		return r.WebhookConfigName == object.GetName() && r.getNamespace(r.Namespace) == object.GetNamespace()
@@ -1119,3 +1151,65 @@ func (r *WebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Secret{}, secretToConfigMapMapper).
 		Complete(r)
 }
+
+// setupCertOnlyMode wires the reconciler when no ConfigMap anchors it
+// (--webhook-config-name unset, --target-label set). There is no
+// ConfigMap to watch, so a one-shot GenericEvent from certBootstrapRunnable
+// drives the first reconcile; after it creates the cert Secret the loop
+// self-drives via RequeueAfter, and the Secret watch continues to catch
+// rotation-annotation events.
+func (r *WebhookReconciler) setupCertOnlyMode(mgr ctrl.Manager) error {
+	bootCh := make(chan event.GenericEvent, 1)
+	if err := mgr.Add(&certBootstrapRunnable{
+		ch:        bootCh,
+		namespace: r.getNamespace(r.Namespace),
+		name:      r.CertSecretName,
+	}); err != nil {
+		return fmt.Errorf("register cert bootstrap runnable: %w", err)
+	}
+
+	enqueueCertSecret := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []ctrl.Request {
+		if obj.GetName() != r.CertSecretName || obj.GetNamespace() != r.getNamespace(r.Namespace) {
+			return nil
+		}
+		return []ctrl.Request{{NamespacedName: types.NamespacedName{
+			Namespace: r.getNamespace(r.Namespace),
+			Name:      r.CertSecretName,
+		}}}
+	})
+
+	return ctrl.NewControllerManagedBy(mgr).
+		Named("webhook-cert-only").
+		WatchesRawSource(source.Channel(bootCh, enqueueCertSecret)).
+		Watches(&corev1.Secret{}, enqueueCertSecret).
+		Complete(r)
+}
+
+// certBootstrapRunnable emits exactly one GenericEvent at startup so the
+// cert-only-mode WebhookReconciler runs its first reconcile without a
+// ConfigMap to watch. Leader-only. After the first reconcile creates the
+// cert Secret, the loop self-drives via RequeueAfter and the Secret watch.
+type certBootstrapRunnable struct {
+	ch        chan event.GenericEvent
+	namespace string
+	name      string
+}
+
+func (b *certBootstrapRunnable) Start(ctx context.Context) error {
+	obj := &corev1.Secret{}
+	obj.SetNamespace(b.namespace)
+	obj.SetName(b.name)
+	select {
+	case b.ch <- event.GenericEvent{Object: obj}:
+	case <-ctx.Done():
+	}
+	<-ctx.Done()
+	return nil
+}
+
+func (b *certBootstrapRunnable) NeedLeaderElection() bool { return true }
+
+var (
+	_ manager.Runnable               = (*certBootstrapRunnable)(nil)
+	_ manager.LeaderElectionRunnable = (*certBootstrapRunnable)(nil)
+)

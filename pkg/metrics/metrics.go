@@ -28,8 +28,15 @@ const (
 	// FanOutEmitted — an event was successfully pushed onto the per-kind
 	// channel feeding the controller. The current fanOut implementation
 	// blocks until the consumer drains a slot rather than dropping, so
-	// this is the only outcome value emitted in steady state.
+	// this is the only outcome value emitted in steady state on the
+	// success path.
 	FanOutEmitted = "emitted"
+	// FanOutError — the fan-out failed to enumerate objects for a kind
+	// (typically a List against the target apiserver returning an error).
+	// The pass logs and continues to the next kind rather than crashing,
+	// so this counter is the only alertable signal that a persistent
+	// target-apiserver / RBAC failure is silently dropping resyncs.
+	FanOutError = "error"
 
 	// ForceReconcilePatched — patched gardener.cloud/operation=reconcile
 	// onto the MR after a successful Secret stamp.
@@ -93,16 +100,37 @@ var (
 		[]string{"kind", "result"},
 	)
 
-	// RotationFanOutEventsTotal counts per-kind events emitted from the
-	// rotation fan-out goroutines on every cert rotation. The fanOut
-	// producer blocks until the consumer drains, so the only outcome
-	// value emitted in steady state is "emitted"; the "outcome" label
-	// is retained for forward compatibility if a non-blocking variant
-	// is introduced again.
+	// TargetCRDStampsTotal counts reconcile outcomes on target-cluster
+	// CustomResourceDefinition conversion-webhook caBundle stamping (the
+	// --target-label patch mode), partitioned by result. "stamped" =
+	// we patched clientConfig.caBundle; "converged" = already current (no
+	// patch); "error" = Get/Patch failure. Distinct from TargetStampsTotal
+	// (MWC/VWC only) so the kind enum there stays bounded — patch-mode
+	// MWC/VWC reuse TargetStampsTotal.
+	TargetCRDStampsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_target_crd_stamps_total",
+			Help: "Total reconcile outcomes for target-cluster CRD conversion-webhook caBundle stamping, labeled by result (stamped|converged|error).",
+		},
+		[]string{"result"},
+	)
+
+	// RotationFanOutEventsTotal counts per-kind fan-out signals emitted
+	// from the rotation resync triggers on every cert rotation. Two
+	// outcomes are recorded: "emitted" — an event was successfully
+	// pushed onto the per-kind channel feeding the controller; "error"
+	// — the enumerating List against the (hosting or target) apiserver
+	// failed, so no events for that kind were pushed on this pass. The
+	// error path is the alertable signal that a target-apiserver /
+	// RBAC problem is silently degrading rotation propagation.
+	//
+	// kind ∈ {ManagedResource, TargetCRD, TargetMWC, TargetVWC}. The
+	// TargetCRD/MWC/VWC kinds are emitted by TargetWebhookReconciler's
+	// resync trigger; ManagedResource is emitted by the MR path.
 	RotationFanOutEventsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "webhook_injector_rotation_fanout_events_total",
-			Help: "Total events fanned out to per-kind reconcile channels on certificate rotation, labeled by kind and outcome (emitted).",
+			Help: "Total events fanned out to per-kind reconcile channels on certificate rotation, labeled by kind and outcome (emitted|error).",
 		},
 		[]string{"kind", "outcome"},
 	)
@@ -240,6 +268,7 @@ func init() {
 		CertificateExpiryTime,
 		CertFilesWrittenTotal,
 		TargetStampsTotal,
+		TargetCRDStampsTotal,
 		RotationFanOutEventsTotal,
 		ManagedResourceStampsTotal,
 		ManagedResourceCRDsStampedTotal,

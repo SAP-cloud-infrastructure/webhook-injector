@@ -26,6 +26,7 @@ webhook-injector runs as a sidecar with up to three controllers:
 
 - **WebhookReconciler** (leader only): Watches a user-authored ConfigMap that carries `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` YAML, manages the certificate Secret on the hosting cluster, injects the CA bundle, and applies the resulting MWC/VWC to the target cluster (creating if missing). Does not author CRDs — those flow through `ManagedResource` objects.
 - **ManagedResourceReconciler** (leader only, opt-in via `--managed-resource-label`): Watches labeled Gardener `ManagedResource` objects on the hosting cluster and stamps `caBundle` (and optionally rewrites Service-form conversion `clientConfig` to URL form) on every CRD embedded in their referenced Secrets. See [Gardener Seed Deployment](#gardener-seed-deployment).
+- **TargetWebhookReconciler** (leader only, opt-in via `--target-label`): For GRM-free / direct-apply topologies, watches labeled CRDs, `MutatingWebhookConfiguration`s, and `ValidatingWebhookConfiguration`s on the **target** cluster and keeps their `caBundle` in sync as certs rotate. Patches `caBundle` only — never creates/deletes objects, never rewrites `clientConfig`. CRDs participate in the rotation gate. See [Direct-Apply (GRM-free) Patch Mode](#direct-apply-grm-free-patch-mode).
 - **CertificateReloader** (all replicas): Syncs certificates from Secret to local filesystem (`/tmp/webhook-certs`). Skips writes when content is unchanged.
 
 ## Quick Start
@@ -130,16 +131,17 @@ The same certificate serves as both server cert and CA bundle. Your webhook serv
 
 ## Configuration
 
-Configure via command-line flags. `--webhook-config-name` is **required**; namespace auto-detects from flag → `NAMESPACE` env var → serviceaccount file.
+Configure via command-line flags. At least one of `--webhook-config-name` or `--target-label` is **required**; namespace auto-detects from flag → `NAMESPACE` env var → serviceaccount file.
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--webhook-config-name` | **Required.** ConfigMap (in `--namespace`, hosting cluster) carrying a `webhooks.yaml` key whose value contains the MWC/VWC YAML to apply to the target cluster. CRDs are not handled here — see `--managed-resource-label`. | *required* |
+| `--webhook-config-name` | ConfigMap (in `--namespace`, hosting cluster) carrying a `webhooks.yaml` key whose value contains the MWC/VWC YAML to apply to the target cluster. CRDs are not handled here — see `--managed-resource-label`. **Required unless `--target-label` is set** (pure patch mode). | unset |
+| `--target-label` | Label selector (`key=value`) enabling target-cluster patch mode. When set, watches labeled CRDs / `MutatingWebhookConfiguration`s / `ValidatingWebhookConfiguration`s on the **target** cluster and keeps only their `caBundle` in sync (GRM-free / direct-apply). The same label must be present on every object (CRD/MWC/VWC) you want stamped. Only pre-existing labeled objects are stamped; nothing is created or deleted. Independent of `--managed-resource-label`. When unset, patch mode is not registered. | unset |
 | `--managed-resource-label` | Label selector (`key=value`) used to scope the Gardener `ManagedResource` reconciler on the hosting cluster. When set, the controller watches labeled MRs, walks their referenced Secrets, finds embedded CRDs with `conversion.strategy=Webhook`, and stamps `caBundle` (and optionally rewrites Service-form `clientConfig` to URL form). When unset, the reconciler is not registered. | unset |
 | `--external-host` | **Required when `--managed-resource-label` is set.** DNS name or IP (no port) the target cluster uses to reach this controller. Combined with `--external-port` to rewrite Service-form conversion `clientConfig` inside MR-embedded CRDs to `https://<external-host>:<external-port><Service.Path>` (path defaults to `/`); URL-form entries are left untouched. `caBundle` patching is unchanged. Ignored when `--managed-resource-label` is unset. | unset |
 | `--external-port` | **Required when `--managed-resource-label` is set.** External port the target cluster uses to reach the labeled webhook callbacks. | unset |
 | `--force-reconcile` | When `--managed-resource-label` is set, patch `gardener.cloud/operation=reconcile` on each ManagedResource after a successful Secret stamp so `gardener-resource-manager` picks up the change promptly. The annotation is set only on reconciles that actually wrote a Secret. | `true` |
-| `--cert-sans` | Comma-separated DNS names and/or IP addresses to include as additional certificate SANs (merged with SANs derived from the ConfigMap). | unset |
+| `--cert-sans` | Comma-separated DNS names and/or IP addresses to include as additional certificate SANs (merged with SANs derived from the ConfigMap). **Required in pure patch mode** (`--target-label` set, `--webhook-config-name` unset), where it is the sole SAN source. | unset |
 | `--rotation-overlap-window` | Duration the controller keeps the old cert in `tls.crt` after promoting the new serving cert. Set ≥ longest expected in-flight TLS session. | `5m` |
 | `--rotation-gate-timeout` | Max time to wait for shoot CRDs to show the union bundle during the staged phase. On timeout the controller promotes anyway (working webhook beats stuck rotation). The gated CRD set is auto-discovered from `ManagedResourceReconciler`'s most recent reconcile pass (see `pkg/controllers/rotationgate`); an empty snapshot — pure-ConfigMap deployments, or no labeled MRs shipping CRDs — collapses the gate to this timeout alone. | `2m` |
 | `--namespace` | Namespace for ConfigMap / Secret / Lease | auto-detect |
@@ -188,6 +190,30 @@ When webhook-injector runs on a Gardener seed, the CRDs it must stamp don't live
 - Observes the GRM-maintained `ResourcesApplied` and `ResourcesHealthy` conditions on each ManagedResource and logs/counts when either is not `True`, surfacing MR health on dashboards without gating the stamp on it.
 - Enforces a `spec.keepObjects: true` invariant on MRs that ship CRDs and emits a warning-level log (no stack trace) plus a counter when it's missing — the counter is the alertable signal. Without `keepObjects`, deleting the ManagedResource would cascade-delete the shoot's CRDs and every custom resource of those kinds.
 
+### Direct-Apply (GRM-free) Patch Mode
+
+When a consumer applies webhook objects **directly** to the target cluster with no Gardener `ManagedResource` — e.g. [`dual-deployment-operator`](https://github.com/SAP-cloud-infrastructure/dual-deployment-operator) rendering host + remote resources and server-side-applying both halves — the seed-side `ManagedResource` stamping path never fires. `--target-label` enables `TargetWebhookReconciler` for exactly this topology.
+
+When set, the controller watches CRDs, `MutatingWebhookConfiguration`s, and `ValidatingWebhookConfiguration`s on the **target** cluster carrying the label and keeps their `caBundle` in sync as certs rotate:
+
+- **caBundle only.** For CRDs it patches `spec.conversion.webhook.clientConfig.caBundle`; for MWC/VWC it patches each `webhooks[*].clientConfig.caBundle`. It never rewrites `clientConfig` Service/URL (the operator emits correct `clientConfig` itself), never creates or deletes objects, and only ever touches labeled objects — so it never fights GRM (GRM-owned objects don't carry the label). The two label flags are mutually exclusive per object.
+- **Event-driven.** A label-scoped cache on the target cluster reconciles labeled objects within seconds of creation or change — important for a `failurePolicy: Fail` admission webhook whose stale/empty `caBundle` would otherwise block matching traffic. On rotation, the same fan-out signal that drives the MR path re-stamps every labeled target object immediately.
+- **Rotation gate.** Stamped CRDs join the staged→active→pruned rotation gate, so promotion of a new serving cert waits for the union bundle to land on the target CRDs (MWC/VWC are not gated). No admission-webhook bootstrap mutator is involved.
+
+**Ownership split:** in this mode the operator owns the *existence* of the CRD/MWC/VWC objects; webhook-injector owns only their `caBundle` and the certificate lifecycle.
+
+Pure patch mode (no ConfigMap):
+
+```bash
+webhook-injector \
+  --target-label=webhook-injector.sap.com/managed=true \
+  --cert-sans=webhook.example.com
+```
+
+`--webhook-config-name` is optional here (at least one of it or `--target-label` must be set). With no ConfigMap there are no webhook services to derive SANs from, so `--cert-sans` is the sole SAN source and is required. Setting both flags runs ConfigMap mode and patch mode together.
+
+> **RBAC rollout ordering.** Patch mode adds `list,watch,patch` on `customresourcedefinitions.apiextensions.k8s.io` and `list,watch` on `mutatingwebhookconfigurations`/`validatingwebhookconfigurations` to the target ClusterRole (see [`config/rbac.yaml`](config/rbac.yaml)). Apply the updated target ClusterRole **before** rolling out a controller with `--target-label` set — otherwise the leader's label-scoped target-cluster cache fails its initial `list`/`watch` with `Forbidden`, the controller start errors out, and the pod CrashLoopBackOffs. Followers continue delivering certs (they don't run the target cache — see `LeaderOnlyCluster` in `pkg/controllers/target_webhook_reconciler.go`), so this is a loud, alertable failure rather than a silent hang.
+
 ## Metrics
 
 webhook-injector exposes Prometheus metrics at `<metrics-addr>/metrics` (default `:8082`). All metric names are prefixed `webhook_injector_`.
@@ -199,8 +225,9 @@ webhook-injector exposes Prometheus metrics at `<metrics-addr>/metrics` (default
 | `cert_files_written_total` | Counter | Times certificate files were written to disk by the reloader |
 | `certificate_rotation_phase_transitions_total{from,to}` | Counter | Rotation phase-machine transitions; labels drawn from {absent, active, staged, pruned}. Four legal pairs (absent→active, active→staged, staged→active, active→pruned); any other pair indicates a controller bug |
 | `certificate_force_rotation_deferred_total` | Counter | Reconcile passes in which a force-rotation annotation was held back because a prior rotation cycle was still in flight (phase=staged, or phase=active with `rotation-promoted-at` still set). The annotation stays on the Secret and is consumed once the cycle reaches steady state |
-| `target_stamps_total{kind,result}` | Counter | Target-cluster MWC/VWC apply outcomes by `kind` (MutatingWebhookConfiguration, ValidatingWebhookConfiguration) and `result` (stamped, error). The reconciler unconditionally Updates on every pass, so idempotent reconciles count as `stamped` rather than emitting a distinct `converged` value |
-| `rotation_fanout_events_total{kind,outcome}` | Counter | Rotation fan-out events to the ManagedResource reconciler, by `kind=ManagedResource` and `outcome=emitted`. The producer blocks until the consumer drains a slot, so `emitted` is the only steady-state value; the `outcome` label is retained for forward compatibility |
+| `target_stamps_total{kind,result}` | Counter | Target-cluster MWC/VWC apply outcomes by `kind` (MutatingWebhookConfiguration, ValidatingWebhookConfiguration) and `result` (stamped, error). The reconciler unconditionally Updates on every pass, so idempotent reconciles count as `stamped` rather than emitting a distinct `converged` value. In patch mode (`--target-label`) the same counter records labeled MWC/VWC caBundle stamps with `result` in (stamped, converged, error) |
+| `target_crd_stamps_total{result}` | Counter | Target-cluster CRD conversion-webhook caBundle stamp outcomes in patch mode (`--target-label`) by `result` (stamped, converged, error). Separate from `target_stamps_total` so the `kind` enum there stays bounded |
+| `rotation_fanout_events_total{kind,outcome}` | Counter | Rotation fan-out events by `kind ∈ {ManagedResource, TargetCRD, TargetMWC, TargetVWC}` and `outcome ∈ {emitted, error}`. `emitted` counts successful sends onto the per-kind reconcile channel; `error` counts List failures against the hosting or target apiserver — the alertable signal that RBAC/apiserver problems are silently degrading rotation propagation. Target fan-out drains its three kinds in independent goroutines |
 | `managed_resource_stamps_total{result}` | Counter | Per-MR reconcile outcomes (stamped, converged, error) |
 | `managed_resource_crds_stamped_total` | Counter | Per-CRD-document stamp count across all MR Secrets |
 | `managed_resource_secret_keys_total{encoding}` | Counter | Secret data keys processed by encoding (plain, brotli) |
@@ -228,6 +255,7 @@ Each alert can be independently disabled or have its `for`, `severity`, `service
 | Alert | Severity | Triggers when |
 |---|---|---|
 | `WebhookTargetStampErrors` | critical | `rate(target_stamps_total{result="error"}[10m]) > 0` — MWC/VWC apply on the target cluster is failing |
+| `WebhookTargetCRDStampErrors` | critical | `rate(target_crd_stamps_total{result="error"}[10m]) > 0` — patch-mode (`--target-label`) CRD conversion-webhook caBundle stamping on the target cluster is failing (GRM-free / direct-apply counterpart of the ManagedResource stamp alert) |
 | `WebhookManagedResourceStampErrors` | critical | `rate(managed_resource_stamps_total{result="error"}[10m]) > 0` — MR Secret stamping on the hosting cluster is failing |
 | `WebhookManagedResourceUnhealthy` | warning | `rate(managed_resource_unhealthy_total[15m]) > 0` — GRM reports a labeled MR with `ResourcesApplied` / `ResourcesHealthy` not `True` |
 | `WebhookManagedResourceForceReconcilePatchErrors` | warning | `rate(managed_resource_force_reconcile_total{result="error"}[15m]) > 0` — patching `gardener.cloud/operation=reconcile` on the MR failed (GRM-kick degraded; propagation will rely on GRM's own watch/sync cadence) |

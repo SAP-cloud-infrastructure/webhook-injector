@@ -80,11 +80,13 @@ rules:
     resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   # Read CRDs on the target cluster to verify caBundle propagation during
-  # staged-rotation. The controller never WRITES CRDs — those flow through
-  # gardener-resource-manager unpacking the MR Secret on the seed.
+  # staged-rotation. With --target-label set the controller also PATCHES
+  # spec.conversion.webhook.clientConfig.caBundle on labeled CRDs applied
+  # directly to the target (GRM-free patch mode). patch only — never create
+  # or delete. GRM-managed CRDs flow through the MR Secret on the seed.
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
