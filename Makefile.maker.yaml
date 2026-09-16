@@ -19,7 +19,7 @@ dockerfile:
 githubWorkflow:
   global:
     defaultBranch: main
-    goVersion: 1.26.5
+    goVersion: 1.26.6
   ci:
     enabled: true
     prepareMakeTarget: install-skaffold
