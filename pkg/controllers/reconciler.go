@@ -176,6 +176,11 @@ type WebhookReconciler struct {
 	// promoting anyway. Zero means "use defaultRotationGateTimeout".
 	// Set via --rotation-gate-timeout.
 	RotationGateTimeout time.Duration
+
+	// CompletionTracker is stamped on every clean reconcile pass for the
+	// /readyz rotation-stuck check. Nil disables tracking (e.g. in unit
+	// tests that don't wire a tracker).
+	CompletionTracker *CompletionTracker
 }
 
 // rotationOverlapWindow returns the configured overlap window or the
@@ -360,6 +365,9 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 	logger.Info("Reconciliation complete")
+	if r.CompletionTracker != nil {
+		r.CompletionTracker.RecordCompletion()
+	}
 
 	// Calculate next rotation time from certificate expiry
 	nextRotation := r.calculateNextRotation(secret)

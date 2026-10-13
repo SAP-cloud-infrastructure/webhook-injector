@@ -63,6 +63,7 @@ var (
 	metricsAddr           string
 	healthAddr            string
 	forceReconcile        bool
+	readyzStuckThreshold  time.Duration
 	showVersion           bool
 )
 
@@ -91,6 +92,10 @@ func init() {
 	flag.StringVar(&healthAddr, "health-addr", ":8083", "Health probe server bind address")
 	flag.BoolVar(&forceReconcile, "force-reconcile", true,
 		"When --managed-resource-label is set, patch gardener.cloud/operation=reconcile on each ManagedResource after a successful Secret stamp. This kicks gardener-resource-manager out of any backoff so the new caBundle reaches the shoot promptly. The annotation is set only on reconciles that actually wrote a Secret — no-op reconciles do not churn GRM. Default true; set to false to rely solely on GRM's own Secret watch.")
+	flag.DurationVar(&readyzStuckThreshold, "readyz-stuck-threshold", 15*time.Minute,
+		"If the cert rotation reconciler has not completed a clean pass for this long, /readyz fails. "+
+			"Set larger than --rotation-gate-timeout + --rotation-overlap-window to avoid false positives during normal rotations. "+
+			"Set to 0 to disable the check.")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	// Initialize scheme
@@ -346,6 +351,7 @@ func main() {
 		RotationGateTimeout:   rotationGateTimeout,
 		RotationTriggers:      rotationTriggers,
 		Scheme:                mgr.GetScheme(),
+		CompletionTracker:     controllers.NewCompletionTracker(),
 	}
 	if err := webhookReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Unable to create WebhookReconciler controller")
@@ -442,6 +448,12 @@ func main() {
 	if err := mgr.AddReadyzCheck("readyz", certReadyCheck(certDir)); err != nil {
 		setupLog.Error(err, "Unable to set up ready check")
 		os.Exit(1)
+	}
+	if readyzStuckThreshold > 0 {
+		if err := mgr.AddReadyzCheck("rotation-stuck", webhookReconciler.CompletionTracker.Checker(readyzStuckThreshold)); err != nil {
+			setupLog.Error(err, "Unable to set up rotation-stuck ready check")
+			os.Exit(1)
+		}
 	}
 
 	setupLog.Info("Starting manager")
