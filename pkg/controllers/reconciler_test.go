@@ -1643,3 +1643,113 @@ func TestReconcileCertOnlyModeGeneratesCert(t *testing.T) {
 		t.Error("expected tls.crt populated")
 	}
 }
+
+// webhookConfigMapForTracker is the ConfigMap used by the CompletionTracker
+// integration tests. Service references match what trackerStagedSecret mints
+// the cert for, so needsCertificateRotation does not trigger a new rotation.
+func webhookConfigMapForTracker() *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+    admissionReviewVersions: ["v1"]
+    sideEffects: None`,
+		},
+	}
+}
+
+// TestCompletionTracker_RecordedOnHealthyBootstrapReconcile verifies that
+// CompletionTracker.RecordCompletion is called when a fresh reconcile
+// (no prior cert Secret) completes cleanly.
+func TestCompletionTracker_RecordedOnHealthyBootstrapReconcile(t *testing.T) {
+	configMap := webhookConfigMapForTracker()
+	r := makeRotationReconciler(t, []client.Object{configMap}, nil)
+	r.WebhookConfigName = "webhook-config"
+	tracker := NewCompletionTracker()
+	r.CompletionTracker = tracker
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if tracker.lastNano.Load() == 0 {
+		t.Error("tracker.lastNano should be non-zero after a healthy bootstrap reconcile")
+	}
+}
+
+// TestCompletionTracker_NotRecordedWhenStagedStuck verifies that
+// CompletionTracker.RecordCompletion is NOT called when the reconciler
+// returns from the staged phase without completing — the "stuck rotation"
+// scenario.
+func TestCompletionTracker_NotRecordedWhenStagedStuck(t *testing.T) {
+	// Mint the old cert with SANs matching the ConfigMap's service reference so
+	// needsCertificateRotation returns "" (no new rotation triggered).
+	oldCertPEM, oldKeyPEM, err := certificates.GenerateSelfSignedCert(
+		[]certificates.ServiceReference{{Name: "webhook-svc", Namespace: "default"}},
+		time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("GenerateSelfSignedCert (old): %v", err)
+	}
+	candidateCertPEM, _, err := certificates.GenerateSelfSignedCert(
+		[]certificates.ServiceReference{{Name: "webhook-svc", Namespace: "default"}},
+		time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("GenerateSelfSignedCert (candidate): %v", err)
+	}
+	// Two-cert bundle puts the Secret in staged phase.
+	bundle := append(append([]byte{}, oldCertPEM...), candidateCertPEM...)
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				RotationPhaseAnnotation:     string(PhaseStaged),
+				RotationStartedAtAnnotation: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{tlsCrtKey: bundle, tlsKeyKey: oldKeyPEM},
+	}
+
+	// Gate has an unpropagated CRD; target cluster has no CRDs →
+	// checkPropagation returns (false, nil) on every pass.
+	gate := rotationgate.New()
+	gate.Publish("test-mr", []string{"some.crd.example.com"})
+
+	configMap := webhookConfigMapForTracker()
+	r := makeRotationReconciler(t, []client.Object{secret, configMap}, nil)
+	r.WebhookConfigName = "webhook-config"
+	r.Gate = gate
+	r.RotationGateTimeout = time.Hour // long enough that the gate does not force-promote
+	tracker := NewCompletionTracker()
+	r.CompletionTracker = tracker
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter > 0 (staged-stuck path), got zero")
+	}
+	if tracker.lastNano.Load() != 0 {
+		t.Error("tracker.lastNano should be 0 when reconcile ends in staged requeue (not yet complete)")
+	}
+}
