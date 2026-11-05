@@ -240,6 +240,30 @@ var (
 		},
 	)
 
+	// StageSuppressedTotal counts reconcile passes in which a time/expiry-
+	// driven rotation trigger (expired or san_mismatch) fired while the
+	// Secret was ALREADY in phase=staged, and the staged candidate already
+	// resolves that trigger — so re-staging was suppressed and the phase
+	// machine was left to drive the staged→active promotion instead.
+	//
+	// This is the guard against the re-stage livelock: `needsCertificateRotation`
+	// evaluates the currently-SERVED leaf (tls.key), which stays expired/mismatched
+	// for the whole staged phase, so without this suppression every reconcile
+	// would re-stage a brand-new candidate, reset rotation-started-at, and never
+	// let the staged cert promote. A sustained non-zero rate is the expected
+	// shape while a rotation driven by an already-expired active leaf is in
+	// flight (one increment per reconcile until promotion); it should fall to
+	// zero once the staged cert is promoted. Labeled by reason so the two
+	// trigger classes can be told apart. Counter, not gauge — the rate is the
+	// signal.
+	StageSuppressedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhook_injector_certificate_stage_suppressed_total",
+			Help: "Total reconcile passes in which re-staging was suppressed because the staged candidate already resolves the time/expiry-driven rotation trigger, labeled by reason (expired|san_mismatch).",
+		},
+		[]string{"reason"},
+	)
+
 	// PhaseTransitionsTotal counts state-machine transitions of the
 	// certificate-rotation phase on the cert Secret. Labels follow the
 	// closed enum {absent, staged, active, pruned}. The pair (from, to)
@@ -277,6 +301,7 @@ func init() {
 		ManagedResourceKeepObjectsViolationsTotal,
 		ManagedResourceUnhealthyTotal,
 		ForceRotationDeferredTotal,
+		StageSuppressedTotal,
 		PhaseTransitionsTotal,
 	)
 }

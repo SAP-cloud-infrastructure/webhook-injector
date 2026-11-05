@@ -1753,3 +1753,272 @@ func TestCompletionTracker_NotRecordedWhenStagedStuck(t *testing.T) {
 		t.Error("tracker.lastNano should be 0 when reconcile ends in staged requeue (not yet complete)")
 	}
 }
+
+// mintCertFor generates a cert/key pair for a specific service reference
+// and validity window via the production generator. A NEGATIVE validity
+// yields a cert whose NotAfter is in the past — i.e. already expired —
+// which is how these tests manufacture the "served leaf is expired" shape
+// without waiting out a real clock. SANs are derived the same way the
+// controller derives them, so a cert minted here matches the services
+// ExtractServiceReferences produces from the test ConfigMap.
+func mintCertFor(t *testing.T, svc certificates.ServiceReference, validity time.Duration) (certPEM, keyPEM []byte) {
+	t.Helper()
+	certPEM, keyPEM, err := certificates.GenerateSelfSignedCert(
+		[]certificates.ServiceReference{svc}, validity)
+	if err != nil {
+		t.Fatalf("GenerateSelfSignedCert: %v", err)
+	}
+	return certPEM, keyPEM
+}
+
+// stagedBundleFingerprint returns the SHA-256 fingerprint of the staged
+// candidate in a cert Secret — the cert in tls.crt whose public key
+// matches tls.staged.key. The livelock tests compare this across a
+// reconcile: a re-stage would mint a fresh candidate and change it, a
+// suppressed stage leaves it identical.
+func stagedBundleFingerprint(t *testing.T, secret *corev1.Secret) [32]byte {
+	t.Helper()
+	cert, err := certificates.LeafCertificate(secret.Data[tlsCrtKey], secret.Data[tlsStagedKeyKey])
+	if err != nil {
+		t.Fatalf("locate staged candidate: %v", err)
+	}
+	return fingerprint(cert)
+}
+
+// webhookConfigMap builds the ConfigMap the reconciler reads a webhook
+// config from. The single service reference (webhook-svc.default) drives
+// the SANs the generated certs must carry.
+func webhookConfigMap() *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "webhook-config", Namespace: "default"},
+		Data: map[string]string{
+			"webhooks.yaml": `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: test-webhook
+webhooks:
+  - name: test.example.com
+    clientConfig:
+      service:
+        name: webhook-svc
+        namespace: default
+        path: /mutate
+    admissionReviewVersions: ["v1"]
+    sideEffects: None`,
+		},
+	}
+}
+
+// stagedSecretExpiredActive builds the exact livelock shape: phase=staged,
+// the SERVED leaf (tls.key) is already expired, and a VALID candidate sits
+// in the bundle under tls.staged.key. This is the Secret
+// needsCertificateRotation keeps flagging as rotationReasonExpired on every
+// reconcile (it keys off the served leaf), while the staged candidate is
+// perfectly healthy.
+func stagedSecretExpiredActive(t *testing.T, svc certificates.ServiceReference, candidateValidity time.Duration, startedAt time.Time) *corev1.Secret {
+	t.Helper()
+	expiredLeaf, expiredKey := mintCertFor(t, svc, -time.Hour) // NotAfter in the past
+	candidateCert, candidateKey := mintCertFor(t, svc, candidateValidity)
+	bundle := append(append([]byte{}, expiredLeaf...), candidateCert...)
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-certs",
+			Namespace: "default",
+			Annotations: map[string]string{
+				RotationPhaseAnnotation:     string(PhaseStaged),
+				RotationStartedAtAnnotation: startedAt.UTC().Format(time.RFC3339),
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			tlsCrtKey:       bundle,
+			tlsKeyKey:       expiredKey, // still serving the expired leaf
+			tlsStagedKeyKey: candidateKey,
+		},
+	}
+}
+
+// TestReconcile_ExpiredActiveLeaf_DoesNotReStage is the regression test for
+// the cert-rotation livelock. With an expired served leaf and a valid
+// staged candidate in phase=staged, needsCertificateRotation returns
+// rotationReasonExpired on every pass (it evaluates the served leaf). Before
+// the fix, each reconcile re-staged: a brand-new candidate replaced the old
+// one and rotation-started-at was reset to now, so the staged cert never got
+// a stable window to propagate/promote and the gate-timeout fallback never
+// fired either — a permanent livelock. The guard must suppress the stage,
+// leaving the candidate fingerprint and started-at UNCHANGED.
+//
+// Propagation is forced to "pending" (a gated CRD that isn't yet in the
+// target cluster) so handleStagedPhase requeues instead of promoting in this
+// same pass — that isolates the suppression assertion from auto-promotion.
+func TestReconcile_ExpiredActiveLeaf_DoesNotReStage(t *testing.T) {
+	svc := certificates.ServiceReference{Name: "webhook-svc", Namespace: "default"}
+	startedAt := time.Now().UTC().Add(-45 * time.Second)
+	secret := stagedSecretExpiredActive(t, svc, time.Hour, startedAt)
+
+	r := makeRotationReconciler(t, []client.Object{secret, webhookConfigMap()}, nil)
+	r.WebhookConfigName = "webhook-config"
+	// Gate on a CRD that doesn't exist in the (empty) target cluster, so
+	// checkPropagation returns "not propagated yet" and the phase machine
+	// requeues without promoting.
+	r.Gate.Publish(rotationgate.Key("default/mr"), []string{"things.example.com"})
+
+	before := readSecret(t, r)
+	wantFP := stagedBundleFingerprint(t, before)
+	wantStartedAt := before.Annotations[RotationStartedAtAnnotation]
+	suppressedBefore := testutilCounterValue(t, metrics.StageSuppressedTotal.WithLabelValues(string(rotationReasonExpired)))
+
+	res, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RequeueAfter <= 0 {
+		t.Errorf("expected a requeue while staged propagation is pending, got %v", res.RequeueAfter)
+	}
+
+	got := readSecret(t, r)
+	if phase := got.Annotations[RotationPhaseAnnotation]; phase != string(PhaseStaged) {
+		t.Fatalf("phase must stay staged (no promote, no re-stage), got %q", phase)
+	}
+	if n := countPEMCerts(t, got.Data[tlsCrtKey]); n != 2 {
+		t.Fatalf("bundle must stay at 2 certs, got %d", n)
+	}
+	if gotFP := stagedBundleFingerprint(t, got); gotFP != wantFP {
+		t.Errorf("staged candidate was re-minted (fingerprint changed) — re-stage was NOT suppressed")
+	}
+	if got.Annotations[RotationStartedAtAnnotation] != wantStartedAt {
+		t.Errorf("rotation-started-at was reset: want %q, got %q — re-stage was NOT suppressed",
+			wantStartedAt, got.Annotations[RotationStartedAtAnnotation])
+	}
+	if delta := testutilCounterValue(t, metrics.StageSuppressedTotal.WithLabelValues(string(rotationReasonExpired))) - suppressedBefore; delta != 1 {
+		t.Errorf("StageSuppressedTotal{expired} should increment by exactly 1, got delta %v", delta)
+	}
+}
+
+// TestReconcile_ExpiredActiveLeaf_PromotesWhenGateOpen is the other half of
+// the fix: suppressing the re-stage must NOT stall the state machine. With
+// an empty gate (no CRDs to wait on), checkPropagation returns true, so the
+// very reconcile that suppresses the stage also promotes staged→active. The
+// expired served leaf is replaced by the (valid) staged key, ending the
+// livelock the right way.
+func TestReconcile_ExpiredActiveLeaf_PromotesWhenGateOpen(t *testing.T) {
+	svc := certificates.ServiceReference{Name: "webhook-svc", Namespace: "default"}
+	secret := stagedSecretExpiredActive(t, svc, time.Hour, time.Now().UTC().Add(-45*time.Second))
+	stagedKey := append([]byte{}, secret.Data[tlsStagedKeyKey]...)
+
+	r := makeRotationReconciler(t, []client.Object{secret, webhookConfigMap()}, nil)
+	r.WebhookConfigName = "webhook-config"
+	// Empty gate => checkPropagation returns true => promotion proceeds.
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := readSecret(t, r)
+	if phase := got.Annotations[RotationPhaseAnnotation]; phase != string(PhaseActive) {
+		t.Fatalf("phase must be active after promotion, got %q", phase)
+	}
+	if string(got.Data[tlsKeyKey]) != string(stagedKey) {
+		t.Errorf("tls.key must be the (valid) staged key after promotion")
+	}
+	if _, present := got.Data[tlsStagedKeyKey]; present {
+		t.Errorf("tls.staged.key must be dropped after promotion")
+	}
+}
+
+// TestReconcile_ExpiredActiveLeaf_StaleStagedCandidate_IsReStaged guards the
+// correctness boundary: suppression applies ONLY while the staged candidate
+// genuinely resolves the trigger. If the staged candidate is ALSO expired,
+// the remedy is not present and we must mint a fresh one — the normal
+// re-stage path. Fingerprint and started-at therefore CHANGE across the
+// reconcile, and StageSuppressedTotal does NOT increment.
+func TestReconcile_ExpiredActiveLeaf_StaleStagedCandidate_IsReStaged(t *testing.T) {
+	svc := certificates.ServiceReference{Name: "webhook-svc", Namespace: "default"}
+	startedAt := time.Now().UTC().Add(-45 * time.Second)
+	// Candidate validity is also negative => the staged candidate is expired too.
+	secret := stagedSecretExpiredActive(t, svc, -time.Minute, startedAt)
+
+	r := makeRotationReconciler(t, []client.Object{secret, webhookConfigMap()}, nil)
+	r.WebhookConfigName = "webhook-config"
+	r.Gate.Publish(rotationgate.Key("default/mr"), []string{"things.example.com"})
+
+	before := readSecret(t, r)
+	oldFP := stagedBundleFingerprint(t, before)
+	oldStartedAt := before.Annotations[RotationStartedAtAnnotation]
+	suppressedBefore := testutilCounterValue(t, metrics.StageSuppressedTotal.WithLabelValues(string(rotationReasonExpired)))
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "webhook-config", Namespace: "default"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := readSecret(t, r)
+	if phase := got.Annotations[RotationPhaseAnnotation]; phase != string(PhaseStaged) {
+		t.Fatalf("phase must still be staged after a genuine re-stage, got %q", phase)
+	}
+	if n := countPEMCerts(t, got.Data[tlsCrtKey]); n != 2 {
+		t.Fatalf("re-stage bundle must be 2 certs, got %d", n)
+	}
+	if newFP := stagedBundleFingerprint(t, got); newFP == oldFP {
+		t.Errorf("stale staged candidate was NOT refreshed (fingerprint unchanged) — suppression fired incorrectly")
+	}
+	if got.Annotations[RotationStartedAtAnnotation] == oldStartedAt {
+		t.Errorf("rotation-started-at should be bumped on a genuine re-stage")
+	}
+	if delta := testutilCounterValue(t, metrics.StageSuppressedTotal.WithLabelValues(string(rotationReasonExpired))) - suppressedBefore; delta != 0 {
+		t.Errorf("StageSuppressedTotal{expired} must NOT increment when the staged candidate is stale, got delta %v", delta)
+	}
+}
+
+// TestStagedCandidateResolves is the focused unit test for the predicate
+// behind the guard, isolated from Reconcile. A healthy staged candidate
+// resolves (suppress); an expired or SAN-mismatched one does not (re-stage);
+// a malformed staged Secret resolves to false (fall through to a fresh stage).
+func TestStagedCandidateResolves(t *testing.T) {
+	svc := certificates.ServiceReference{Name: "webhook-svc", Namespace: "default"}
+	services := []certificates.ServiceReference{svc}
+	r := makeRotationReconciler(t, nil, nil)
+	r.CertRotationThreshold = 0.2
+
+	mkStaged := func(candidateValidity time.Duration, candSvc certificates.ServiceReference) *corev1.Secret {
+		leaf, leafKey := mintCertFor(t, svc, -time.Hour)
+		cand, candKey := mintCertFor(t, candSvc, candidateValidity)
+		return &corev1.Secret{
+			Data: map[string][]byte{
+				tlsCrtKey:       append(append([]byte{}, leaf...), cand...),
+				tlsKeyKey:       leafKey,
+				tlsStagedKeyKey: candKey,
+			},
+		}
+	}
+
+	t.Run("healthy candidate resolves", func(t *testing.T) {
+		if !r.stagedCandidateResolves(mkStaged(time.Hour, svc), services) {
+			t.Errorf("a valid staged candidate must resolve the trigger (suppress re-stage)")
+		}
+	})
+	t.Run("expired candidate does not resolve", func(t *testing.T) {
+		if r.stagedCandidateResolves(mkStaged(-time.Minute, svc), services) {
+			t.Errorf("an expired staged candidate must NOT resolve (allow re-stage)")
+		}
+	})
+	t.Run("SAN-mismatched candidate does not resolve", func(t *testing.T) {
+		other := certificates.ServiceReference{Name: "other-svc", Namespace: "default"}
+		if r.stagedCandidateResolves(mkStaged(time.Hour, other), services) {
+			t.Errorf("a SAN-mismatched staged candidate must NOT resolve (allow re-stage)")
+		}
+	})
+	t.Run("missing tls.staged.key does not resolve", func(t *testing.T) {
+		s := mkStaged(time.Hour, svc)
+		delete(s.Data, tlsStagedKeyKey)
+		if r.stagedCandidateResolves(s, services) {
+			t.Errorf("a Secret with no tls.staged.key must NOT resolve (fall through to fresh stage)")
+		}
+	})
+}

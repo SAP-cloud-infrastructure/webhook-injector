@@ -304,6 +304,29 @@ func (r *WebhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
+	// Re-stage gate for time/expiry-driven triggers. needsCertificateRotation
+	// keys off the currently-SERVED leaf (tls.key). Once rotation has staged a
+	// replacement, that served leaf keeps serving — and keeps being expired or
+	// SAN-mismatched — for the whole staged phase, so the same reason fires on
+	// every reconcile. If we re-stage on each pass we generate a brand-new
+	// candidate, reset rotation-started-at, and the staged cert never gets a
+	// stable window to propagate and promote: a permanent livelock. So when we
+	// are ALREADY staged and the trigger is a time/SAN one whose remedy is the
+	// staged candidate itself, suppress the stage and let the phase machine
+	// drive staged→active instead. This mirrors the force-rotation in-flight
+	// gate above. We do NOT suppress if the staged candidate is itself expired
+	// or SAN-mismatched (stagedCandidateResolves returns false) — a genuinely
+	// stale candidate still deserves a fresh stage. Forced rotations are handled
+	// by the gate above and never reach here with reason==force.
+	if phase == PhaseStaged && (reason == rotationReasonExpired || reason == rotationReasonSANMismatch) {
+		if r.stagedCandidateResolves(secret, services) {
+			metrics.StageSuppressedTotal.WithLabelValues(string(reason)).Inc()
+			logger.Info("Re-stage suppressed: staged candidate already resolves trigger; letting phase machine promote",
+				"reason", reason, "phase", phase)
+			reason = ""
+		}
+	}
+
 	// Rotation trigger fires when the leaf is missing/expired/SAN-mismatched
 	// or the user set the force-rotation annotation. In every case we
 	// (re)stage: append a fresh cert to the bundle and mark phase=staged.
@@ -617,14 +640,25 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 	if err != nil {
 		return rotationReasonExpired, fmt.Errorf("failed to load leaf certificate: %w", err)
 	}
+	return r.certRotationReason(cert, services), nil
+}
 
+// certRotationReason is the pure expiry/SAN predicate shared by
+// needsCertificateRotation (which runs it on the currently-SERVED leaf)
+// and the staged-candidate re-stage guard in Reconcile (which runs it on
+// the not-yet-promoted staged cert). Returns the rotation reason for the
+// given cert against the current service references, or empty string if
+// the cert is healthy. Factored out so the guard evaluates the staged
+// candidate with byte-identical threshold and SAN checks rather than a
+// hand-rolled copy that could drift.
+func (r *WebhookReconciler) certRotationReason(cert *x509.Certificate, services []certificates.ServiceReference) rotationReason {
 	// Check expiry - rotate if past threshold
 	now := time.Now()
 	totalValidity := cert.NotAfter.Sub(cert.NotBefore)
 	remainingValidity := cert.NotAfter.Sub(now)
 
 	if remainingValidity <= 0 {
-		return rotationReasonExpired, nil
+		return rotationReasonExpired
 	}
 
 	// Calculate remaining percentage
@@ -632,7 +666,7 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 
 	// Rotate if below threshold
 	if remainingPercent < r.CertRotationThreshold {
-		return rotationReasonExpired, nil
+		return rotationReasonExpired
 	}
 
 	// Check if SANs match current service references
@@ -649,33 +683,67 @@ func (r *WebhookReconciler) needsCertificateRotation(secret *corev1.Secret, serv
 	// Check if all expected DNS SANs are present
 	for san := range expectedDNS {
 		if !currentDNS[san] {
-			return rotationReasonSANMismatch, nil
+			return rotationReasonSANMismatch
 		}
 	}
 	// Check for extra DNS SANs
 	for san := range currentDNS {
 		if !expectedDNS[san] {
-			return rotationReasonSANMismatch, nil
+			return rotationReasonSANMismatch
 		}
 	}
 
 	// Check if all expected IP SANs are present
 	for ip := range expectedIPs {
 		if !currentIPs[ip] {
-			return rotationReasonSANMismatch, nil
+			return rotationReasonSANMismatch
 		}
 	}
 	// Check for extra IP SANs
 	for ip := range currentIPs {
 		if !expectedIPs[ip] {
-			return rotationReasonSANMismatch, nil
+			return rotationReasonSANMismatch
 		}
 	}
 
-	return "", nil
+	return ""
 }
 
-// buildExpectedSANs builds the expected sets of DNS SANs and IP SANs from service references
+// stagedCandidateResolves answers the question the re-stage guard needs:
+// is the cert currently staged in this Secret (the not-yet-promoted
+// candidate, whose key is tls.staged.key) a genuine remedy for a
+// time/expiry-driven rotation trigger — i.e. is it itself NOT expired and
+// NOT SAN-mismatched against the current service references?
+//
+// The currently-served leaf (tls.key) can stay expired/mismatched for the
+// entire staged phase; needsCertificateRotation keys off that leaf and so
+// keeps returning the same reason on every reconcile. If the staged
+// candidate already fixes it, we must NOT re-stage (that would reset
+// rotation-started-at and replace the candidate every pass — the livelock).
+// But if the staged candidate is ALSO bad (stale candidate, SANs changed
+// again mid-rotation), a genuine re-stage is still warranted, so we return
+// false and let the staging block run.
+//
+// Returns false (do not suppress) on any inability to evaluate the staged
+// candidate — missing tls.staged.key, unparsable bundle, candidate absent
+// from the bundle — so a malformed staged Secret falls through to a fresh
+// stage rather than wedging.
+func (r *WebhookReconciler) stagedCandidateResolves(secret *corev1.Secret, services []certificates.ServiceReference) bool {
+	stagedKey, ok := secret.Data[tlsStagedKeyKey]
+	if !ok || len(stagedKey) == 0 {
+		return false
+	}
+	// The staged candidate is the cert in tls.crt whose public key matches
+	// tls.staged.key (distinct from leafFromSecret, which matches tls.key).
+	candidate, err := certificates.LeafCertificate(secret.Data[tlsCrtKey], stagedKey)
+	if err != nil {
+		return false
+	}
+	// Reuse the exact same threshold/SAN logic as the served-leaf check.
+	// Empty reason means the candidate is healthy -> it resolves the trigger.
+	return r.certRotationReason(candidate, services) == ""
+}
+
 func buildExpectedSANs(services []certificates.ServiceReference) (dns, ips map[string]bool) {
 	dns = make(map[string]bool)
 	ips = make(map[string]bool)
