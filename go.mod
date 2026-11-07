@@ -3,7 +3,7 @@ module github.com/sap-cloud-infrastructure/webhook-injector
 go 1.26.0
 
 require (
-	github.com/andybalholm/brotli v1.2.1
+	github.com/andybalholm/brotli v1.2.7
 	github.com/gardener/gardener/pkg/apis v1.145.0
 	github.com/go-logr/logr v1.4.3
 	github.com/prometheus/client_golang v1.23.2
